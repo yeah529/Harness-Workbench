@@ -1,0 +1,48 @@
+# Dependencies and package artifacts
+node_modules/
+*.tgz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local runtime data
+.dsh/
+cyberpunk-workbench/
+workbench-data/
+data/
+uploads/
+vectors/
+files/
+tmp/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.lance
+*.log
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+auth.json
+credentials.yml
+credentials.yaml
+.credentials.yml
+.credentials.yaml
+settings.local.yml
+settings.local.yaml
+cordis.patch.yml
+*.pem
+*.key
+
+# Development history and local tooling
+.codex/
+.superpowers/
+.cursor/
+.idea/
+.vscode/
+coverage/
+.nyc_output/
+.DS_Store

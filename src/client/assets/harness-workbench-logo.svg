@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 190 74" role="img" aria-labelledby="harness-workbench-title">
+  <title id="harness-workbench-title">Harness Workbench</title>
+  <g fill="var(--cpwb-logo-cyan, #4de8f4)" transform="translate(3 3)">
+    <text x="9" y="39" textLength="166" lengthAdjust="spacingAndGlyphs" font-family="Rajdhani, sans-serif" font-size="39" font-style="italic" font-weight="500">HARNESS</text>
+  </g>
+  <g fill="var(--cpwb-logo-amber, #ffb51b)">
+    <text x="7" y="37" textLength="166" lengthAdjust="spacingAndGlyphs" font-family="Rajdhani, sans-serif" font-size="39" font-style="italic" font-weight="500">HARNESS</text>
+  </g>
+  <path fill="var(--cpwb-logo-cut, #07090f)" d="M43 9h8L37 43h-8zM94 8h7L87 44h-7zM146 8h7l-14 36h-7z"/>
+  <path fill="none" stroke="var(--cpwb-logo-cyan, #4de8f4)" stroke-width="1.5" d="M2 45L28 39M0 49L43 45M159 39L188 31M153 44L190 39"/>
+  <text x="28" y="63" fill="var(--cpwb-logo-cyan, #4de8f4)" font-family="Rajdhani, sans-serif" font-size="11" font-weight="600" letter-spacing="5">WORKBENCH</text>
+</svg>

@@ -1,0 +1,154 @@
+:root {
+  color-scheme: dark;
+  --cpwb-bg: #07090f;
+  --cpwb-surface-base: #07090f;
+  --cpwb-surface-panel: #0c1016;
+  --cpwb-surface-raised: #111720;
+  --cpwb-surface-overlay: #171e28;
+  --cpwb-surface-input: #0a0e14;
+  --cpwb-yellow: #fce700;
+  --cpwb-amber: #ffb51b;
+  --cpwb-cyan: #4de8f4;
+  --cpwb-red: #e64a58;
+  --cpwb-magenta: #ff4965;
+  --cpwb-green: #52d2a5;
+  --cpwb-text: #f1eee6;
+  --cpwb-text-secondary: #aeb8c5;
+  --cpwb-muted: #748296;
+  --cpwb-border: rgba(77, 232, 244, .18);
+  --cpwb-border-strong: rgba(77, 232, 244, .38);
+  --cpwb-amber-soft: rgba(255, 181, 27, .1);
+  --cpwb-cyan-soft: rgba(77, 232, 244, .09);
+  --cpwb-danger-soft: rgba(230, 74, 88, .12);
+  --cpwb-shadow-1: 0 18px 52px rgba(0, 0, 0, .34);
+  --cpwb-shadow-2: 0 30px 90px rgba(0, 0, 0, .58);
+  --cpwb-cut-sm: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 0 100%);
+  --cpwb-cut-lg: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+  --cpwb-code: "SF Mono", "Roboto Mono", Consolas, monospace;
+}
+
+html,
+body {
+  background-color: var(--cpwb-surface-base);
+  color: var(--cpwb-text);
+}
+
+/* Workbench is a visual skin around the native RC.8 state machine. Override
+   public DSH design tokens, not generated component class names. */
+body:has(.cpwb-app-shell) {
+  color-scheme: dark;
+  --dsw-alias-bg-base: var(--cpwb-surface-base);
+  --dsw-alias-bg-layer-1: var(--cpwb-surface-panel);
+  --dsw-alias-bg-layer-2: var(--cpwb-surface-raised);
+  --dsw-alias-bg-layer-3: var(--cpwb-surface-overlay);
+  --dsw-alias-bg-mask-1: rgba(1, 3, 7, .78);
+  --dsw-alias-bg-mask-2: rgba(1, 3, 7, .62);
+  --dsw-alias-bg-overlay: #1d2632;
+  --dsw-alias-border-l1: var(--cpwb-border);
+  --dsw-alias-border-l2: rgba(77, 232, 244, .25);
+  --dsw-alias-border-l2-darkmode-thin: rgba(77, 232, 244, .2);
+  --dsw-alias-border-l3: var(--cpwb-border-strong);
+  --dsw-alias-border-l4: rgba(77, 232, 244, .5);
+  --dsw-alias-brand-primary: var(--cpwb-amber);
+  --dsw-alias-brand-primary-invert: #090b10;
+  --dsw-alias-brand-text: var(--cpwb-amber);
+  --dsw-alias-label-primary: var(--cpwb-text);
+  --dsw-alias-label-primary-bluish: var(--cpwb-text);
+  --dsw-alias-label-primary-dimmed: #d4d8de;
+  --dsw-alias-label-secondary: var(--cpwb-text-secondary);
+  --dsw-alias-label-tertiary: var(--cpwb-muted);
+  --dsw-alias-label-caption: #617085;
+  --dsw-alias-label-dimmed: #4d5868;
+  --dsw-alias-button-primary-fill: var(--cpwb-amber);
+  --dsw-alias-button-primary-hover: #ffd05b;
+  --dsw-alias-button-primary-dimmed: #5d4b22;
+  --dsw-alias-button-info-fill: var(--cpwb-cyan);
+  --dsw-alias-button-info-hover: #82f2fa;
+  --dsw-alias-button-elevated-fill: var(--cpwb-surface-overlay);
+  --dsw-alias-button-floating-fill: var(--cpwb-surface-raised);
+  --dsw-alias-button-floating-hover: #1a2632;
+  --dsw-alias-button-ghost-active-border: var(--cpwb-border-strong);
+  --dsw-alias-button-ghost-active-fill: var(--cpwb-cyan-soft);
+  --dsw-alias-button-ghost-active-hover: rgba(77, 232, 244, .14);
+  --dsw-alias-interactive-bg-hover: var(--cpwb-cyan-soft);
+  --dsw-alias-interactive-bg-hover-accent: rgba(77, 232, 244, .15);
+  --dsw-alias-interactive-bg-active: var(--cpwb-amber-soft);
+  --dsw-alias-interactive-bg-hover-solid: #19222d;
+  --dsw-alias-interactive-bg-hover-danger: var(--cpwb-danger-soft);
+  --dsw-alias-state-business-primary: var(--cpwb-cyan);
+  --dsw-alias-state-business-tertiary: rgba(77, 232, 244, .13);
+  --dsw-alias-state-error-primary: #ff7183;
+  --dsw-alias-state-error-secondary: var(--cpwb-red);
+  --dsw-alias-state-success-primary: var(--cpwb-green);
+  --dsw-alias-state-success-secondary: #72dfbb;
+  --dsw-alias-state-success-tertiary: rgba(82, 210, 165, .12);
+  --dsw-alias-state-warn-primary: var(--cpwb-amber);
+  --dsw-alias-state-warn-secondary: #ffd05b;
+  --dsw-alias-state-warn-tertiary: var(--cpwb-amber-soft);
+  --dsw-alias-markdown-code-block: #080c12;
+  --dsw-alias-markdown-code-block-banner: #0d131c;
+  --dsw-alias-markdown-inline-code: #151c26;
+  --dsw-alias-scrollbar-bg-l1: #263140;
+  --dsw-alias-scrollbar-bg-l2: #303d4d;
+  --dsw-alias-scrollbar-hover-l1: var(--cpwb-cyan);
+  --dsw-alias-scrollbar-hover-l2: var(--cpwb-cyan);
+  --dsw-specific-bubble: #121a24;
+  --dsw-specific-bubble-highlight: rgba(77, 232, 244, .12);
+  --dsw-specific-input-major: var(--cpwb-surface-input);
+  --dsw-specific-menu: var(--cpwb-surface-overlay);
+  --dsw-specific-selector: #141b25;
+  --dsw-specific-sidebar-fill: var(--cpwb-surface-panel);
+  --dsw-specific-sidebar-nav-item-active: var(--cpwb-amber-soft);
+  --dsw-specific-sidebar-nav-item-hover: var(--cpwb-cyan-soft);
+  --dsw-shadow-lv3: var(--cpwb-shadow-2);
+}
+
+body:has(.cpwb-app-shell) [data-slot="conversation"] {
+  color: var(--cpwb-text);
+  background:
+    radial-gradient(circle at 82% 0%, rgba(101, 24, 37, .17), transparent 35%),
+    var(--cpwb-surface-base);
+}
+
+body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"] {
+  color: var(--cpwb-text);
+  border: 1px solid var(--cpwb-border-strong);
+  border-radius: 0;
+  background: var(--cpwb-surface-raised);
+  box-shadow: var(--cpwb-shadow-2);
+  clip-path: var(--cpwb-cut-lg);
+}
+
+/* RC.8 settings selectors and theme cubes otherwise retain light-mode fills
+   when the host preference is "follow system". Keep their semantics native,
+   but make the controls legible inside the Workbench dark shell. */
+body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"]:has(nav button[aria-current]) button[aria-haspopup="menu"] {
+  color: var(--cpwb-text) !important;
+  border-color: var(--cpwb-border-strong) !important;
+  background: var(--cpwb-surface-panel) !important;
+}
+body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"]:has(nav button[aria-current]) button[aria-pressed="false"] {
+  color: var(--cpwb-text-secondary) !important;
+  border-color: var(--cpwb-border) !important;
+  background: var(--cpwb-surface-panel) !important;
+}
+body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"]:has(nav button[aria-current]) button[aria-pressed="true"] {
+  color: #090b10 !important;
+  border-color: var(--cpwb-amber) !important;
+  background: var(--cpwb-amber) !important;
+}
+
+body:has(.cpwb-app-shell) :where(button, a, input, select, textarea):focus-visible,
+:where(.cpwb-btn, .cpwb-tab, .cpwb-toggle, .cpwb-close, .cpwb-x, .cpwb-kb-name, .cpwb-folder-add, .cpwb-section-action, .cpwb-card-new, .cpwb-kcard-new, .cpwb-sidebar-new, .cpwb-sidebar-nav-item, .cpwb-sidebar-recent, .cpwb-sidebar-all):focus-visible {
+  outline: 2px solid var(--cpwb-cyan);
+  outline-offset: 3px;
+}
+
+.cpwb-status { padding: 7px 9px; margin-bottom: 9px; font-size: 11px; border-left: 2px solid currentColor; }
+.cpwb-status-loading { color: var(--cpwb-cyan); }
+.cpwb-status-success { color: var(--cpwb-green); }
+.cpwb-status-error { color: var(--cpwb-magenta); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: 0.001ms !important; }
+}
