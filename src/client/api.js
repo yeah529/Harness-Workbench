@@ -203,6 +203,9 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       run({ projectId, summaryDate }, { signal } = {}) {
         return request({ method: "POST", path: "/summaries/run", body: { projectId, summaryDate }, signal });
       },
+      remove(id, { signal } = {}) {
+        return request({ method: "DELETE", path: "/summaries/" + id, signal });
+      },
     },
 
     automation: {

@@ -11,7 +11,7 @@ export function resolveDshCommand({ dshBin, env = process.env, requireResolve = 
   try {
     return { file: process.execPath, prefixArgs: [requireResolve("@deepseek-ai/dsh/lib/bin.js")] };
   } catch {
-    return { file: env.NPX_BIN || "npx", prefixArgs: ["--yes", "@deepseek-ai/dsh@0.1.0-rc.8"] };
+    return { file: env.NPX_BIN || "npx", prefixArgs: ["--yes", "@deepseek-ai/dsh@0.1.1-rc.2"] };
   }
 }
 

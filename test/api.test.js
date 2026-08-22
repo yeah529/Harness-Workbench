@@ -875,6 +875,13 @@ test("summaries list and run", async (t) => {
 
   res = await fetch(base + "/summaries?projectId=" + p.id);
   assert.equal((await res.json()).length, 1);
+
+  res = await fetch(base + "/summaries/" + summary.id, { method: "DELETE" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { removed: true, id: summary.id });
+
+  res = await fetch(base + "/summaries/" + summary.id, { method: "DELETE" });
+  assert.equal(res.status, 404);
 });
 
 test("summary run returns 501 without a service", async (t) => {
@@ -887,6 +894,28 @@ test("summary run returns 501 without a service", async (t) => {
   });
   assert.equal(res.status, 501);
   assert.equal((await res.json()).error.code, "NOT_IMPLEMENTED");
+});
+
+test("summary generation errors return a stable error envelope without leaking provider details", async (t) => {
+  const logged = [];
+  const { base, repos } = await startApi(t, {
+    services: { runSummary: async () => { throw new Error("private provider failure detail"); } },
+    logger: { error: (error) => logged.push(error) },
+  });
+  const p = repos.projects.create({ name: "P" });
+
+  const res = await fetch(base + "/summaries/run", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ projectId: p.id, summaryDate: "2026-08-17" }),
+  });
+  const body = await res.json();
+
+  assert.equal(res.status, 502);
+  assert.deepEqual(body, { error: { code: "SUMMARY_GENERATION_FAILED", message: "每日总结生成失败，请重试" } });
+  assert.doesNotMatch(JSON.stringify(body), /private provider/);
+  assert.equal(logged.length, 1);
+  assert.match(logged[0].message, /private provider failure/);
 });
 
 test("knowledge-chats CRUD", async (t) => {

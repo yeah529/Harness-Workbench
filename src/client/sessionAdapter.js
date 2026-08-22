@@ -1,6 +1,6 @@
 /**
  * The Workbench owns only session scope metadata. Conversation state remains
- * in the RC.8 Session/Chat stores and is rendered by the standard conversation
+ * in the rc.2 Session/Chat stores and is rendered by the standard conversation
  * kit. These helpers keep Workbench list/paging and command affordances thin
  * adapters over that public DSH face.
  */

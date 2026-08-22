@@ -460,6 +460,22 @@ test("summaries are unique per project and date and upsert is idempotent", async
   assert.equal(repos.summaries.get(first.id).summaryDate, "2026-08-17");
 });
 
+test("summaries remove exactly one persisted record", async (t) => {
+  const dataDir = await createTempDir();
+  t.after(async () => removeTempDir(dataDir));
+  const db = openDatabase({ dataDir });
+  t.after(() => closeDatabase(db));
+  const repos = createRepositories(db);
+  const project = repos.projects.create({ name: "P" });
+  const first = repos.summaries.upsert({ projectId: project.id, summaryDate: "2026-08-17", content: "first", status: "completed" });
+  const second = repos.summaries.upsert({ projectId: project.id, summaryDate: "2026-08-18", content: "second", status: "completed" });
+
+  assert.equal(repos.summaries.remove(first.id).id, first.id);
+  assert.equal(repos.summaries.get(first.id), null);
+  assert.equal(repos.summaries.get(second.id).content, "second");
+  assert.equal(repos.summaries.remove(first.id), null);
+});
+
 test("project automation toggles persist independently and missed runs stay observable", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });

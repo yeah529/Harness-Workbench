@@ -92,7 +92,7 @@ function persistedSessionTitle(events) {
 }
 
 /**
- * Public RC.8 agent/pre-step adapter used by the native ConversationRoot.
+ * Public rc.2 agent/pre-step adapter used by the native ConversationRoot.
  * Retrieval happens after downstream messages are proposed and before the
  * model step. The adapter is deliberately fail-closed: a retrieval failure
  * rejects the step, so the native SessionFace never sends a model request.
@@ -297,7 +297,7 @@ function summarizeTurn(events, firstSeq) {
 
 /**
  * Resolve the default creation route, preset id, and scoped setup for one
- * agent. Interactive model selection belongs exclusively to RC.8 apiproxy;
+ * agent. Interactive model selection belongs exclusively to rc.2 apiproxy;
  * this plugin must not install a second fixed selection listener. The default
  * route is passed as creation options so the durable DSH header/default owns
  * it, while scheduled sessions keep the same creation route and tool fence.
@@ -308,7 +308,12 @@ async function prepareSessionOptions(ctx, { provider, model, cwd, scheduled = fa
   const presets = ctx.get("agentPresets");
   let agentPresetId;
   const setupDisposers = [];
-  if (presets !== undefined) {
+  // Scheduled automations are data-to-text jobs, not interactive coding
+  // sessions. Mounting the default coding preset teaches the model to inspect
+  // the workspace even though the automation tool fence below removes every
+  // tool, which can leak the model's DSML tool protocol as plain assistant
+  // text. Keep the preset exclusively on interactive sessions.
+  if (!scheduled && presets !== undefined) {
     agentPresetId = (await presets.resolve()).id;
   }
   return {
@@ -318,7 +323,7 @@ async function prepareSessionOptions(ctx, { provider, model, cwd, scheduled = fa
       ...(agentPresetId === undefined ? {} : { agentPreset: agentPresetId }),
     },
     setup: async (agentCtx) => {
-      if (presets !== undefined) {
+      if (!scheduled && presets !== undefined) {
         await presets.mount(agentCtx, agentPresetId);
       }
       if (retriever && scope && typeof agentCtx.on === "function") {
@@ -327,9 +332,17 @@ async function prepareSessionOptions(ctx, { provider, model, cwd, scheduled = fa
       }
       if (scheduled) {
         if (typeof agentCtx.tools?.restrict !== "function") {
-          throw new Error("scheduled workbench sessions require the RC.8 scoped tools.restrict seam");
+          throw new Error("scheduled workbench sessions require the rc.2 scoped tools.restrict seam");
         }
-        // RC.8 restrictions apply to inherited model-facing tools. An empty
+        if (typeof agentCtx.systemPrompt?.section === "function") {
+          const dispose = agentCtx.systemPrompt.section({
+            name: "workbench:automation",
+            order: 1000,
+            text: "You are a background Workbench automation writer. Use only the data in the user message. Never inspect the workspace, call tools, or emit tool-call protocols. Return only the requested final user-facing content.",
+          });
+          if (typeof dispose === "function") setupDisposers.push(dispose);
+        }
+        // rc.2 restrictions apply to inherited model-facing tools. An empty
         // allow-list fails closed, so shell/file mutation tools are absent even
         // when the deployment's default preset contains them.
         agentCtx.tools.restrict({ allow: [] });
@@ -345,7 +358,7 @@ async function prepareSessionOptions(ctx, { provider, model, cwd, scheduled = fa
 
 /**
  * Create one workbench DSH session with the Workbench deployment default.
- * RC.8 owns subsequent interactive model changes and durable selection state.
+ * rc.2 owns subsequent interactive model changes and durable selection state.
  *
  * @param {object} ctx - Cordis host context exposing agents/sessions/workspaceRegistry/get.
  * @param {object} [options]
@@ -567,7 +580,7 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
   /**
    * Restore a persisted KB session with the preset the persisted log actually
    * records (never the current default). The durable header is never rewritten:
-   * resume receives no model metadata, so RC.8's persisted creation header and
+   * resume receives no model metadata, so rc.2's persisted creation header and
    * any durable selection events stay authoritative.
    */
   async function resumeWorkbenchSession(sessionId, scope) {

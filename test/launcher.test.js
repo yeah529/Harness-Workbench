@@ -231,7 +231,7 @@ test("launcher CLI consumes only its own flags and preserves DSH args", () => {
 test("default DSH resolution does not require a dsh executable on PATH", () => {
   const command = resolveDshCommand({ requireResolve: () => { throw new Error("not installed"); }, env: { PATH: "/empty" } });
   assert.equal(command.file, "npx");
-  assert.deepEqual(command.prefixArgs, ["--yes", "@deepseek-ai/dsh@0.1.0-rc.8"]);
+  assert.deepEqual(command.prefixArgs, ["--yes", "@deepseek-ai/dsh@0.1.1-rc.2"]);
 });
 
 test("default DSH resolution runs through npx when no global dsh is available", async (t) => {
@@ -248,7 +248,7 @@ test("default DSH resolution runs through npx when no global dsh is available", 
   });
   assert.equal(result.code, 7);
   const record = JSON.parse(await readFile(output, "utf8"));
-  assert.deepEqual(record.argv, ["--yes", "@deepseek-ai/dsh@0.1.0-rc.8", "web", output]);
+  assert.deepEqual(record.argv, ["--yes", "@deepseek-ai/dsh@0.1.1-rc.2", "web", output]);
 });
 
 test("launcher and host resolve the same configurable DSH_HOME data root", () => {

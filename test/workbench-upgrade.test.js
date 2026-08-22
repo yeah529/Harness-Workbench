@@ -16,7 +16,7 @@ import {
   registerKnowledgeBaseReferenceSource,
 } from "../src/client/knowledgeReferences.js";
 import { createWorkbenchRagPreStep, deriveSessionTitle } from "../src/host/sessions.js";
-import { Automation } from "../src/client/Automation.js";
+import { Automation, buildSummaryMarkdown } from "../src/client/Automation.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
 
 function staticStore(overrides = {}) {
@@ -34,6 +34,7 @@ function staticStore(overrides = {}) {
       loadAllSessions: async () => {}, createSchedule: async () => {},
       updateSchedule: async () => {}, deleteSchedule: async () => {},
       runSchedule: async () => {}, runSummary: async () => {},
+      deleteSummary: async () => {},
       updateAutomation: async () => {},
     },
   };
@@ -79,7 +80,7 @@ test("knowledge-base references round-trip and expose only matching knowledge ba
   assert.match(await source.codec.serialize(picked.insert.ref), /^<cpwb_knowledge_base /);
 });
 
-test("knowledge-base reference source registers through the injected RC.8 service face", () => {
+test("knowledge-base reference source registers through the injected rc.2 service face", () => {
   let registered;
   const ctx = {
     inputTriggers: { registerSource(source) { registered = source; return () => {}; } },
@@ -123,6 +124,48 @@ test("schedule UI uses a compact add action and exposes date-time plus recurrenc
   assert.match(html, /每周/);
   assert.match(html, /每月/);
   assert.doesNotMatch(html, /daily 21:00 \/ weekly/);
+});
+
+test("summary UI exposes generation feedback plus download and delete actions", () => {
+  const summary = { id: 9, projectId: 1, summaryDate: "2026-08-22", status: "completed", content: "今日完成接口联调。" };
+  const running = renderToStaticMarkup(React.createElement(Automation, {
+    store: staticStore({ projects: [{ id: 1, name: "智能陪练" }], summaries: [summary], action: { type: "runSummary", status: "running" } }),
+    projectId: 1,
+    view: "summary",
+  }));
+  assert.match(running, /生成中/);
+  assert.match(running, /执行中/);
+  assert.match(running, /aria-label="下载 2026-08-22 每日总结"/);
+  assert.match(running, /aria-label="删除 2026-08-22 每日总结"/);
+
+  const failed = renderToStaticMarkup(React.createElement(Automation, {
+    store: staticStore({ summaries: [summary], action: { type: "runSummary", status: "error", error: { message: "模型不可用" } } }),
+    projectId: 1,
+    view: "summary",
+  }));
+  assert.match(failed, /模型不可用/);
+});
+
+test("summary Markdown download content is UTF-8 friendly and filename-safe", () => {
+  assert.deepEqual(buildSummaryMarkdown({
+    projectName: "智能/陪练:项目",
+    summary: { summaryDate: "2026-08-22", status: "completed", content: "今日完成接口联调。" },
+  }), {
+    filename: "智能-陪练-项目-2026-08-22-每日总结.md",
+    content: "# 智能/陪练:项目 每日总结\n\n- 日期：2026-08-22\n- 状态：已完成\n\n今日完成接口联调。\n",
+  });
+});
+
+test("failed summaries show retry guidance and cannot be downloaded as report content", () => {
+  const html = renderToStaticMarkup(React.createElement(Automation, {
+    store: staticStore({ summaries: [{ id: 9, projectId: 1, summaryDate: "2026-08-22", status: "failed", content: null }] }),
+    projectId: 1,
+    view: "summary",
+  }));
+
+  assert.match(html, /生成失败，请重新生成/);
+  assert.doesNotMatch(html, /下载 2026-08-22 每日总结/);
+  assert.match(html, /删除 2026-08-22 每日总结/);
 });
 
 test("session-list page renders a full-width identity header with its count", () => {

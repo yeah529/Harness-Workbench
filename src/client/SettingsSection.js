@@ -182,7 +182,7 @@ function WorkbenchPanel({ section, settings, store }) {
   );
 }
 
-/** A settings.section contribution rendered by RC.8's native SettingsRoot. */
+/** A settings.section contribution rendered by rc.2's native SettingsRoot. */
 export function WorkbenchSettingsSection({ store, initialActive = "workbench" }) {
   const [active, setActive] = React.useState(initialActive);
   const subscribe = store?.subscribe || (() => () => {});

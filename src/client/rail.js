@@ -111,7 +111,7 @@ export function resolveSlotColumn(slotEl) {
 }
 
 /**
- * Resolve the three RC.8 frame columns through public slot anchors only. The
+ * Resolve the three rc.2 frame columns through public slot anchors only. The
  * returned nodes are the measurable parent columns, never the display:contents
  * slot wrappers and never build-hash classes.
  *

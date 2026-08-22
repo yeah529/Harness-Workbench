@@ -8,6 +8,8 @@ import { createNavigationStore } from "./navigation.js";
 import { WorkbenchShell } from "./WorkbenchShell.js";
 import { registerWorkbenchSettingsSection as registerSettingsSection } from "./settingsSlot.js";
 import { registerKnowledgeBaseReferenceSource } from "./knowledgeReferences.js";
+import { registerModelIndicator } from "./ModelIndicator.js";
+import { registerImageAttachmentButton } from "./ImageAttachmentButton.js";
 
 function injectCss(tagId, css) {
   if (typeof document === "undefined") return;
@@ -39,6 +41,8 @@ function apply(ctx) {
 
   registerWorkbenchSettingsSection(ctx);
   registerKnowledgeBaseReferenceSource(ctx, store);
+  registerImageAttachmentButton(ctx);
+  registerModelIndicator(ctx);
 
   ctx.slots.inject("shell.overlay", function () {
     return ctx.slots.register({
@@ -88,6 +92,7 @@ function apply(ctx) {
           store,
           navigation,
           sessions: ctx.sessions,
+          connection: ctx.connection,
           workspaces: ctx.workspaces,
           createProject,
           createSession,

@@ -33,7 +33,7 @@ body {
   color: var(--cpwb-text);
 }
 
-/* Workbench is a visual skin around the native RC.8 state machine. Override
+/* Workbench is a visual skin around the native rc.2 state machine. Override
    public DSH design tokens, not generated component class names. */
 body:has(.cpwb-app-shell) {
   color-scheme: dark;
@@ -104,6 +104,8 @@ body:has(.cpwb-app-shell) {
 }
 
 body:has(.cpwb-app-shell) [data-slot="conversation"] {
+  --dsw-static-deepseek-500: var(--cpwb-amber);
+  --dsw-static-deepseek-200: #ffd05b;
   color: var(--cpwb-text);
   background:
     radial-gradient(circle at 82% 0%, rgba(101, 24, 37, .17), transparent 35%),
@@ -119,7 +121,7 @@ body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"] {
   clip-path: var(--cpwb-cut-lg);
 }
 
-/* RC.8 settings selectors and theme cubes otherwise retain light-mode fills
+/* rc.2 settings selectors and theme cubes otherwise retain light-mode fills
    when the host preference is "follow system". Keep their semantics native,
    but make the controls legible inside the Workbench dark shell. */
 body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"]:has(nav button[aria-current]) button[aria-haspopup="menu"] {

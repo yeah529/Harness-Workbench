@@ -5,7 +5,7 @@
  * This is the ONLY place the plugin remembers which sessions it created or
  * reopened through POST /api/cpwb/chat/sessions — but that registry is for
  * *scope lookup* only (projectId / knowledgeBaseId / chatId). Message state
- * and input state remain exclusively in RC.8 session services.
+ * and input state remain exclusively in rc.2 session services.
  */
 
 export const WORKBENCH_SESSION_PREFIX = "session-cpwb-";
@@ -84,8 +84,8 @@ function sessionListReady(sessions, sessionId) {
 }
 
 /**
- * Resolve once the freshly-created session id is present in the RC.8 public
- * list snapshot. RC.8 exposes the public `ids`/`byId` projection. The
+ * Resolve once the freshly-created session id is present in the rc.2 public
+ * list snapshot. rc.2 exposes the public `ids`/`byId` projection. The
  * workspaces service uses a separate `items` projection and is handled below.
  * Readiness is observed through the snapshot subscription and has one
  * bounded timeout; every subscription/timer is disposed on settlement.
@@ -117,7 +117,7 @@ export function waitForSessionInList(sessions, sessionId, { timeoutMs = 10000 } 
 /**
  * Wait for the public session binding and workspace projection before open.
  * Host-side attachSession is durable, but the renderer must not select the id
- * until both RC.8 list stores have observed that projection.
+ * until both rc.2 list stores have observed that projection.
  */
 export function waitForSessionReady(sessions, sessionId, { workspaces, timeoutMs = 10000 } = {}) {
   return new Promise((resolve, reject) => {

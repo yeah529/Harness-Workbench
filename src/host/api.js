@@ -543,8 +543,13 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     if (!hasRunSummary) {
       throw new ApiError(501, "NOT_IMPLEMENTED", "summary run service is not available");
     }
-    const result = await services.runSummary({ projectId, summaryDate });
-    ok(res, result);
+    try {
+      const result = await services.runSummary({ projectId, summaryDate });
+      ok(res, result);
+    } catch (cause) {
+      logError(cause);
+      throw new ApiError(502, "SUMMARY_GENERATION_FAILED", "每日总结生成失败，请重试");
+    }
   }
 
   // ----- projects / knowledge-bases / collections -----
@@ -868,6 +873,12 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, repos.summaries.list({ projectId }));
   }
 
+  async function handleSummaryDelete(req, res, { params }) {
+    const id = parseId(params.id);
+    if (!repos.summaries.remove(id)) { notFound(res, "summary not found: " + id); return; }
+    ok(res, { removed: true, id });
+  }
+
   async function handleAutomationGet(req, res, { params }) {
     const projectId = parseId(params.projectId);
     if (!repos.projects.get(projectId)) throw new ApiError(404, "NOT_FOUND", "project not found: " + projectId);
@@ -1042,6 +1053,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     { pattern: "/schedules/:id/run", methods: { POST: handleScheduleRun } },
     { pattern: "/summaries", methods: { GET: handleSummariesList } },
     { pattern: "/summaries/run", methods: { POST: handleSummaryRun } },
+    { pattern: "/summaries/:id", methods: { DELETE: handleSummaryDelete } },
     { pattern: "/projects/:projectId/automation", methods: { GET: handleAutomationGet, PATCH: handleAutomationPatch } },
     { pattern: "/knowledge-chats", methods: { GET: handleKnowledgeChatsList, POST: handleKnowledgeChatCreate } },
     { pattern: "/projects/:projectId/knowledge-bases", methods: { GET: handleProjectKbs } },

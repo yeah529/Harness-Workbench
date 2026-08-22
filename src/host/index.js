@@ -19,7 +19,7 @@ import { createRetriever } from "./retrieval.js";
 import { createIndexQueue } from "./queue.js";
 import { createApi } from "./api.js";
 import { createSessionService } from "./sessions.js";
-import { createScheduler } from "./scheduler.js";
+import { assertAutomationText, createScheduler, isAutomationProtocolLeak } from "./scheduler.js";
 import { resolveDataRoot } from "./config.js";
 import { createWorkbenchSettings } from "./settings.js";
 import { createEmbeddingAdapter } from "./embedding.js";
@@ -44,16 +44,35 @@ function optionalContextService(ctx, name) {
 
 /** Build the host-owned scheduled prompt runner with one release seam. */
 export function createScheduledRunPrompt(sessionService) {
-  return async function runScheduledPrompt({ projectId, prompt }) {
+  return async function runScheduledPrompt({ kind = "schedule", projectId, prompt }) {
     let session = null;
     try {
       session = await sessionService.createSession({ projectId, scheduled: true });
-      const result = await sessionService.submitPrompt({
+      let result = await sessionService.submitPrompt({
         sessionId: session.sessionId,
         projectId,
         question: prompt,
       });
-      return { sessionId: session.sessionId, text: result.outcome?.text ?? "" };
+      if ((kind === "summary" || kind === "todo") && result.outcome?.reason?.kind !== "completed") {
+        throw new Error(`模型${kind === "summary" ? "总结" : "待办"}生成未正常完成`);
+      }
+      let text = result.outcome?.text ?? "";
+      if ((kind === "summary" || kind === "todo") && (text.trim() === "" || isAutomationProtocolLeak(text))) {
+        const requestedOutput = kind === "summary" ? "最终中文总结正文" : "最终待办逐行清单";
+        result = await sessionService.submitPrompt({
+          sessionId: session.sessionId,
+          projectId,
+          question: `上一条响应不是可展示的${requestedOutput}。不要调用任何工具，不要输出 DSML、XML、代码或分析过程；只依据上一条消息已提供的数据，直接输出${requestedOutput}。`,
+        });
+        if (result.outcome?.reason?.kind !== "completed") {
+          throw new Error(`模型${kind === "summary" ? "总结" : "待办"}生成未正常完成`);
+        }
+        text = result.outcome?.text ?? "";
+      }
+      return {
+        sessionId: session.sessionId,
+        text: kind === "summary" || kind === "todo" ? assertAutomationText(text, kind) : text,
+      };
     } catch (error) {
       if (!session?.sessionId) throw error;
       const wrapped = new Error(error instanceof Error ? error.message : String(error));
@@ -174,7 +193,11 @@ function apply(ctx, config = {}) {
           },
           runSchedule: (schedule) => scheduler.runScheduleNow(schedule),
           runSummary: ({ projectId, summaryDate }) => scheduler.runSummary(
-            { id: projectId }, new Date(), summaryDate ?? localDateKey(new Date(), settings.get("timezone")),
+            { id: projectId },
+            new Date(),
+            summaryDate ?? localDateKey(new Date(), settings.get("timezone")),
+            settings.get("timezone"),
+            { force: true },
           ),
         },
       });

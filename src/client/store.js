@@ -773,12 +773,33 @@ export function createWorkbenchStore(api) {
 
     runSummary: async function runSummary({ projectId, summaryDate }) {
       const ac = track(new AbortController());
+      let result;
+      let failure = null;
       try {
-        await runAction("runSummary", () => api.summaries.run({ projectId, summaryDate }, { signal: ac.signal }));
+        result = await runAction("runSummary", () => api.summaries.run({ projectId, summaryDate }, { signal: ac.signal }));
+      } catch (error) {
+        failure = error;
       } finally {
         untrack(ac);
       }
       await refreshProject(projectId, lastToday ?? localDateKey());
+      if (failure) {
+        setState({ action: { type: "runSummary", status: "error", error: toError(failure) } });
+        throw failure;
+      }
+      setState({ action: { type: "runSummary", status: "done", error: null, result } });
+    },
+
+    deleteSummary: async function deleteSummary({ id, projectId }) {
+      const ac = track(new AbortController());
+      let result;
+      try {
+        result = await runAction("deleteSummary", () => api.summaries.remove(id, { signal: ac.signal }), { summaryId: id });
+      } finally {
+        untrack(ac);
+      }
+      await refreshProject(projectId, lastToday ?? localDateKey());
+      setState({ action: { type: "deleteSummary", summaryId: id, status: "done", error: null, result } });
     },
 
     updateAutomation: async function updateAutomation({ projectId, summaryEnabled, nextDayTodosEnabled }) {

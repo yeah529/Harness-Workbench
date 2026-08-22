@@ -117,6 +117,122 @@ test("daily summary prompt includes todo changes, schedule outcomes, session act
   assert.match(prompt, /待办完成情况：/);
   assert.match(prompt, /"done":true/);
   assert.match(prompt, /"completedAt":"2026-08-20T10:00:00.000Z"/);
+  assert.match(prompt, /不要调用任何工具/);
+  assert.match(prompt, /仅输出最终中文总结正文/);
+});
+
+test("daily summary never persists leaked DSML as completed content", async () => {
+  const repos = makeRepos({ projects: [{ id: 1 }] });
+  const scheduler = createScheduler({
+    repos,
+    runPrompt: async () => ({
+      sessionId: "session-summary-invalid",
+      text: '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="bash"></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>',
+    }),
+  });
+
+  await assert.rejects(
+    () => scheduler.runSummary({ id: 1 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-20"),
+    /工具调用协议/,
+  );
+
+  assert.deepEqual(repos.calls.summaries.map((row) => row.status), ["pending", "failed"]);
+  assert.equal(repos.calls.summaries[1].content, null);
+});
+
+test("daily summary rejects flattened thinking text and stores no error as summary content", async () => {
+  const repos = makeRepos({ projects: [{ id: 1 }] });
+  const scheduler = createScheduler({
+    repos,
+    runPrompt: async () => ({ text: "思考：先分析项目。\n最终总结：今日完成联调。" }),
+  });
+
+  await assert.rejects(
+    () => scheduler.runSummary({ id: 1 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-20"),
+    /分析过程/,
+  );
+
+  assert.deepEqual(repos.calls.summaries.map((row) => [row.status, row.content]), [
+    ["pending", null],
+    ["failed", null],
+  ]);
+});
+
+test("failed forced regeneration preserves the previous completed summary", async () => {
+  const previous = { id: 9, projectId: 1, summaryDate: "2026-08-20", status: "completed", content: "上一版有效总结" };
+  const repos = makeRepos({ projects: [{ id: 1 }], summary: previous });
+  const scheduler = createScheduler({ repos, runPrompt: async () => { throw new Error("provider unavailable"); } });
+
+  await assert.rejects(
+    () => scheduler.runSummary({ id: 1 }, at("2026-08-20T21:10:00.000+08:00"), "2026-08-20", "Asia/Shanghai", { force: true }),
+    /provider unavailable/,
+  );
+
+  assert.deepEqual(repos.calls.summaries.map((row) => [row.status, row.content]), [
+    ["pending", null],
+    ["completed", "上一版有效总结"],
+  ]);
+});
+
+test("failed forced regeneration discards a legacy protocol leak instead of restoring it", async () => {
+  const previous = {
+    id: 9,
+    projectId: 1,
+    summaryDate: "2026-08-20",
+    status: "completed",
+    content: '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="bash"></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>',
+  };
+  const repos = makeRepos({ projects: [{ id: 1 }], summary: previous });
+  const scheduler = createScheduler({ repos, runPrompt: async () => { throw new Error("provider unavailable"); } });
+
+  await assert.rejects(
+    () => scheduler.runSummary({ id: 1 }, at("2026-08-20T21:10:00.000+08:00"), "2026-08-20", "Asia/Shanghai", { force: true }),
+    /provider unavailable/,
+  );
+
+  assert.deepEqual(repos.calls.summaries.map((row) => [row.status, row.content]), [
+    ["pending", null],
+    ["failed", null],
+  ]);
+});
+
+test("scheduled summary failure does not stop next-day todo generation", async () => {
+  const repos = makeRepos({ projects: [{ id: 1 }], automation: { 1: { summaryEnabled: true, nextDayTodosEnabled: true } } });
+  const scheduler = createScheduler({
+    repos,
+    clock: () => at("2026-08-20T21:00:00.000+08:00"),
+    runPrompt: async ({ kind }) => {
+      if (kind === "summary") throw new Error("provider failed summary");
+      return { text: "明日继续联调" };
+    },
+  });
+
+  await scheduler.tick();
+
+  assert.deepEqual(repos.calls.summaries.map((row) => [row.status, row.content]), [["pending", null], ["failed", null]]);
+  assert.equal(repos.calls.todos.length, 1);
+  assert.equal(repos.calls.todos[0].title, "明日继续联调");
+});
+
+test("manual summary generation can replace an existing summary for the same day", async () => {
+  const repos = makeRepos({
+    projects: [{ id: 1 }],
+    summary: { id: 9, projectId: 1, summaryDate: "2026-08-20", status: "completed", content: "old" },
+  });
+  const scheduler = createScheduler({ repos, runPrompt: async () => ({ text: "新的最终总结" }) });
+
+  await scheduler.runSummary(
+    { id: 1 },
+    at("2026-08-20T21:10:00.000+08:00"),
+    "2026-08-20",
+    "Asia/Shanghai",
+    { force: true },
+  );
+
+  assert.deepEqual(repos.calls.summaries.map((row) => [row.status, row.content]), [
+    ["pending", null],
+    ["completed", "新的最终总结"],
+  ]);
 });
 
 test("next-day todos compare normalized titles and create only missing unique items", async () => {

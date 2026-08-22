@@ -20,6 +20,9 @@ function verifySources() {
   const session = read("src/client/WorkbenchSessionShell.js");
   const sidebar = read("src/client/WorkbenchSidebar.js");
   const settingsSlot = read("src/client/settingsSlot.js");
+  const imageAttachment = read("src/client/ImageAttachmentButton.js");
+  const modelIndicator = read("src/client/ModelIndicator.js");
+  const subagentDrawer = read("src/client/SubagentDrawer.js");
   const rail = read("src/client/rail.js");
   const theme = read("src/client/theme.css");
   const css = read("src/client/workbench.css");
@@ -32,7 +35,7 @@ function verifySources() {
   if ((index.match(/slots\.inject\(["']shell\.overlay["']/g) || []).length !== 1) {
     throw new Error("Workbench must register exactly one shell.overlay");
   }
-  for (const token of ["cpwb-workbench-shell", "WorkbenchShell", "createNavigationStore"]) requireText(index, token, "index.js");
+  for (const token of ["cpwb-workbench-shell", "WorkbenchShell", "createNavigationStore", "registerImageAttachmentButton", "registerModelIndicator"]) requireText(index, token, "index.js");
   forbid(index, /cpwb-project-home|cpwb-session-shell|cpwb-home-launcher/, "index.js");
   forbid(index, /slots\.inject\(["'](?:conversation\.session|conversation\.view|details)["']/, "index.js");
 
@@ -46,6 +49,9 @@ function verifySources() {
 
   requireText(settingsSlot, 'ctx.slots.inject("settings.section"', "settingsSlot.js");
   forbid(settingsSlot, /children\s*:/, "settingsSlot.js");
+  for (const token of ['ctx.slots.inject("conversation.input.left"', 'accept: "image/*"', "dispatchImageFiles"]) requireText(imageAttachment, token, "ImageAttachmentButton.js");
+  requireText(modelIndicator, 'ctx.slots.inject("conversation.input.right"', "ModelIndicator.js");
+  for (const token of ["createSubagentClient", "ONE-SHOT", "CONTINUABLE", "cpwb-subagent-drawer"]) requireText(subagentDrawer, token, "SubagentDrawer.js");
   for (const token of ["resolveWorkbenchColumns", "computeWorkbenchSeats", "RAIL_STYLE_PROPS", '[data-slot="conversation"]', '[data-slot="details"]']) requireText(rail, token, "rail.js");
 
   for (const token of ["--cpwb-surface-base", "--cpwb-border-strong", "body:has(.cpwb-app-shell)", "--dsw-alias-bg-base", '[role="dialog"][aria-modal="true"]', "prefers-reduced-motion"]) requireText(theme, token, "theme.css");
@@ -150,8 +156,12 @@ async function verifyBundle() {
   if (styles.length !== 2) throw new Error("expected exactly two Workbench stylesheets, got " + styles.length);
   const shell = registrations.filter((entry) => entry.config.name === "shell.overlay");
   const settings = registrations.filter((entry) => entry.config.name === "settings.section");
+  const imageAttachment = registrations.filter((entry) => entry.config.name === "conversation.input.left" && entry.config.id === "cpwb-image-attachment-button");
+  const modelIndicator = registrations.filter((entry) => entry.config.name === "conversation.input.right" && entry.config.id === "cpwb-model-indicator");
   if (shell.length !== 1 || shell[0].config.id !== "cpwb-workbench-shell") throw new Error("bundle must register one unified Workbench shell");
   if (settings.length !== 1 || settings[0].config.id !== "cpwb-workbench-settings") throw new Error("bundle must contribute one native settings section");
+  if (imageAttachment.length !== 1) throw new Error("bundle must add one image picker beside the native rc.2 composer chrome");
+  if (modelIndicator.length !== 1) throw new Error("bundle must add one compact model indicator beside the native selector");
   if (registrations.some((entry) => ["conversation.session", "conversation.view", "details"].includes(entry.config.name))) {
     throw new Error("bundle must not claim native conversation or details slots");
   }

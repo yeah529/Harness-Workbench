@@ -824,6 +824,13 @@ export function createRepositories(db) {
         : db.prepare("SELECT * FROM summaries ORDER BY summary_date").all();
       return rows.map(mapSummary);
     },
+
+    remove(id) {
+      const row = db.prepare("SELECT * FROM summaries WHERE id = ?").get(id);
+      if (!row) return null;
+      db.prepare("DELETE FROM summaries WHERE id = ?").run(id);
+      return mapSummary(row);
+    },
   };
 
   const knowledgeChats = {

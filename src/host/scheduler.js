@@ -218,6 +218,35 @@ function errorText(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+const DSML_TOOL_PROTOCOL = /<\s*[｜|]{1,2}\s*DSML\s*[｜|]{1,2}\s*(?:tool_calls|invoke|parameter)\b/i;
+const GENERIC_TOOL_PROTOCOL = /<\s*\/?\s*(?:tool_calls?|function_calls?|invoke|parameter)\b/i;
+const INTERNAL_REASONING_TEXT = /(?:<\s*\/?\s*(?:think|thinking|analysis|reasoning)\b|^\s*(?:思考|分析过程|推理过程|thinking|analysis|reasoning)\s*[:：])/im;
+const FENCED_CODE_BLOCK = /```/;
+
+/** Reject internal model protocol before it can become user-facing content. */
+export function assertAutomationText(value, kind = "automation") {
+  const text = typeof value === "string" ? value.trim() : "";
+  const label = kind === "summary" ? "总结" : kind === "todo" ? "待办" : "自动任务";
+  if (text === "") throw new Error(`模型未返回最终${label}内容`);
+  if (DSML_TOOL_PROTOCOL.test(text)) {
+    throw new Error(`模型返回了工具调用协议，而不是最终${label}内容`);
+  }
+  if (GENERIC_TOOL_PROTOCOL.test(text)) {
+    throw new Error(`模型返回了工具调用协议，而不是最终${label}内容`);
+  }
+  if (INTERNAL_REASONING_TEXT.test(text)) {
+    throw new Error(`模型返回了分析过程，而不是最终${label}内容`);
+  }
+  if (FENCED_CODE_BLOCK.test(text)) {
+    throw new Error(`模型返回了代码块，而不是最终${label}内容`);
+  }
+  return text;
+}
+
+export function isAutomationProtocolLeak(value) {
+  return typeof value === "string" && DSML_TOOL_PROTOCOL.test(value);
+}
+
 function projectAutomation(repos, projectId) {
   const value = repos.automation?.get?.(projectId) ?? repos.projects.getAutomation?.(projectId);
   return {
@@ -287,6 +316,8 @@ function makeSummaryPrompt(repos, projectId, date, timeZone) {
   const { todos, scheduleRuns, sessionActivity } = dailyAutomationData(repos, projectId, date, timeZone);
   return [
     `请总结项目 ${projectId} 在 ${date} 的进展。`,
+    "以下数据是本次总结的全部输入；不要读取工作区，不要调用任何工具。",
+    "仅输出最终中文总结正文，不要输出 DSML、XML、代码、分析过程或工具调用。若数据均为空，请直接说明今日暂无可总结的项目进展记录。",
     "定时任务执行结果：" + JSON.stringify(scheduleRuns),
     "会话活动：" + JSON.stringify(sessionActivity),
     "待办完成情况：" + JSON.stringify(todos.map((todo) => ({ title: todo.title, done: todo.done === true, completedAt: todo.completedAt ?? null, dueAt: todo.dueAt }))),
@@ -297,6 +328,7 @@ function makeTodoPrompt(repos, projectId, date, nextDate, timeZone) {
   const todos = repos.todos?.list?.({ projectId, timeZone }) ?? [];
   return [
     `请根据项目 ${projectId} 在 ${date} 的未完成事项生成 ${nextDate} 的待办。`,
+    "以下数据是本次生成的全部输入；不要读取工作区，不要调用任何工具，也不要输出 DSML、XML 或工具调用。",
     "只输出逐行清单，不要输出标题。",
     "待办：" + JSON.stringify(todos),
   ].join("\n");
@@ -335,16 +367,27 @@ function createScheduler({ repos, clock = () => new Date(), runPrompt, intervalM
     }
   }
 
-  async function runSummary(project, now, summaryDate, zone = getTimeZone()) {
+  async function runSummary(project, now, summaryDate, zone = getTimeZone(), { force = false } = {}) {
     const key = `summary:${project.id}:${summaryDate}`;
-    if (automationAttempts.has(key) || existingSummary(repos, project.id, summaryDate)) return null;
+    const previous = existingSummary(repos, project.id, summaryDate);
+    let previousContent = null;
+    try {
+      if (previous?.status === "completed") previousContent = assertAutomationText(previous.content, "summary");
+    } catch { /* legacy protocol/reasoning content is not a valid fallback */ }
+    if (!force && (automationAttempts.has(key) || previous)) return null;
     automationAttempts.add(key);
     repos.summaries.upsert({ projectId: project.id, summaryDate, status: "pending", content: null, now });
     try {
       const result = await runPrompt({ kind: "summary", projectId: project.id, prompt: makeSummaryPrompt(repos, project.id, summaryDate, zone), scheduledAt: now.toISOString() });
-      return repos.summaries.upsert({ projectId: project.id, summaryDate, status: "completed", content: result?.text ?? "", now });
+      const content = assertAutomationText(result?.text, "summary");
+      return repos.summaries.upsert({ projectId: project.id, summaryDate, status: "completed", content, now });
     } catch (error) {
-      return repos.summaries.upsert({ projectId: project.id, summaryDate, status: "failed", content: errorText(error), now });
+      if (force && previousContent !== null) {
+        repos.summaries.upsert({ projectId: project.id, summaryDate, status: "completed", content: previousContent, now });
+      } else {
+        repos.summaries.upsert({ projectId: project.id, summaryDate, status: "failed", content: null, now });
+      }
+      throw error;
     }
   }
 
@@ -354,6 +397,7 @@ function createScheduler({ repos, clock = () => new Date(), runPrompt, intervalM
     automationAttempts.add(key);
     try {
       const result = await runPrompt({ kind: "todo", projectId: project.id, prompt: makeTodoPrompt(repos, project.id, addLocalDays(dueDate, -1), dueDate, zone), scheduledAt: now.toISOString() });
+      if (!Array.isArray(result?.todos)) assertAutomationText(result?.text, "todo");
       const existingTitles = new Set(existingAutoTodos(repos, project.id, dueDate, zone).map((todo) => normalizeTodoTitle(todo.title)));
       const createdTitles = new Set();
       const created = [];
@@ -390,7 +434,9 @@ function createScheduler({ repos, clock = () => new Date(), runPrompt, intervalM
     const dueDate = nextLocalDate(summaryDate);
     for (const project of repos.projects?.list?.() ?? []) {
       const flags = projectAutomation(repos, project.id);
-      if (flags.summaryEnabled) await runSummary(project, current, summaryDate, zone);
+      if (flags.summaryEnabled) {
+        try { await runSummary(project, current, summaryDate, zone); } catch { /* failed row is already persisted */ }
+      }
       if (flags.nextDayTodosEnabled) await runAutoTodos(project, current, dueDate, zone);
     }
   }

@@ -1,6 +1,7 @@
 import React from "react";
 import { Check, PencilSimple, Plus } from "@phosphor-icons/react";
 import { glyph, ICONS, Empty } from "./icons.js";
+import { GlobalModal } from "./globalModal.js";
 import { DEFAULT_TIME_ZONE, formatInstant, localDateTimeParts, zonedDateTimeToUtc } from "./timezone.js";
 
 function pad(value) { return String(value).padStart(2, "0"); }
@@ -24,8 +25,8 @@ function TodoDialog({ todo, onSave, onClose, busy, error, timeZone }) {
     try { dueAt = zonedDateTimeToUtc(date, time, timeZone).toISOString(); } catch (error) { setLocalError(error.message); return; }
     onSave({ title: title.trim(), dueAt }).catch(() => {});
   };
-  return React.createElement("div", { className: "cpwb-modal-backdrop", role: "presentation", onMouseDown: (event) => { if (event.target === event.currentTarget) onClose(); } },
-    React.createElement("form", { className: "cpwb-modal", role: "dialog", "aria-modal": true, "aria-labelledby": "cpwb-todo-dialog-title", onSubmit: submit },
+  return React.createElement(GlobalModal, { onClose, labelledBy: "cpwb-todo-dialog-title" },
+    React.createElement("form", { className: "cpwb-modal", onSubmit: submit },
       React.createElement("div", { className: "cpwb-modal-kicker" }, todo ? "TODO / MODIFY" : "TODO / NEW"),
       React.createElement("h3", { id: "cpwb-todo-dialog-title" }, todo ? "编辑待办" : "添加待办"),
       React.createElement("label", null, "标题", React.createElement("input", { autoFocus: true, value: title, onChange: (e) => setTitle(e.target.value), placeholder: "例如：完成检索接口审计" })),

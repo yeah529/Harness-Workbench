@@ -178,7 +178,7 @@ test("standard session kit capability surface preserves dynamic Slot names", () 
     "conversation.input.model",
     "conversation.composer.dock",
   ]) assert.ok(slots.includes(name), name);
-  assert.ok(slots.includes("*") || slots.includes("dynamic"), "unknown extension slots remain delegated to RC.8 SlotRenderer");
+  assert.ok(slots.includes("*") || slots.includes("dynamic"), "unknown extension slots remain delegated to rc.2 SlotRenderer");
 });
 
 test("session runtime actions delegate to the DSH Session face, not a second message store", async () => {
@@ -223,7 +223,7 @@ test("todo wall-clock values use the Workbench IANA timezone, not the browser pr
   assert.equal(formatInstant("2026-07-01T01:30:00.000Z", "America/Los_Angeles"), "2026-06-30 18:30");
 });
 
-test("Workbench session shell is an overlay and leaves RC8 conversation rendering to the native root", () => {
+test("Workbench session shell is an overlay and leaves rc.2 conversation rendering to the native root", () => {
   const calls = [];
   const store = {
     getSnapshot: () => ({
@@ -252,7 +252,7 @@ test("Workbench session shell is an overlay and leaves RC8 conversation renderin
       store,
       renderSlot: (name, props, options) => {
         calls.push({ name, props, options });
-        return React.createElement("div", { "data-rendered-slot": name }, "RC8 VIEW");
+        return React.createElement("div", { "data-rendered-slot": name }, "rc.2 VIEW");
       },
       sessions: { list: { getSnapshot: () => ({ ids: [], byId: {}, current: undefined, phase: "ready" }), subscribe: () => () => {} } },
       createSession: () => {},
@@ -331,7 +331,7 @@ test("production composition does not claim conversation.session or filter nativ
   assert.equal((indexSource.match(/slots\.inject\(["']shell\.overlay["']/g) || []).length, 1);
 });
 
-test("RC8 SlotCore composition keeps native Chat/Trajectory and a dynamic Workbench view switchable", () => {
+test("rc.2 SlotCore composition keeps native Chat/Trajectory and a dynamic Workbench view switchable", () => {
   const core = new SlotCore();
   const nativeRootDisposer = core.register({
     name: "root",

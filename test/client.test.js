@@ -320,6 +320,11 @@ test("api: summaries list/run and knowledge-chats list/create paths", async () =
       return jsonResponse(200, { ok: true });
     }
     if (i === 2) {
+      assert.equal(pathname, "/api/cpwb/summaries/9");
+      assert.equal(init.method, "DELETE");
+      return jsonResponse(200, { removed: true, id: 9 });
+    }
+    if (i === 3) {
       assert.equal(pathname, "/api/cpwb/knowledge-chats");
       return jsonResponse(200, []);
     }
@@ -330,8 +335,58 @@ test("api: summaries list/run and knowledge-chats list/create paths", async () =
   const api = createCpwbApi({ fetchImpl });
   await api.summaries.list({ projectId: 1 });
   await api.summaries.run({ projectId: 1 });
+  await api.summaries.remove(9);
   await api.knowledgeChats.list({ knowledgeBaseId: 2 });
   await api.knowledgeChats.create({ knowledgeBaseId: 2, title: "chat" });
+});
+
+test("store: deleting a summary refreshes the active project's summary list", async () => {
+  let summaries = [{ id: 9, projectId: 1, summaryDate: "2026-08-22", status: "completed", content: "old" }];
+  const fetchImpl = makeFetch(({ url, init }) => {
+    const { pathname } = parse(url);
+    const method = init.method ?? "GET";
+    if (pathname === "/api/cpwb/summaries/9" && method === "DELETE") {
+      summaries = [];
+      return jsonResponse(200, { removed: true, id: 9 });
+    }
+    if (pathname === "/api/cpwb/todos" && method === "GET") return jsonResponse(200, []);
+    if (pathname === "/api/cpwb/schedules" && method === "GET") return jsonResponse(200, []);
+    if (pathname === "/api/cpwb/summaries" && method === "GET") return jsonResponse(200, summaries);
+    return jsonResponse(404, { error: { code: "NOT_FOUND", message: "not found" } });
+  });
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
+  await store.actions.refreshProject(1, "2026-08-22");
+  await store.actions.deleteSummary({ id: 9, projectId: 1 });
+
+  assert.deepEqual(store.getSnapshot().summaries, []);
+  assert.equal(store.getSnapshot().action.type, "deleteSummary");
+  assert.equal(store.getSnapshot().action.status, "done");
+});
+
+test("store: a failed summary generation refreshes the failed row and keeps the action error visible", async () => {
+  const failedSummary = { id: 9, projectId: 1, summaryDate: "2026-08-22", status: "failed", content: null };
+  const fetchImpl = makeFetch(({ url, init }) => {
+    const { pathname } = parse(url);
+    const method = init.method ?? "GET";
+    if (pathname === "/api/cpwb/summaries/run" && method === "POST") {
+      return jsonResponse(502, { error: { code: "SUMMARY_GENERATION_FAILED", message: "每日总结生成失败，请重试" } });
+    }
+    if (pathname === "/api/cpwb/todos" && method === "GET") return jsonResponse(200, []);
+    if (pathname === "/api/cpwb/schedules" && method === "GET") return jsonResponse(200, []);
+    if (pathname === "/api/cpwb/summaries" && method === "GET") return jsonResponse(200, [failedSummary]);
+    return jsonResponse(404, { error: { code: "NOT_FOUND", message: "not found" } });
+  });
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
+
+  await assert.rejects(
+    () => store.actions.runSummary({ projectId: 1, summaryDate: "2026-08-22" }),
+    /每日总结生成失败/,
+  );
+
+  assert.deepEqual(store.getSnapshot().summaries, [failedSummary]);
+  assert.equal(store.getSnapshot().action.type, "runSummary");
+  assert.equal(store.getSnapshot().action.status, "error");
+  assert.equal(store.getSnapshot().action.error.code, "SUMMARY_GENERATION_FAILED");
 });
 
 test("api: non-ok JSON error envelope becomes Error with code/status", async () => {

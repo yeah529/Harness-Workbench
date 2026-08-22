@@ -324,6 +324,18 @@ test("scheduled sessions pin the configured DeepSeek model and restrict inherite
   assert.deepEqual(records.restrict, [{ allow: [] }]);
 });
 
+test("scheduled sessions do not mount the interactive coding preset", async (t) => {
+  const presets = makePresets({ resolvedId: "coding-preset" });
+  const { ctx, records } = makeMockCtx({ presets });
+  const created = await createWorkbenchSession(ctx, { cwd: "/tmp/cpwb", scheduled: true });
+  t.after(() => created.dispose());
+
+  assert.deepEqual(presets.records.resolve, []);
+  assert.deepEqual(presets.records.mount, []);
+  assert.equal(records.create[0].meta.agentPreset, undefined);
+  assert.deepEqual(records.restrict, [{ allow: [] }]);
+});
+
 test("buildKnowledgePrompt emits the exact approved template ending with the user question", () => {
   const question = "原始问题";
   const prompt = buildKnowledgePrompt([SAMPLE()], { question });
@@ -615,6 +627,29 @@ test("submitWorkbenchPrompt sends the question with no fabricated citation when 
   assert.equal(entry.calls.followup.length, 1);
   assert.equal(entry.calls.followup[0].content[0].text, "plain q");
   assert.deepEqual(result.citations, []);
+});
+
+test("submitWorkbenchPrompt returns only final assistant text, never reasoning, tool calls, or tool results", async () => {
+  const { ctx, live } = makeMockCtx();
+  const { sessionId } = await createWorkbenchSession(ctx, { cwd: "/tmp/x" });
+  const entry = live.get(sessionId);
+  entry.agent.followup = (message) => {
+    entry.calls.followup.push(message);
+    const push = (type, data) => entry.session.events.push({ seq: entry.session.events.length, type, data });
+    push("turn/start", { turn: 1 });
+    push("assistant/message", { message: { content: [
+      { type: "reasoning", text: "内部思考内容" },
+      { type: "tool-call", id: "call-1", name: "bash", arguments: "{}" },
+    ] } });
+    push("tool/result", { message: { content: [{ type: "text", text: "工具输出" }] } });
+    push("assistant/message", { message: { content: [{ type: "text", text: "最终总结正文" }] } });
+    push("turn/end", { reason: { kind: "completed" } });
+  };
+
+  const result = await submitWorkbenchPrompt(ctx, { sessionId, question: "生成总结", citations: [] });
+
+  assert.equal(result.outcome.text, "最终总结正文");
+  assert.deepEqual(result.outcome.reason, { kind: "completed" });
 });
 
 test("submitWorkbenchPrompt rejects an unknown session", async () => {
