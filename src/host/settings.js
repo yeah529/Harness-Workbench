@@ -1,5 +1,18 @@
 import { DEFAULT_TIME_ZONE, validateTimeZone } from "./timezone.js";
 
+export const DEFAULT_AUTOMATION_PROMPTS = Object.freeze({
+  summaryPrompt: [
+    "请总结项目 {{projectId}} 在 {{date}} 的进展。",
+    "以下数据是本次总结的全部输入；不要读取工作区，不要调用任何工具。",
+    "仅输出最终中文总结正文，不要输出 DSML、XML、代码、分析过程或工具调用。若数据均为空，请直接说明今日暂无可总结的项目进展记录。",
+  ].join("\n"),
+  todoPrompt: [
+    "请根据项目 {{projectId}} 在 {{date}} 的未完成事项生成 {{nextDate}} 的待办。",
+    "以下数据是本次生成的全部输入；不要读取工作区，不要调用任何工具，也不要输出 DSML、XML 或工具调用。",
+    "只输出逐行清单，不要输出标题。",
+  ].join("\n"),
+});
+
 const DEFAULTS = Object.freeze({
   embedding: {
     provider: "ollama",
@@ -11,6 +24,7 @@ const DEFAULTS = Object.freeze({
   network: { mode: "inherit", noProxy: "" },
   timezone: DEFAULT_TIME_ZONE,
   index: { status: "ready", identity: null, documentCount: 0 },
+  automationPrompts: DEFAULT_AUTOMATION_PROMPTS,
 });
 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }

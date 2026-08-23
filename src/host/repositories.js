@@ -768,6 +768,10 @@ export function createRepositories(db) {
       return mapTodo(db.prepare("SELECT * FROM todos WHERE id = ?").get(id), now);
     },
 
+    remove(id) {
+      return db.prepare("DELETE FROM todos WHERE id = ?").run(id).changes > 0;
+    },
+
     list({ projectId, now = new Date() } = {}) {
       const rows = projectId != null
         ? db.prepare("SELECT * FROM todos WHERE project_id = ?").all(projectId)
@@ -823,6 +827,13 @@ export function createRepositories(db) {
         ? db.prepare("SELECT * FROM summaries WHERE project_id = ? ORDER BY summary_date").all(projectId)
         : db.prepare("SELECT * FROM summaries ORDER BY summary_date").all();
       return rows.map(mapSummary);
+    },
+
+    remove(id) {
+      const row = db.prepare("SELECT * FROM summaries WHERE id = ?").get(id);
+      if (!row) return null;
+      db.prepare("DELETE FROM summaries WHERE id = ?").run(id);
+      return mapSummary(row);
     },
   };
 

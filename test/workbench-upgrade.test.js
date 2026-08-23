@@ -16,8 +16,9 @@ import {
   registerKnowledgeBaseReferenceSource,
 } from "../src/client/knowledgeReferences.js";
 import { createWorkbenchRagPreStep, deriveSessionTitle } from "../src/host/sessions.js";
-import { Automation } from "../src/client/Automation.js";
+import { Automation, buildSummaryMarkdown } from "../src/client/Automation.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
+import { Todos, organizeTodos } from "../src/client/Todos.js";
 
 function staticStore(overrides = {}) {
   const state = {
@@ -34,6 +35,7 @@ function staticStore(overrides = {}) {
       loadAllSessions: async () => {}, createSchedule: async () => {},
       updateSchedule: async () => {}, deleteSchedule: async () => {},
       runSchedule: async () => {}, runSummary: async () => {},
+      deleteSummary: async () => {},
       updateAutomation: async () => {},
     },
   };
@@ -79,7 +81,7 @@ test("knowledge-base references round-trip and expose only matching knowledge ba
   assert.match(await source.codec.serialize(picked.insert.ref), /^<cpwb_knowledge_base /);
 });
 
-test("knowledge-base reference source registers through the injected RC.8 service face", () => {
+test("knowledge-base reference source registers through the injected rc.2 service face", () => {
   let registered;
   const ctx = {
     inputTriggers: { registerSource(source) { registered = source; return () => {}; } },
@@ -123,6 +125,83 @@ test("schedule UI uses a compact add action and exposes date-time plus recurrenc
   assert.match(html, /每周/);
   assert.match(html, /每月/);
   assert.doesNotMatch(html, /daily 21:00 \/ weekly/);
+});
+
+test("todo UI separates completed items and groups pending items by local date status", () => {
+  const todos = [
+    { id: 1, title: "过期", done: false, overdue: true, source: "manual", dueAt: "2026-08-22T02:00:00.000Z", createdAt: "2026-08-20T02:00:00.000Z", completedAt: null },
+    { id: 2, title: "今天", done: false, overdue: false, source: "manual", dueAt: "2026-08-23T10:00:00.000Z", createdAt: "2026-08-20T02:00:00.000Z", completedAt: null },
+    { id: 3, title: "明天", done: false, overdue: false, source: "auto", dueAt: "2026-08-24T10:00:00.000Z", createdAt: "2026-08-20T02:00:00.000Z", completedAt: null },
+    { id: 4, title: "稍后", done: false, overdue: false, source: "manual", dueAt: "2026-08-25T06:00:00.000Z", createdAt: "2026-08-20T02:00:00.000Z", completedAt: null },
+    { id: 5, title: "已经完成", done: true, overdue: false, source: "manual", dueAt: "2026-08-22T02:00:00.000Z", createdAt: "2026-08-20T02:00:00.000Z", completedAt: "2026-08-23T03:00:00.000Z" },
+  ];
+  const input = { timeZone: "Asia/Shanghai", now: new Date("2026-08-23T01:00:00.000Z") };
+
+  assert.deepEqual(organizeTodos(todos, { ...input, view: "pending" }).map((section) => ({
+    key: section.key,
+    label: section.label,
+    ids: section.items.map((item) => item.id),
+  })), [
+    { key: "overdue", label: "已过期", ids: [1] },
+    { key: "2026-08-23", label: "今天，周日", ids: [2] },
+    { key: "2026-08-24", label: "明天，周一", ids: [3] },
+    { key: "2026-08-25", label: "8月25日，周二", ids: [4] },
+  ]);
+  assert.deepEqual(organizeTodos(todos, { ...input, view: "completed" }).flatMap((section) => section.items.map((item) => item.id)), [5]);
+
+  const store = staticStore({ todos });
+  store.actions.updateTodo = async () => {};
+  store.actions.createTodo = async () => {};
+  store.actions.deleteTodo = async () => {};
+  const html = renderToStaticMarkup(React.createElement(Todos, { store, projectId: 1, now: input.now }));
+  assert.match(html, /role="tablist"/);
+  assert.match(html, />待处理<.*>4</);
+  assert.match(html, />已完成<.*>1</);
+  assert.match(html, /cpwb-todo-overdue/);
+  assert.match(html, /aria-label="删除待办 过期"/);
+  assert.doesNotMatch(html, /已经完成/);
+});
+
+test("summary UI exposes generation feedback plus download and delete actions", () => {
+  const summary = { id: 9, projectId: 1, summaryDate: "2026-08-22", status: "completed", content: "今日完成接口联调。" };
+  const running = renderToStaticMarkup(React.createElement(Automation, {
+    store: staticStore({ projects: [{ id: 1, name: "智能陪练" }], summaries: [summary], action: { type: "runSummary", status: "running" } }),
+    projectId: 1,
+    view: "summary",
+  }));
+  assert.match(running, /生成中/);
+  assert.match(running, /执行中/);
+  assert.match(running, /aria-label="下载 2026-08-22 每日总结"/);
+  assert.match(running, /aria-label="删除 2026-08-22 每日总结"/);
+
+  const failed = renderToStaticMarkup(React.createElement(Automation, {
+    store: staticStore({ summaries: [summary], action: { type: "runSummary", status: "error", error: { message: "模型不可用" } } }),
+    projectId: 1,
+    view: "summary",
+  }));
+  assert.match(failed, /模型不可用/);
+});
+
+test("summary Markdown download content is UTF-8 friendly and filename-safe", () => {
+  assert.deepEqual(buildSummaryMarkdown({
+    projectName: "智能/陪练:项目",
+    summary: { summaryDate: "2026-08-22", status: "completed", content: "今日完成接口联调。" },
+  }), {
+    filename: "智能-陪练-项目-2026-08-22-每日总结.md",
+    content: "# 智能/陪练:项目 每日总结\n\n- 日期：2026-08-22\n- 状态：已完成\n\n今日完成接口联调。\n",
+  });
+});
+
+test("failed summaries show retry guidance and cannot be downloaded as report content", () => {
+  const html = renderToStaticMarkup(React.createElement(Automation, {
+    store: staticStore({ summaries: [{ id: 9, projectId: 1, summaryDate: "2026-08-22", status: "failed", content: null }] }),
+    projectId: 1,
+    view: "summary",
+  }));
+
+  assert.match(html, /生成失败，请重新生成/);
+  assert.doesNotMatch(html, /下载 2026-08-22 每日总结/);
+  assert.match(html, /删除 2026-08-22 每日总结/);
 });
 
 test("session-list page renders a full-width identity header with its count", () => {

@@ -1,5 +1,5 @@
 import React from "react";
-import { Books, CalendarCheck, ClockCountdown, Note } from "@phosphor-icons/react";
+import { Books, CalendarCheck, ClockCountdown, Note, Robot } from "@phosphor-icons/react";
 import { getWorkbenchSession } from "./workbenchSessions.js";
 import { useHomeOpen } from "./ProjectHome.js";
 import { Todos } from "./Todos.js";
@@ -16,6 +16,10 @@ import {
   restoreInlineStyle,
 } from "./rail.js";
 import { DrawerDialog, useWorkbenchLayoutMode } from "./responsive.js";
+import { useNativeModelSelectionLabel } from "./ModelIndicator.js";
+import { SubagentDrawer } from "./SubagentDrawer.js";
+
+export { parseNativeModelSelectionLabel } from "./ModelIndicator.js";
 
 export const PROJECT_TOOL_TABS = Object.freeze([
   ["todos", "待办", CalendarCheck],
@@ -66,35 +70,6 @@ function useSessionHeaderSeat(active) {
       restoreInlineStyle(conversationColumn, original);
     };
   }, [active]);
-}
-
-export function parseNativeModelSelectionLabel(value) {
-  const match = typeof value === "string"
-    ? value.match(/^选择模型，当前\s*(.+?)，推理等级\s*(.+)$/)
-    : null;
-  return match ? match[1].trim() + " · " + match[2].trim() : null;
-}
-
-function useNativeModelSelectionLabel(sessionId) {
-  const [label, setLabel] = React.useState(null);
-  React.useEffect(function () {
-    if (typeof document === "undefined") return undefined;
-    const update = function () {
-      const button = document.querySelector('button[aria-label^="选择模型，当前"]');
-      setLabel(parseNativeModelSelectionLabel(button?.getAttribute("aria-label")));
-    };
-    update();
-    if (typeof MutationObserver !== "function") return undefined;
-    const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      attributeFilter: ["aria-label"],
-    });
-    return function () { observer.disconnect(); };
-  }, [sessionId]);
-  return label;
 }
 
 /** Reserve one right-side seat inside the native conversation column. */
@@ -152,11 +127,15 @@ function useProjectRailSeat(projectId) {
   return !nativeDetailsOpen;
 }
 
-/** Native RC.8 ConversationRoot remains the only conversation renderer. */
+/** Native rc.2 ConversationRoot remains the only conversation renderer. */
 export function WorkbenchSessionShell(props) {
   const state = React.useSyncExternalStore(props.store.subscribe, props.store.getSnapshot, props.store.getSnapshot);
   const legacyHomeOpen = useHomeOpen();
-  const sessionSnapshot = readSessionSnapshot(props.sessions);
+  const sessionSnapshot = React.useSyncExternalStore(
+    props.sessions?.list?.subscribe || (() => () => {}),
+    props.sessions?.list?.getSnapshot || (() => readSessionSnapshot(props.sessions)),
+    props.sessions?.list?.getSnapshot || (() => readSessionSnapshot(props.sessions)),
+  );
   const sessionId = props.sessionId ?? sessionSnapshot.current;
   const runtimeEntry = getWorkbenchSession(sessionId);
   const persistedEntry = state.workbenchSessions?.[sessionId];
@@ -173,6 +152,18 @@ export function WorkbenchSessionShell(props) {
   const layoutMode = useWorkbenchLayoutMode(props.layoutMode);
   const projectTriggerRef = React.useRef(null);
   const nativeSelectionLabel = useNativeModelSelectionLabel(sessionId);
+  const [subagentOpen, setSubagentOpen] = React.useState(false);
+  const subagentCatalog = sessionSnapshot?.subagentsByParent?.[sessionId];
+  const subagentCount = Array.isArray(subagentCatalog?.entries)
+    ? subagentCatalog.entries.filter((item) => item?.kind === "child").length
+    : 0;
+
+  React.useEffect(function () {
+    setSubagentOpen(false);
+    if (!visible || !sessionId || typeof props.sessions?.refreshSubagents !== "function") return undefined;
+    props.sessions.refreshSubagents(sessionId).catch(function () {});
+    return undefined;
+  }, [props.sessions, sessionId, visible]);
 
   React.useEffect(function () {
     if (scope?.kind !== "independent" || entry?.title || typeof props.store.actions.loadRecentSessions !== "function") return undefined;
@@ -251,6 +242,13 @@ export function WorkbenchSessionShell(props) {
       React.createElement("strong", null, contextName)),
     React.createElement("div", { className: "cpwb-session-context-meta" },
       React.createElement("small", null, contextDetail),
+      React.createElement("button", {
+        type: "button",
+        className: "cpwb-session-subagent-trigger",
+        onClick: () => setSubagentOpen(true),
+        "aria-label": "打开子智能体活动，共 " + subagentCount + " 个",
+        "aria-expanded": subagentOpen,
+      }, React.createElement(Robot, { size: 16, weight: "duotone", "aria-hidden": true }), React.createElement("span", null, "SUBAGENT"), React.createElement("b", null, String(subagentCount).padStart(2, "0"))),
       React.createElement("em", null, selectionLabel))),
   dockedProjectRail ? projectRail(false) : null,
   drawerProjectRail ? React.createElement("button", {
@@ -267,5 +265,12 @@ export function WorkbenchSessionShell(props) {
     label: "项目工具",
     side: "right",
     triggerRef: projectTriggerRef,
-  }, projectRail(true)) : null);
+  }, projectRail(true)) : null,
+  React.createElement(SubagentDrawer, {
+    open: subagentOpen,
+    parentSessionId: sessionId,
+    connection: props.connection,
+    sessions: props.sessions,
+    onClose: () => setSubagentOpen(false),
+  }));
 }

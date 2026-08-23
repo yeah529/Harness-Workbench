@@ -115,8 +115,8 @@ test("launcher maps token only into child env, applies patch and proxy, preserve
     nodeUseEnvProxy: "1",
     http: "https://proxy.example:8443",
     https: "https://proxy.example:8443",
-    httpLower: "",
-    httpsLower: "",
+    httpLower: "https://proxy.example:8443",
+    httpsLower: "https://proxy.example:8443",
     noProxy: "localhost",
     noProxyLower: "localhost"
   });
@@ -125,7 +125,7 @@ test("launcher maps token only into child env, applies patch and proxy, preserve
 
 test("saved Workbench network settings reach the child, while explicit CLI proxy overrides them", async () => {
   for (const [saved, expected] of [
-    [{ mode: "custom", proxyUrl: "https://saved.example:8443", noProxy: "saved.local" }, { http: "https://saved.example:8443", https: "https://saved.example:8443", noProxy: "saved.local", httpLower: "", httpsLower: "", noProxyLower: "saved.local" }],
+    [{ mode: "custom", proxyUrl: "https://saved.example:8443", noProxy: "saved.local" }, { http: "https://saved.example:8443", https: "https://saved.example:8443", noProxy: "saved.local", httpLower: "https://saved.example:8443", httpsLower: "https://saved.example:8443", noProxyLower: "saved.local" }],
     [{ mode: "direct", noProxy: "direct.local" }, { http: "", https: "", noProxy: "direct.local", httpLower: "", httpsLower: "", noProxyLower: "direct.local" }]
   ]) {
     const dir = await tempDir();
@@ -199,6 +199,8 @@ test("proxy accepts only credential-free HTTP(S) URLs and direct mode clears inh
   assert.equal(env.NO_PROXY, "localhost");
   assert.equal(env.no_proxy, "localhost");
   const custom = buildProxyEnv({ mode: "custom", proxyUrl: "https://proxy.example", noProxy: "custom.local", env: { no_proxy: "old.local" } });
+  assert.equal(custom.http_proxy, "https://proxy.example");
+  assert.equal(custom.https_proxy, "https://proxy.example");
   assert.equal(custom.NO_PROXY, "custom.local");
   assert.equal(custom.no_proxy, "custom.local");
 });
@@ -231,7 +233,7 @@ test("launcher CLI consumes only its own flags and preserves DSH args", () => {
 test("default DSH resolution does not require a dsh executable on PATH", () => {
   const command = resolveDshCommand({ requireResolve: () => { throw new Error("not installed"); }, env: { PATH: "/empty" } });
   assert.equal(command.file, "npx");
-  assert.deepEqual(command.prefixArgs, ["--yes", "@deepseek-ai/dsh@0.1.0-rc.8"]);
+  assert.deepEqual(command.prefixArgs, ["--yes", "@deepseek-ai/dsh@0.1.1-rc.2"]);
 });
 
 test("default DSH resolution runs through npx when no global dsh is available", async (t) => {
@@ -248,7 +250,7 @@ test("default DSH resolution runs through npx when no global dsh is available", 
   });
   assert.equal(result.code, 7);
   const record = JSON.parse(await readFile(output, "utf8"));
-  assert.deepEqual(record.argv, ["--yes", "@deepseek-ai/dsh@0.1.0-rc.8", "web", output]);
+  assert.deepEqual(record.argv, ["--yes", "@deepseek-ai/dsh@0.1.1-rc.2", "web", output]);
 });
 
 test("launcher and host resolve the same configurable DSH_HOME data root", () => {
@@ -295,9 +297,10 @@ test("signal forwarding kills the child and disposes handlers", () => {
   dispose();
 });
 
-test("Codex patch binds only the optional provider credential environment", async () => {
+test("Codex patch binds the optional credential and uses proxy-safe SSE", async () => {
   const patch = await readFile(new URL("../dsh-codex.patch.yml", import.meta.url), "utf8");
   assert.match(patch, /openai-codex:/);
   assert.match(patch, /apiKeyEnv:\s*OPENAI_CODEX_ACCESS_TOKEN/);
+  assert.match(patch, /transport:\s*sse/);
   assert.doesNotMatch(patch, /agent-default-model|gpt-5\.6-luna|deepseek-v4-flash/);
 });

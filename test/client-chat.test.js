@@ -190,7 +190,7 @@ test("waitForSessionInList resolves once the session appears", async () => {
   assert.equal(await p, "s1");
 });
 
-test("waitForSessionInList observes the RC.8 public ids/byId snapshot", async () => {
+test("waitForSessionInList observes the rc.2 public ids/byId snapshot", async () => {
   let state = { ids: [], byId: {}, current: undefined, phase: "ready" };
   const listeners = new Set();
   const sessions = {
@@ -218,7 +218,7 @@ test("waitForSessionInList rejects on timeout", async () => {
   );
 });
 
-test("open waits for RC.8 binding and workspace projection, not only list arrival", async () => {
+test("open waits for rc.2 binding and workspace projection, not only list arrival", async () => {
   let sessionState = { ids: [], byId: {}, current: undefined, phase: "ready" };
   let workspaceState = { items: [], state: "idle", phase: "ready" };
   const sessionListeners = new Set();

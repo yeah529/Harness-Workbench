@@ -109,6 +109,7 @@ test("WorkbenchSettingsSection is a native section component with real controls"
       network: { currentEffective: { mode: "direct" }, nextLaunch: { mode: "custom" }, requiresRestart: true },
       auth: { configured: false, source: null, readOnly: false, canConnect: true, activation: "next-request" },
       index: { status: "ready", counts: { ready: 3 } },
+      automationPrompts: { summaryPrompt: "Custom summary", todoPrompt: "Custom todo" },
     } }),
     actions: { loadSettings: async () => calls.push("loadSettings") },
   };
@@ -132,6 +133,12 @@ test("WorkbenchSettingsSection is a native section component with real controls"
   assert.match(auth, /Codex 快速接入/);
   assert.match(auth, /扫描并接入 Codex/);
   assert.match(auth, /令牌不会发送到浏览器/);
+  const automation = render("automation");
+  assert.match(automation, /每日总结提示词/);
+  assert.match(automation, /次日待办提示词/);
+  assert.match(automation, /Custom summary/);
+  assert.match(automation, /Custom todo/);
+  assert.match(automation, /保存提示词/);
   assert.match(render("workbench"), /DSH credentials/);
 });
 

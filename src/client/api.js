@@ -151,11 +151,14 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       list({ projectId, signal } = {}) { return request({ path: "/todos", query: { projectId }, signal }); },
       create({ projectId, title, dueAt, source }, { signal } = {}) { return request({ method: "POST", path: "/todos", body: { projectId, title, dueAt, source }, signal }); },
       update({ id, title, dueAt, done }, { signal } = {}) { return request({ method: "PATCH", path: "/todos", body: { id, title, dueAt, done }, signal }); },
+      remove(id, { signal } = {}) { return request({ method: "DELETE", path: "/todos/" + id, signal }); },
     },
 
     settings: {
       timezone({ signal } = {}) { return request({ path: "/settings/timezone", signal }); },
       updateTimezone(timezone, { signal } = {}) { return request({ method: "PATCH", path: "/settings/timezone", body: { timezone }, signal }); },
+      automationPrompts({ signal } = {}) { return request({ path: "/settings/automation-prompts", signal }); },
+      updateAutomationPrompts(body, { signal } = {}) { return request({ method: "PATCH", path: "/settings/automation-prompts", body, signal }); },
       embedding({ signal } = {}) { return request({ path: "/settings/embedding", signal }); },
       updateEmbedding(body, { signal } = {}) { return request({ method: "PATCH", path: "/settings/embedding", body, signal }); },
       testEmbedding(body, { signal } = {}) { return request({ method: "POST", path: "/settings/embedding/test", body, signal }); },
@@ -202,6 +205,9 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       },
       run({ projectId, summaryDate }, { signal } = {}) {
         return request({ method: "POST", path: "/summaries/run", body: { projectId, summaryDate }, signal });
+      },
+      remove(id, { signal } = {}) {
+        return request({ method: "DELETE", path: "/summaries/" + id, signal });
       },
     },
 

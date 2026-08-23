@@ -120,11 +120,65 @@ test("scheduled prompt releases its live handle after success", async () => {
   let released = null;
   const runner = createScheduledRunPrompt({
     async createSession() { return { sessionId: "session-scheduled-ok" }; },
-    async submitPrompt() { return { outcome: { text: "ok" } }; },
+    async submitPrompt() { return { outcome: { text: "ok", reason: { kind: "completed" } } }; },
     async release(sessionId) { released = sessionId; },
   });
 
   const result = await runner({ projectId: 7, prompt: "run" });
   assert.deepEqual(result, { sessionId: "session-scheduled-ok", text: "ok" });
   assert.equal(released, "session-scheduled-ok");
+});
+
+test("scheduled summary replaces leaked DSML tool protocol with a final answer", async () => {
+  const questions = [];
+  const replies = [
+    '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="bash"><｜｜DSML｜｜parameter name="command">pwd</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>',
+    "今日暂无可总结的项目进展记录。",
+  ];
+  const runner = createScheduledRunPrompt({
+    async createSession() { return { sessionId: "session-summary-repair" }; },
+    async submitPrompt(input) {
+      questions.push(input.question);
+      return { outcome: { text: replies.shift(), reason: { kind: "completed" } } };
+    },
+    async release() {},
+  });
+
+  const result = await runner({ kind: "summary", projectId: 7, prompt: "summary input" });
+
+  assert.equal(result.text, "今日暂无可总结的项目进展记录。");
+  assert.equal(questions.length, 2);
+  assert.match(questions[1], /不要调用任何工具/);
+  assert.match(questions[1], /最终中文总结正文/);
+});
+
+test("scheduled summary rejects repeated DSML instead of returning it as completed content", async () => {
+  const dsml = '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="bash"></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>';
+  let released = 0;
+  const runner = createScheduledRunPrompt({
+    async createSession() { return { sessionId: "session-summary-invalid" }; },
+    async submitPrompt() { return { outcome: { text: dsml, reason: { kind: "completed" } } }; },
+    async release() { released += 1; },
+  });
+
+  await assert.rejects(
+    () => runner({ kind: "summary", projectId: 7, prompt: "summary input" }),
+    (error) => error.sessionId === "session-summary-invalid" && /工具调用协议/.test(error.message),
+  );
+  assert.equal(released, 1);
+});
+
+test("scheduled summary rejects partial text from a non-completed LLM turn", async () => {
+  const runner = createScheduledRunPrompt({
+    async createSession() { return { sessionId: "session-summary-truncated" }; },
+    async submitPrompt() {
+      return { outcome: { text: "这只是达到 token 上限前的半截内容", reason: { kind: "max-tokens" } } };
+    },
+    async release() {},
+  });
+
+  await assert.rejects(
+    () => runner({ kind: "summary", projectId: 7, prompt: "summary input" }),
+    (error) => error.sessionId === "session-summary-truncated" && /未正常完成/.test(error.message),
+  );
 });
