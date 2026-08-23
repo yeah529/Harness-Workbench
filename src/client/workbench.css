@@ -222,6 +222,7 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
   background: #07090f;
   pointer-events: none;
 }
+.cpwb-app-shell > .cpwb-page-modal-host { pointer-events: auto; }
 .cpwb-global-sidebar {
   --cpwb-logo-cut: #080a10;
   display: flex;
@@ -302,7 +303,8 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
 .cpwb-sidebar-wordmark svg { display: block; width: min(100%, 190px); height: auto; }
 .cpwb-workbench-stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; pointer-events: none; }
 .cpwb-workbench-stage > .cpwb-home,
-.cpwb-workbench-stage > .cpwb-workbench-page { pointer-events: auto; }
+.cpwb-workbench-stage > .cpwb-workbench-page,
+.cpwb-workbench-stage > .cpwb-draft-conversation { pointer-events: auto; }
 .cpwb-workbench-page { position: absolute; inset: 0; overflow: auto; padding: 42px; background: radial-gradient(circle at 75% 0, rgba(96,22,34,.25), transparent 38%), #090a10; }
 .cpwb-workbench-stage > .cpwb-home { grid-template-columns: minmax(0, 1fr); }
 .cpwb-workbench-stage .cpwb-home-footer { left: 0; }

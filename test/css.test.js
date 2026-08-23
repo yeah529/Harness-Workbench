@@ -112,6 +112,17 @@ test("global sidebar keeps recents scrollable while settings and the approved lo
   assert.match(logo, /M2 45L28 39M0 49L43 45M159 39L188 31M153 44L190 39/);
 });
 
+test("top-layer Workbench dialogs remain interactive above the pointer-isolated shell", () => {
+  const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
+  const source = fs.readFileSync(path.resolve(filename), "utf8");
+  const shell = source.match(/\.cpwb-app-shell\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+  const modal = source.match(/\.cpwb-app-shell\s*>\s*\.cpwb-page-modal-host\s*\{([^}]*)\}/)?.[1] ?? "";
+  const draft = source.match(/\.cpwb-workbench-stage\s*>\s*\.cpwb-draft-conversation\s*\{([^}]*)\}/)?.[1] ?? "";
+  assert.match(shell, /pointer-events:\s*none/);
+  assert.match(modal, /pointer-events:\s*auto/);
+  assert.match(draft, /pointer-events:\s*auto/);
+});
+
 test("project new-session action centers its plus icon with the label", () => {
   const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
   const source = fs.readFileSync(path.resolve(filename), "utf8");

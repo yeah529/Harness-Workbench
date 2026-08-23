@@ -7,8 +7,8 @@
  * status (uploading/queued/parsing/embedding/ready/failed/stale) plus n/total
  * progress, reindexes failed/stale documents, unlinks documents from the
  * current scope, and runs pure retrieval returning real citations. It does not
- * generate an answer (that is Task 8) and never fakes upload success: the host
- * remains the authority on format and the 50 MB limit.
+ * keeps retrieval separate from generation and never fakes upload success: the
+ * host remains the authority on format and the 50 MB limit.
  *
  * While the selected knowledge base still has in-flight documents, a single
  * 1500ms setTimeout re-fetches document statuses (cleanup clears the timer);

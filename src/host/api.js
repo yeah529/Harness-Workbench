@@ -600,7 +600,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     const projectId = requirePositiveInt(body, "projectId");
     const project = repos.projects.get(projectId);
     if (!project) throw new ApiError(404, "NOT_FOUND", "project not found: " + projectId);
-    // No summaryDate => pass null and let the Task 9 service decide the local day.
+    // No summaryDate: pass null so the scheduler decides the configured local day.
     const summaryDate = optionalDate(body, "summaryDate");
     if (!hasRunSummary) {
       throw new ApiError(501, "NOT_IMPLEMENTED", "summary run service is not available");
@@ -1088,17 +1088,16 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, { ok: true, ...report });
   }
 
-  // ----- chat sessions / prompts -----
+  // ----- unified chat sessions -----
 
   async function handleChatSessionCreate(req, res) {
     if (!hasSessions) {
       throw new ApiError(501, "NOT_IMPLEMENTED", "session service is not available");
     }
     const body = await readJsonBody(req);
-    const legacyFields = ["projectId", "knowledgeBaseId", "chatId", "resumeSessionId"];
-    if (legacyFields.some((field) => body[field] !== undefined)) {
-      throw new ApiError(422, "INVALID_SCOPE", "use the canonical scope object");
-    }
+    const allowedFields = new Set(["scope", "question", "pinnedSources", "oneShotSources"]);
+    const unknownField = Object.keys(body).find((field) => !allowedFields.has(field));
+    if (unknownField) throw new ApiError(422, "INVALID_FIELD", "unknown field: " + unknownField);
     const input = {
       scope: normalizeSessionScope(body.scope),
       question: requireString(body, "question"),

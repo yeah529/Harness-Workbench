@@ -226,7 +226,7 @@ function LinkedProjectsPanel({ knowledgeBaseId, state, store }) {
 /** Native rc.2 ConversationRoot remains the only conversation renderer. */
 export function WorkbenchSessionShell(props) {
   const state = React.useSyncExternalStore(props.store.subscribe, props.store.getSnapshot, props.store.getSnapshot);
-  const legacyHomeOpen = useHomeOpen();
+  const homeOpenSnapshot = useHomeOpen();
   const sessionSnapshot = React.useSyncExternalStore(
     props.sessions?.list?.subscribe || (() => () => {}),
     props.sessions?.list?.getSnapshot || (() => readSessionSnapshot(props.sessions)),
@@ -244,7 +244,7 @@ export function WorkbenchSessionShell(props) {
   const [activeTool, setActiveTool] = React.useState(function () {
     return scope?.kind === "project" ? "todos" : scope?.kind === "knowledge_base" ? "documents" : "context";
   });
-  const visible = props.open === undefined ? !legacyHomeOpen : props.open;
+  const visible = props.open === undefined ? !homeOpenSnapshot : props.open;
   const scopeKey = scope?.kind ? scope.kind + ":" + String(scope.id ?? "") : null;
   const contextSeatAvailable = useContextRailSeat(scopeKey);
   useSessionHeaderSeat(visible && Boolean(sessionId?.startsWith?.("session-cpwb-")));

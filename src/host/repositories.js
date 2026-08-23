@@ -165,9 +165,9 @@ const CONTEXT_SOURCE_KINDS = new Set(["knowledge_base", "workspace_file", "uploa
 const CONTEXT_MODES = new Set(["pinned", "disabled"]);
 const SESSION_LIFECYCLE_STATUSES = new Set(["draft_failed", "active"]);
 
-function normalizeSessionScope(scope, legacyKind, legacyId) {
-  const kind = scope?.kind ?? legacyKind;
-  const rawId = scope && Object.hasOwn(scope, "id") ? scope.id : scope?.scopeId ?? legacyId;
+function normalizeSessionScope(scope) {
+  const kind = scope?.kind;
+  const rawId = scope?.id;
   if (!SESSION_SCOPE_KINDS.has(kind)) throw new TypeError("invalid session scope kind");
   if (kind === "independent") {
     if (rawId !== undefined && rawId !== null) throw new TypeError("independent scope cannot have an id");
@@ -333,32 +333,13 @@ export function createRepositories(db) {
       return this.get(sessionId);
     },
 
-    // Transitional internal write used by existing host callers until Task 2
-    // converts them to create/update lifecycle operations.
-    upsert({ sessionId, scope, scopeKind, scopeId, provider = null, model = null, reasoningEffort = null, title = null, lifecycleStatus = "active", now = new Date() }) {
-      if (typeof sessionId !== "string" || sessionId.trim() === "") throw new TypeError("sessionId is required");
-      const normalizedScope = normalizeSessionScope(scope, scopeKind, scopeId);
-      if (!SESSION_LIFECYCLE_STATUSES.has(lifecycleStatus)) throw new TypeError("invalid session lifecycle status");
-      const iso = nowIso(now);
-      db.prepare(
-        "INSERT INTO workbench_sessions " +
-          "(session_id, scope_kind, scope_id, provider, model, reasoning_effort, title, lifecycle_status, created_at, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-          "ON CONFLICT(session_id) DO UPDATE SET " +
-          "scope_kind = excluded.scope_kind, scope_id = excluded.scope_id, " +
-          "provider = excluded.provider, model = excluded.model, reasoning_effort = excluded.reasoning_effort, " +
-          "title = COALESCE(workbench_sessions.title, excluded.title), lifecycle_status = excluded.lifecycle_status, updated_at = excluded.updated_at",
-      ).run(sessionId, normalizedScope.kind, normalizedScope.id, provider, model, reasoningEffort, title, lifecycleStatus, iso, iso);
-      return this.get(sessionId);
-    },
-
     get(sessionId) {
       const row = db.prepare(WORKBENCH_SESSION_SELECT + "WHERE ws.session_id = ?").get(sessionId);
       return row ? mapWorkbenchSession(row) : null;
     },
 
     list({ scopeKind, scopeId, lifecycleStatus = null, limit = 100, offset = 0 }) {
-      const normalizedScope = normalizeSessionScope(null, scopeKind, scopeId);
+      const normalizedScope = normalizeSessionScope({ kind: scopeKind, id: scopeId });
       if (lifecycleStatus != null && !SESSION_LIFECYCLE_STATUSES.has(lifecycleStatus)) throw new TypeError("invalid session lifecycle status");
       const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
       const safeOffset = Math.max(0, Number(offset) || 0);

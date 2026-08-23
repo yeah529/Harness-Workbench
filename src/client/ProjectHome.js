@@ -132,8 +132,8 @@ function ProjectCard({ project, index, enterProject, busyId, setBusyId, setError
 export function ProjectHome(props) {
   const store = props.store;
   const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
-  const legacyOpen = useHomeOpen();
-  const open = props.open === undefined ? legacyOpen : props.open;
+  const homeOpenSnapshot = useHomeOpen();
+  const open = props.open === undefined ? homeOpenSnapshot : props.open;
   const homeStyle = useHomeOverlayStyle(open);
   const [busyId, setBusyId] = React.useState(null);
   const [enterError, setEnterError] = React.useState(null);

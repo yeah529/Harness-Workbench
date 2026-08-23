@@ -10,7 +10,9 @@
   "files": [
     "bin",
     "lib",
+    "src/client/assets/harness-workbench-logo.svg",
     "src/host",
+    "src/launcher",
     "scripts/build.mjs",
     "scripts/install.sh",
     "scripts/reset-demo.mjs",

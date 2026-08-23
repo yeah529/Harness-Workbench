@@ -1417,16 +1417,14 @@ test("session context API reads, updates, and removes source overrides", async (
   assert.deepEqual(fake.calls.contextRemove, [{ sessionId: "session-1", source: { kind: "knowledge_base", id: "2" } }]);
 });
 
-test("unified session API rejects legacy fields and removes /chat/prompts", async (t) => {
+test("unified session API rejects fields outside the canonical contract", async (t) => {
   const { base } = await startApi(t, { sessions: makeFakeSessionService() });
-  let res = await fetch(base + "/chat/sessions", {
+  const res = await fetch(base + "/chat/sessions", {
     method: "POST", headers: JSON_HEADERS,
-    body: JSON.stringify({ projectId: 1, question: "legacy" }),
+    body: JSON.stringify({ owner: 1, question: "unknown field" }),
   });
   assert.equal(res.status, 422);
-  assert.equal((await res.json()).error.code, "INVALID_SCOPE");
-  res = await fetch(base + "/chat/prompts", { method: "POST", headers: JSON_HEADERS, body: "{}" });
-  assert.equal(res.status, 404);
+  assert.equal((await res.json()).error.code, "INVALID_FIELD");
 });
 
 test("session activation returns 501 when the unified session service is unavailable", async (t) => {

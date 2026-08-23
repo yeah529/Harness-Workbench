@@ -177,10 +177,9 @@ test("reset-demo preserves sibling workspaces, sessions, projects, and global se
       now: new Date("2026-08-21T04:00:00.000Z"),
     });
     repositories.settings.set("network", { mode: "direct" }, new Date("2026-08-21T04:00:00.000Z"));
-    repositories.workbenchSessions.upsert({
+    repositories.workbenchSessions.create({
       sessionId: "keep-session",
-      scopeKind: "project",
-      scopeId: sibling.id,
+      scope: { kind: "project", id: sibling.id },
       provider: "deepseek-official",
       model: "deepseek-v4-flash",
       now: new Date("2026-08-21T04:00:00.000Z"),

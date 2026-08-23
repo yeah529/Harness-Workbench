@@ -4,51 +4,73 @@
   <img src="./src/client/assets/harness-workbench-logo.svg" alt="Harness Workbench" width="380">
 </p>
 
-<p align="center">
-  面向 DeepSeek Harness 的项目化、赛博朋克风格智能工作台。
-</p>
+<p align="center">面向 DeepSeek Harness 的项目化、本地优先智能工作台。</p>
 
-<p align="center">
-  <a href="./README.md">English</a> · 简体中文
-</p>
+<p align="center"><a href="./README.md">English</a> · 简体中文</p>
 
 > [!IMPORTANT]
-> 当前版本面向 **DeepSeek Harness 0.1.0-rc.8**。DSH 仍处于候选版本阶段，升级 DSH 前请先验证接口兼容性。
+> 当前版本锁定 **DeepSeek Harness 0.1.1-rc.2**。DSH 仍处于候选版本阶段，升级前应重新运行完整检查与隔离 Web 冒烟。
 
-Harness Workbench 在 DSH Web 客户端上增加项目卡片、原生会话、本地知识库、待办、定时任务和每日项目自动化。它保留 DSH 会话引擎作为唯一真相源，在其外层提供面向项目的工作空间。
+Harness Workbench 在 DSH 原生会话运行时外增加项目、知识库、自动化和本地检索层。项目会话、知识库会话和独立会话使用同一套会话模型；消息、流式输出、模型切换、工具、审批、Files API、Chat/Trajectory 和子智能体仍由 DSH 作为唯一真相源。
 
 ## 核心能力
 
-- 项目卡片首页，支持新建、重命名、删除和继续最近会话。
-- 项目内三联布局：左侧导航、中间 DSH 原生会话、右侧项目工具。
-- 支持从首页或知识库创建不隶属于项目的独立会话。
-- 最近会话可统一切换项目、知识库和独立会话。
-- 项目待办必须选择预计完成日期和时间，支持编辑、完成和逾期提醒。
-- 项目定时任务支持一次性、每日、每周和每月执行。
-- 每日 21:00 自动生成项目总结和次日待办，可按项目分别开关。
-- 本地 RAG 知识库支持文档上传、向量化、检索、重建和删除。
-- 自适应赛博朋克风格界面，支持键盘操作、低动态效果和透明度降级。
+- 统一三类会话：项目、知识库、独立会话。
+- 一个项目或知识库可拥有多个会话；独立会话不要求绑定任何容器。
+- 一个项目可以关联多个知识库。
+- 会话可固定知识库、Workspace 文件、上传文件或其他会话作为上下文。
+- 左侧先显示当前容器的会话，再显示其他最近会话；底部设置与 Harness Workbench SVG 常驻。
+- 中间完整保留 DSH 原生会话能力。
+- 右侧工具随会话类型变化，不把项目能力混入独立会话。
+- 本地 RAG 支持 Ollama 与 OpenAI-compatible Embedding API。
+- 项目待办、定时任务、每日总结和次日待办统一使用 Workbench 全局时区，默认 `Asia/Shanghai`。
+- 自适应赛博朋克界面，支持桌面、平板和手机布局。
 
-## 架构边界
+## 会话归属与信息结构
 
-Workbench 不替换 DSH 的会话运行时。
+每个 Workbench 会话只有一个标准归属：
 
-| 能力 | 负责方 |
-| --- | --- |
-| 消息、流式输出、对话/轨迹、模型与推理等级、附件、工具、审批、队列、重试、压缩 | DSH 原生会话运行时 |
-| 项目、会话范围、待办、定时任务、总结、知识库元数据、SQLite、向量检索 | Harness Workbench |
-| 生成模型凭据和 Provider 配置 | DSH 设置与 credentials |
-| Embedding Provider 和索引配置 | Workbench 设置；密钥通过 DSH credentials 保存 |
+| 会话类型 | 默认继承上下文 | 右侧工具 |
+| --- | --- | --- |
+| 项目会话 | 项目 Workspace 文件、当前关联的全部知识库 | 待办、定时任务、关联知识库、每日总结 |
+| 知识库会话 | 当前知识库中全部可用文档 | 文档、索引、关联项目、全局定时 |
+| 独立会话 | 默认不继承容器上下文 | 上下文、文件、Subagent、全局定时 |
+
+项目和知识库关系变化后，继承上下文会动态更新。用户手动固定的来源在仍然有效时会继续保留。来源被删除后会显示为“不可用”，但不会阻塞其他上下文。
+
+新建会话在第一条有效消息发送前只存在于浏览器本地。只有第一条非空消息提交时才创建 DSH 原生会话；首次请求失败会保留原文和草稿状态，重试不会重复创建会话。
+
+## DSH 原生能力边界
+
+Workbench 不替换 `ConversationRoot`，不接管 `conversation.session`、`conversation.view` 或原生详情 Slot。以下能力继续由 rc.2 standard session kit 提供：
+
+- 消息历史、实时流式输出；
+- 模型与 reasoning 等级切换；
+- Files API、图片附件、`@file` 与 `@session`；
+- 权限、工具、审批、命令、队列/steer、停止与重试；
+- Chat/Trajectory、compaction、统计与动态 Slot 扩展；
+- Subagent 目录、历史、追问和中断。
+
+Workbench 只通过 DSH 公开组合接口增加知识库引用、项目范围和检索上下文。
 
 ## 运行要求
 
 - macOS 或 Linux
 - Node.js `>=22.5.0`
-- DeepSeek Harness `0.1.0-rc.8`
-- 默认本地向量化方案需要 Ollama
-- 已在 DSH 中配置可用的生成模型 Provider
+- DeepSeek Harness `0.1.1-rc.2`
+- 已配置可用的 DSH 生成模型 Provider
+- 使用默认本地向量化方案时需要 Ollama
 
-默认推荐生成模型为 `deepseek-official/deepseek-v4-flash`。默认本地向量模型为 `qwen3-embedding:0.6b`，维度 1024。二者均可在设置中修改。
+默认推荐：
+
+```text
+生成 Provider：deepseek-official
+生成模型：    deepseek-v4-flash
+向量模型：    qwen3-embedding:0.6b
+向量维度：    1024
+```
+
+运行中的模型与推理等级最终由 DSH 控制。Workbench 只提供首次默认值，并在界面中显示原生会话当前选择。
 
 ## 快速开始
 
@@ -59,7 +81,7 @@ npm ci
 npm run build
 ```
 
-准备默认本地向量模型：
+准备默认向量模型：
 
 ```bash
 ollama serve
@@ -73,101 +95,76 @@ ollama pull qwen3-embedding:0.6b
 dsh web
 ```
 
-安装脚本会把当前目录链接到 DSH Web Profile，并确保只有一条 `dsh-cyberpunk-workbench` 插件注册。发现无关的同名路径或重复注册时会停止，不会静默覆盖。
-
 也可以使用项目自带启动器：
 
 ```bash
 node ./bin/dsh-workbench.js web
 ```
 
-如果已通过 npm 安装，则可使用：
+npm 安装后可直接使用：
 
 ```bash
 dsh-workbench web
 ```
 
-## 知识库
+## Proxy 与 Codex 接入
 
-默认通过 Ollama 在本地完成文档向量化。Workbench 设置还支持 OpenAI-compatible Embedding API，并允许配置模型和向量维度。
-
-支持的内容包括：
-
-- TXT、Markdown、HTML
-- DOCX、PPTX、XLSX
-- JavaScript、TypeScript、JSX、TSX
-- JSON、YAML、Python、Java、Go、Rust
-- C、C++、头文件、CSS、SQL、Shell
-
-单文件上传上限为 50 MiB，解压后文本上限为 20 MiB。删除知识库时，会同步删除它拥有的文档、分块、向量索引和知识库会话。项目关联知识库仅表示可供该项目检索，不会把知识库转为项目私有。
-
-在会话输入中，`@` 引用可索引受支持的会话来源、关联知识库，以及 DSH host 授权访问的当前工作目录文件。
-
-## 项目与自动化
-
-项目绑定一个 DSH Workspace。删除项目时，会删除 Workbench 中的项目元数据、待办、定时任务、总结、项目会话和项目独占索引文档；**不会删除真实文件夹或 DSH Workspace**，也不会删除共享知识库的文档。
-
-手动创建待办时必须选择日期和时间。自动生成的次日待办默认截止到次日 18:00。定时任务支持：
-
-- 一次性：指定日期和时间
-- 每日：指定本地时间
-- 每周：指定星期和本地时间
-- 每月：指定每月日期和本地时间
-
-Workbench 全局时区同时控制定时任务、待办截止时间、每日总结、次日待办和界面时间显示。默认值是 `Asia/Shanghai`，也可填写其他有效 IANA 时区。
-
-## Proxy 设置
-
-Proxy 作为“下次启动”配置保存，由 Workbench 启动器应用。设置页会区分当前进程实际生效的网络环境与下次启动配置。
-
-示例：
+Workbench 设置中保存的 Proxy 属于“下次启动”配置，不会改变当前已经运行的 DSH 进程。修改后请使用 Workbench 启动器重启：
 
 ```bash
-dsh-workbench web --proxy-mode=custom \
-  --http-proxy=http://127.0.0.1:7890 \
-  --https-proxy=http://127.0.0.1:7890
+dsh-workbench web \
+  --proxy-mode=custom \
+  --proxy-url=http://127.0.0.1:7897 \
+  --no-proxy=localhost,127.0.0.1
 ```
 
-```bash
-NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:7890 dsh-workbench web
-```
-
-保存 Proxy 不代表当前进程已经切换网络。修改后请通过 Workbench 启动器重启 DSH。
-
-## 可选 Codex 认证桥接
-
-Codex 桥接默认关闭。普通启动不会扫描 `~/.codex/auth.json`。
-
-首次接入时，可以打开 **DSH 设置 → Workbench → Codex**，点击 **扫描并接入 Codex**。只有点击后才会读取 `${CODEX_HOME}/auth.json`。也可以在启动器中显式开启：
+Codex 凭据桥接默认关闭。首次使用可以点击 **DSH 设置 → Workbench → Codex → 扫描并接入 Codex**，或显式开启启动器桥接：
 
 ```bash
 dsh-workbench web --codex-auth=auto
 ```
 
-或只为子进程显式传入 Access Token：
+Token 不会写入 Workbench SQLite、浏览器状态、日志、命令行参数、测试数据或导出。设置页接入会通过 DSH credentials 保存凭据引用；启动器模式只向子进程注入 `OPENAI_CODEX_ACCESS_TOKEN`。
 
-```bash
-CODEX_ACCESS_TOKEN="..." dsh-workbench web
-```
+## 知识库与向量检索
 
-安全边界：
+支持 TXT、Markdown、HTML、DOCX、PPTX、XLSX 及常见代码文件。单文件上限 50 MiB，解析后的文本上限 20 MiB。
 
-- Token 只注入 DSH 子进程环境。
-- Token 不写入本仓库、Workbench SQLite、浏览器存储、日志或命令行参数。
-- 前端只接收脱敏状态和 credential 引用。
-- 本地 Codex 缓存桥接属于兼容能力，不是公开的 Codex 认证 API，缓存格式变化后可能需要适配。
+Embedding 可以使用本地 Ollama 或 OpenAI-compatible API。配置必须先完成连接测试才能保存，修改后可以重建受影响的全部索引。
+
+删除知识库会删除 Workbench 自有且不再共享的文档副本、分块与向量；不会删除外部原文件，也不会删除本地 embedding 模型。
+
+## 项目自动化
+
+项目拥有自己的待办、定时任务、每日总结和次日待办。
+
+- 手动待办必须选择预计完成日期和时间；
+- 自动待办默认截止到次日 18:00；
+- 待办按日期与状态分组，支持过期标识、编辑、完成、查询已完成和删除；
+- 定时任务支持一次、每日、每周、每月；
+- 全局定时入口支持按项目、状态和触发日期筛选；
+- 每日 21:00 总结读取该项目当天全部最终会话正文，不把 thinking、tool call 或错误信息当作总结；
+- 总结和自动待办提示词可以在 Workbench 设置中修改。
+
+## 安全删除项目与知识库
+
+删除项目或知识库前，弹窗会先显示所属会话数、关系数、文档数和独占索引数。
+
+默认推荐选择“保留会话并移为独立会话”。容器继承的来源会移除，仍然有效的手动固定来源会保留。删除项目不会删除磁盘目录，也不会删除 DSH Workspace 定义。
+
+“永久删除所属会话”只有在 DSH 提供正式原生删除能力时才开放。DSH 0.1.1-rc.2 没有公开该 Host API，因此当前界面会禁用危险选项，后端也会在改变任何数据前失败关闭，不会伪装成已经删除。
 
 ## 本地数据与隐私
 
-Workbench 默认运行数据目录：
+默认 Workbench 数据目录：
 
 ```text
-~/.dsh/cyberpunk-workbench/
+${DSH_HOME:-$HOME/.dsh}/cyberpunk-workbench/
 ```
 
-其中包含 SQLite、上传文件、向量索引和索引日志。这些内容不属于 Git 仓库，也不会进入 npm 发布包。
+其中包含 SQLite、Workbench 自有文件副本、向量数据和索引元数据。Workspace 源码、DSH Workspace 定义、外部原文件和 Ollama 模型不在该目录内。
 
-文档解析和默认 Embedding 在本地完成。问题、检索上下文、总结和自动待办会发送给 DSH 中配置的生成模型 Provider。使用远程 Provider 时，请勿索引或提交不允许离开本机的内容。
+问题、检索上下文、总结与自动待办会发送给 DSH 中配置的生成 Provider。使用远程 Provider 时，请勿索引或提交不允许离开本机的内容。
 
 ## 开发与验证
 
@@ -177,28 +174,19 @@ npm run check
 npm pack --dry-run
 ```
 
-`npm run check` 会构建 host/client bundle，执行完整 Node 测试、发布校验脚本，以及生成文件的语法检查。
-
-目录结构：
+`npm run check` 会构建 host/client bundle，运行全部 Node 测试、静态架构与发布契约，并检查生成 bundle 语法。
 
 ```text
-bin/                 Workbench 启动器
-src/client/          Workbench 前端界面
-src/host/            API、存储、调度、会话与 RAG
-src/launcher/        Proxy 和可选认证启动逻辑
-scripts/             构建、安装、校验和 Demo 重置
-test/                单元、集成、契约与界面测试
+bin/          Workbench 启动器
+src/client/   Workbench 应用壳与界面
+src/host/     API、SQLite、会话、调度器与 RAG
+src/launcher/ Proxy 和可选 Codex 桥接
+scripts/      构建、安装、验证、Demo 重置
+test/         单元、集成、契约与界面测试
 ```
 
-## 兼容性与限制
-
-- 当前版本绑定 DSH `0.1.0-rc.8` 的 Slot 和 Session 契约。
-- Codex 本地缓存扫描为显式可选能力；缓存格式变化后可能需要更新。
-- 定时任务仅在 DSH host 运行时执行，本项目不会安装操作系统级服务。
-- 生成 Provider 的可用性与网络健康状态仍由 DSH 负责。
-
-## 开源许可
+## 开源许可与商标说明
 
 [MIT](./LICENSE)
 
-Harness Workbench 是独立开源项目，不是 DeepSeek、CD Projekt Red 或 OpenAI 的官方产品。相关产品名和商标归各自权利人所有。
+Harness Workbench 是独立开源项目，不是 DeepSeek、CD Projekt Red 或 OpenAI 的官方产品。相关产品名与商标归各自权利人所有。

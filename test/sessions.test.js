@@ -413,8 +413,8 @@ test("daily project conversation reads only that project's user and final assist
   try {
     const project = s.repos.projects.create({ name: "Project", workspaceId: "ws-project" });
     const kb = s.repos.knowledgeBases.create({ name: "KB" });
-    s.repos.workbenchSessions.upsert({ sessionId: projectSessionId, scopeKind: "project", scopeId: project.id, provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL, now: "2026-08-20T03:00:00.000Z" });
-    s.repos.workbenchSessions.upsert({ sessionId: knowledgeSessionId, scopeKind: "knowledge_base", scopeId: kb.id, provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL, now: "2026-08-20T03:00:00.000Z" });
+    s.repos.workbenchSessions.create({ sessionId: projectSessionId, scope: { kind: "project", id: project.id }, provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL, now: "2026-08-20T03:00:00.000Z" });
+    s.repos.workbenchSessions.create({ sessionId: knowledgeSessionId, scope: { kind: "knowledge_base", id: kb.id }, provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL, now: "2026-08-20T03:00:00.000Z" });
     s.repos.workbenchSessions.setTitleIfEmpty(projectSessionId, "登录页交付", "2026-08-20T03:00:00.000Z");
 
     const result = await s.service.readProjectDailyConversation({ projectId: project.id, date: "2026-08-20", timeZone: "Asia/Shanghai" });

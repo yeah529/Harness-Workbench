@@ -1,5 +1,5 @@
 /**
- * Lightweight session-layer error vocabulary (Task 8A-R).
+ * Lightweight session-layer error vocabulary.
  *
  * WorkbenchSessionError and SESSION_ERROR_CODES live here — NOT in sessions.js —
  * so callers that only need the error type for instanceof mapping (e.g. the HTTP
