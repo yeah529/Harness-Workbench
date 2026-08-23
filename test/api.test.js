@@ -140,21 +140,24 @@ function makeFakeIndexer(repos) {
   };
 }
 
-/** A fake session service that records calls and returns canned results. */
-function makeFakeSessionService({ createResult, createError, submitResult, submitError } = {}) {
-  const calls = { create: [], submit: [] };
+/** A fake unified session service that records calls and returns canned results. */
+function makeFakeSessionService({ activateResult, activateError, retryResult, retryError } = {}) {
+  const calls = { activate: [], retry: [], rename: [], move: [], delete: [] };
   return {
     calls,
-    async createSession(input) {
-      calls.create.push(input);
-      if (createError) throw createError;
-      return createResult ?? { sessionId: "session-1", scope: { kind: "knowledgeBase", scopeId: 1 }, chatId: 1 };
+    async activateDraft(input) {
+      calls.activate.push(input);
+      if (activateError) throw activateError;
+      return activateResult ?? { sessionId: "session-1", scope: input.scope, lifecycleStatus: "active" };
     },
-    async submitPrompt(input) {
-      calls.submit.push(input);
-      if (submitError) throw submitError;
-      return submitResult ?? { sessionId: input.sessionId, citations: [], outcome: { text: "", reason: { kind: "completed" } } };
+    async retryDraft(input) {
+      calls.retry.push(input);
+      if (retryError) throw retryError;
+      return retryResult ?? { sessionId: input.sessionId, lifecycleStatus: "active" };
     },
+    async renameSession(input) { calls.rename.push(input); return { sessionId: input.sessionId, title: input.title, titleLocked: true }; },
+    async moveSession(input) { calls.move.push(input); return { sessionId: input.sessionId, scope: input.scope }; },
+    async deleteSession(sessionId) { calls.delete.push(sessionId); return true; },
     async dispose() {},
   };
 }
@@ -949,26 +952,6 @@ test("summary generation errors return a stable error envelope without leaking p
   assert.match(logged[0].message, /private provider failure/);
 });
 
-test("knowledge-chats CRUD", async (t) => {
-  const { base, repos } = await startApi(t);
-  const kb = repos.knowledgeBases.create({ name: "K" });
-
-  let res = await fetch(base + "/knowledge-chats", {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ knowledgeBaseId: kb.id, title: "chat about K" }),
-  });
-  assert.equal(res.status, 201);
-  const chat = await res.json();
-  assert.equal(chat.title, "chat about K");
-
-  res = await fetch(base + "/knowledge-chats");
-  assert.equal((await res.json()).length, 1);
-
-  res = await fetch(base + "/knowledge-chats?knowledgeBaseId=" + kb.id);
-  assert.equal((await res.json()).length, 1);
-});
-
 // ------------------------------------------------------- errors / queue
 
 test("errors use {error:{code,message}} and never leak a stack", async (t) => {
@@ -1131,22 +1114,20 @@ test("queue coalesces a re-enqueue of an in-flight document (runs once)", async 
 
 test("GET collection id query params must be positive integers (422)", async (t) => {
   const { base } = await startApi(t);
-  for (const route of ["/todos?projectId=abc", "/schedules?projectId=abc", "/summaries?projectId=abc", "/knowledge-chats?knowledgeBaseId=abc"]) {
+  for (const route of ["/todos?projectId=abc", "/schedules?projectId=abc", "/summaries?projectId=abc"]) {
     const res = await fetch(base + route);
     assert.equal(res.status, 422, route);
     assert.equal((await res.json()).error.code, "INVALID_ID", route);
   }
 });
 
-test("creating todo/schedule/chat validates the parent exists (404, not 500)", async (t) => {
+test("creating todo/schedule validates the parent exists (404, not 500)", async (t) => {
   const { base } = await startApi(t);
   const post = (path, body) => fetch(base + path, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) });
   let res = await post("/todos", { projectId: 999999, title: "x", dueAt: "2026-08-18T18:00:00Z" });
   assert.equal(res.status, 404);
   assert.equal((await res.json()).error.code, "NOT_FOUND");
   res = await post("/schedules", { projectId: 999999, name: "x", rule: "daily" });
-  assert.equal(res.status, 404);
-  res = await post("/knowledge-chats", { knowledgeBaseId: 999999, title: "x" });
   assert.equal(res.status, 404);
 });
 
@@ -1285,220 +1266,107 @@ test("unknown internal errors are logged in full but never leak the stack", asyn
   assert.match(logged[0].message, /secret stack details/);
   assert.ok(logged[0].stack, "logged error retains its stack");
 });
-// ------------------------------------------------------ chat sessions / prompts
+// ------------------------------------------------------ unified chat sessions
 
-test("POST /chat/sessions delegates to the session service and returns 201", async (t) => {
+test("POST /chat/sessions activates the first prompt with one canonical scope", async (t) => {
   const fake = makeFakeSessionService();
   const { base } = await startApi(t, { sessions: fake });
-
   const res = await fetch(base + "/chat/sessions", {
     method: "POST",
     headers: JSON_HEADERS,
-    body: JSON.stringify({ knowledgeBaseId: 1, title: "chat" }),
+    body: JSON.stringify({ scope: { kind: "knowledge_base", id: 3 }, question: "第一句话" }),
   });
   assert.equal(res.status, 201);
-  const body = await res.json();
-  assert.equal(body.sessionId, "session-1");
-  assert.deepEqual(fake.calls.create[0], { knowledgeBaseId: 1, title: "chat" });
+  assert.equal((await res.json()).sessionId, "session-1");
+  assert.deepEqual(fake.calls.activate, [{ scope: { kind: "knowledge_base", id: 3 }, question: "第一句话", pinnedSources: [], oneShotSources: [] }]);
 });
 
-test("GET /chat/sessions returns only the requested project scope", async (t) => {
-  const { base, repos } = await startApi(t, { sessions: makeFakeSessionService() });
-  const project = repos.projects.create({ name: "P" });
-  repos.workbenchSessions.upsert({ sessionId: "session-cpwb-p", scopeKind: "project", scopeId: project.id, provider: "deepseek-official", model: "deepseek-v4-flash" });
-  repos.workbenchSessions.upsert({ sessionId: "session-cpwb-other", scopeKind: "project", scopeId: project.id + 1, provider: "deepseek-official", model: "deepseek-v4-flash" });
-  const res = await fetch(base + "/chat/sessions?projectId=" + project.id);
-  assert.equal(res.status, 200);
-  assert.deepEqual((await res.json()).map((row) => row.sessionId), ["session-cpwb-p"]);
-});
-
-test("GET /chat/sessions lists mixed Workbench contexts for recent navigation", async (t) => {
-  const { base, repos } = await startApi(t, { sessions: makeFakeSessionService() });
-  const project = repos.projects.create({ name: "Project One" });
-  const kb = repos.knowledgeBases.create({ name: "Knowledge One" });
-  repos.workbenchSessions.upsert({ sessionId: "session-cpwb-p", scopeKind: "project", scopeId: project.id, provider: "deepseek-official", model: "deepseek-v4-flash", now: new Date("2026-08-21T08:00:00.000Z") });
-  repos.workbenchSessions.upsert({ sessionId: "session-cpwb-k", scopeKind: "knowledge_base", scopeId: kb.id, provider: "deepseek-official", model: "deepseek-v4-flash", now: new Date("2026-08-21T09:00:00.000Z") });
-  repos.workbenchSessions.upsert({ sessionId: "session-cpwb-i", scopeKind: "independent", scopeId: null, provider: "deepseek-official", model: "deepseek-v4-flash", now: new Date("2026-08-21T10:00:00.000Z") });
-  const res = await fetch(base + "/chat/sessions?limit=8&offset=0");
-  assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.equal(body.total, 3);
-  assert.deepEqual(body.items.map((row) => [row.sessionId, row.scopeKind, row.contextName]), [
-    ["session-cpwb-i", "independent", "独立"],
-    ["session-cpwb-k", "knowledge_base", "Knowledge One"],
-    ["session-cpwb-p", "project", "Project One"],
-  ]);
-});
-
-test("POST /chat/sessions allows zero or one project/knowledge-base scope", async (t) => {
-  const fake = makeFakeSessionService({ createResult: { sessionId: "session-cpwb-independent", scope: { kind: "independent", scopeId: null }, reused: false } });
-  const { base } = await startApi(t, { sessions: fake });
-
-  let res = await fetch(base + "/chat/sessions", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({}),
-  });
-  assert.equal(res.status, 201);
-  assert.deepEqual(fake.calls.create[0], { title: null });
-
-  res = await fetch(base + "/chat/sessions", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ projectId: 1, knowledgeBaseId: 2 }),
-  });
-  assert.equal(res.status, 422);
-  assert.equal((await res.json()).error.code, "INVALID_SCOPE");
-
-  res = await fetch(base + "/chat/sessions", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ knowledgeBaseId: 0 }),
-  });
-  assert.equal(res.status, 422);
-  assert.equal((await res.json()).error.code, "INVALID_FIELD");
-});
-
-test("POST /chat/prompts submits and returns citations + outcome", async (t) => {
+test("POST /chat/sessions returns retry metadata without leaking an internal cause", async (t) => {
   const fake = makeFakeSessionService({
-    submitResult: {
-      sessionId: "session-1",
-      citations: [{ sourceId: "1", originalName: "note.md" }],
-      outcome: { text: "hi", reason: { kind: "completed" } },
-    },
+    activateError: new WorkbenchSessionError(
+      SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED,
+      "failed to activate session draft",
+      new Error("secret vector endpoint"),
+      { sessionId: "session-failed", lifecycleStatus: "draft_failed", pendingQuestion: "保留正文" },
+    ),
   });
   const { base } = await startApi(t, { sessions: fake });
-
-  const res = await fetch(base + "/chat/prompts", {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ sessionId: "session-1", question: "hello" }),
-  });
-  assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.equal(body.sessionId, "session-1");
-  assert.equal(body.citations.length, 1);
-  assert.equal(body.outcome.text, "hi");
-  assert.deepEqual(fake.calls.submit[0], { sessionId: "session-1", question: "hello" });
-});
-
-test("POST /chat/prompts maps session errors to a stable envelope with no stack", async (t) => {
-  const fake = makeFakeSessionService({
-    submitError: new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "session not found: nope"),
-  });
-  const { base } = await startApi(t, { sessions: fake });
-
-  const res = await fetch(base + "/chat/prompts", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "nope", question: "q" }),
-  });
-  assert.equal(res.status, 404);
-  const body = await res.json();
-  assert.equal(body.error.code, "ESESSION_NOT_FOUND");
-  assert.equal(body.error.message, "session not found: nope");
-  assert.equal(body.stack, undefined);
-  assert.equal(body.error.stack, undefined);
-});
-
-test("POST /chat/prompts maps a scope mismatch to 409 and retrieval failure to 502", async (t) => {
-  const mismatch = makeFakeSessionService({
-    submitError: new WorkbenchSessionError(SESSION_ERROR_CODES.SCOPE_MISMATCH, "session scope does not match"),
-  });
-  let { base } = await startApi(t, { sessions: mismatch });
-  let res = await fetch(base + "/chat/prompts", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s", question: "q", projectId: 1 }),
-  });
-  assert.equal(res.status, 409);
-  assert.equal((await res.json()).error.code, "ESCOPE_MISMATCH");
-
-  const retrieval = makeFakeSessionService({
-    submitError: new WorkbenchSessionError(SESSION_ERROR_CODES.RETRIEVAL_FAILED, "knowledge retrieval failed", new Error("boom")),
-  });
-  ({ base } = await startApi(t, { sessions: retrieval }));
-  res = await fetch(base + "/chat/prompts", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s", question: "q" }),
+  const res = await fetch(base + "/chat/sessions", {
+    method: "POST", headers: JSON_HEADERS,
+    body: JSON.stringify({ scope: { kind: "project", id: 1 }, question: "保留正文" }),
   });
   assert.equal(res.status, 502);
   const body = await res.json();
-  assert.equal(body.error.code, "ERETRIEVAL_FAILED");
-  assert.equal(body.error.message, "knowledge retrieval failed");
-  assert.equal(body.error.stack, undefined);
-  assert.equal(body.stack, undefined);
+  assert.deepEqual(body.error.details, {
+    sessionId: "session-failed",
+    lifecycleStatus: "draft_failed",
+    pendingQuestion: "保留正文",
+  });
+  assert.equal(body.error.cause, undefined);
 });
 
-test("chat routes return 501 without a session service", async (t) => {
-  const { base } = await startApi(t);
+test("GET /chat/sessions filters one canonical scope and excludes failed drafts", async (t) => {
+  const { base, repos } = await startApi(t, { sessions: makeFakeSessionService() });
+  const project = repos.projects.create({ name: "P" });
+  repos.workbenchSessions.create({ sessionId: "session-active", scope: { kind: "project", id: project.id }, provider: "deepseek-official", model: "deepseek-v4-flash" });
+  repos.workbenchSessions.create({ sessionId: "session-failed", scope: { kind: "project", id: project.id }, provider: "deepseek-official", model: "deepseek-v4-flash", lifecycleStatus: "draft_failed" });
+  const res = await fetch(base + `/chat/sessions?scopeKind=project&scopeId=${project.id}`);
+  assert.equal(res.status, 200);
+  assert.deepEqual((await res.json()).items.map((row) => row.sessionId), ["session-active"]);
+});
+
+test("GET /chat/sessions lists active sessions across all containers", async (t) => {
+  const { base, repos } = await startApi(t, { sessions: makeFakeSessionService() });
+  repos.workbenchSessions.create({ sessionId: "session-independent", scope: { kind: "independent" }, provider: "deepseek-official", model: "deepseek-v4-flash" });
+  const res = await fetch(base + "/chat/sessions?limit=8&offset=0");
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {
+    items: [repos.workbenchSessions.get("session-independent")], total: 1, limit: 8, offset: 0,
+  });
+});
+
+test("PATCH /chat/sessions/:id dispatches rename, move, and failed-draft retry", async (t) => {
+  const fake = makeFakeSessionService();
+  const { base } = await startApi(t, { sessions: fake });
+  const patch = (body) => fetch(base + "/chat/sessions/session-1", { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify(body) });
+
+  assert.equal((await patch({ operation: "rename", title: "新标题" })).status, 200);
+  assert.equal((await patch({ operation: "move", scope: { kind: "independent" } })).status, 200);
+  assert.equal((await patch({ operation: "retryDraft", question: "再次发送" })).status, 200);
+  assert.deepEqual(fake.calls.rename, [{ sessionId: "session-1", title: "新标题" }]);
+  assert.deepEqual(fake.calls.move, [{ sessionId: "session-1", scope: { kind: "independent", id: null } }]);
+  assert.deepEqual(fake.calls.retry, [{ sessionId: "session-1", question: "再次发送", oneShotSources: [] }]);
+});
+
+test("DELETE /chat/sessions/:id delegates native-first deletion", async (t) => {
+  const fake = makeFakeSessionService();
+  const { base } = await startApi(t, { sessions: fake });
+  const res = await fetch(base + "/chat/sessions/session-1", { method: "DELETE" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { deleted: true });
+  assert.deepEqual(fake.calls.delete, ["session-1"]);
+});
+
+test("unified session API rejects legacy fields and removes /chat/prompts", async (t) => {
+  const { base } = await startApi(t, { sessions: makeFakeSessionService() });
   let res = await fetch(base + "/chat/sessions", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ knowledgeBaseId: 1 }),
+    method: "POST", headers: JSON_HEADERS,
+    body: JSON.stringify({ projectId: 1, question: "legacy" }),
+  });
+  assert.equal(res.status, 422);
+  assert.equal((await res.json()).error.code, "INVALID_SCOPE");
+  res = await fetch(base + "/chat/prompts", { method: "POST", headers: JSON_HEADERS, body: "{}" });
+  assert.equal(res.status, 404);
+});
+
+test("session activation returns 501 when the unified session service is unavailable", async (t) => {
+  const { base } = await startApi(t);
+  const res = await fetch(base + "/chat/sessions", {
+    method: "POST", headers: JSON_HEADERS,
+    body: JSON.stringify({ scope: { kind: "independent" }, question: "hello" }),
   });
   assert.equal(res.status, 501);
   assert.equal((await res.json()).error.code, "NOT_IMPLEMENTED");
-
-  res = await fetch(base + "/chat/prompts", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s", question: "q" }),
-  });
-  assert.equal(res.status, 501);
-});
-
-test("chat routes validate sessionId/question, expose the global list, and reject wrong methods", async (t) => {
-  const { base } = await startApi(t, { sessions: makeFakeSessionService() });
-
-  let res = await fetch(base + "/chat/prompts", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ question: "q" }),
-  });
-  assert.equal(res.status, 422);
-  assert.equal((await res.json()).error.code, "INVALID_FIELD");
-
-  res = await fetch(base + "/chat/prompts", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s" }),
-  });
-  assert.equal(res.status, 422);
-  assert.equal((await res.json()).error.code, "INVALID_FIELD");
-
-  res = await fetch(base + "/chat/sessions", { method: "GET" });
-  assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { items: [], total: 0, limit: 8, offset: 0 });
-  res = await fetch(base + "/chat/prompts", { method: "GET" });
-  assert.equal(res.status, 405);
-  res = await fetch(base + "/chat/prompts", { method: "DELETE" });
-  assert.equal(res.status, 405);
-});
-// ------------------------------------------- chat reopen + reuse (Task 8A-R)
-
-test("POST /chat/sessions passes chatId through and returns reused", async (t) => {
-  const fake = makeFakeSessionService({
-    createResult: { sessionId: "session-9", scope: { kind: "knowledgeBase", scopeId: 3 }, chatId: 7, reused: true },
-  });
-  const { base } = await startApi(t, { sessions: fake });
-
-  const res = await fetch(base + "/chat/sessions", {
-    method: "POST", headers: JSON_HEADERS,
-    body: JSON.stringify({ knowledgeBaseId: 3, chatId: 7 }),
-  });
-  assert.equal(res.status, 201);
-  const body = await res.json();
-  assert.equal(body.reused, true);
-  assert.deepEqual(fake.calls.create[0], { title: null, knowledgeBaseId: 3, chatId: 7 });
-});
-
-test("POST /chat/sessions rejects a non-positive chatId", async (t) => {
-  const { base } = await startApi(t, { sessions: makeFakeSessionService() });
-  const res = await fetch(base + "/chat/sessions", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ knowledgeBaseId: 1, chatId: "abc" }),
-  });
-  assert.equal(res.status, 422);
-  assert.equal((await res.json()).error.code, "INVALID_FIELD");
-});
-
-test("chat reopen maps CHAT_NOT_FOUND/CHAT_KB_MISMATCH/RESUME_FAILED to 404/409/500", async (t) => {
-  for (const [code, status] of [
-    [SESSION_ERROR_CODES.CHAT_NOT_FOUND, 404],
-    [SESSION_ERROR_CODES.CHAT_KB_MISMATCH, 409],
-    [SESSION_ERROR_CODES.SESSION_RESUME_FAILED, 500],
-  ]) {
-    const fake = makeFakeSessionService({ createError: new WorkbenchSessionError(code, "boom") });
-    const { base } = await startApi(t, { sessions: fake });
-    const res = await fetch(base + "/chat/sessions", {
-      method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ knowledgeBaseId: 1, chatId: 5 }),
-    });
-    assert.equal(res.status, status, code + " -> " + status);
-    const body = await res.json();
-    assert.equal(body.error.code, code);
-    assert.equal(body.error.stack, undefined);
-  }
 });
 
 // ------------------------------------------------------ logger noise (Task 8A-R)
@@ -1526,17 +1394,19 @@ test("502 retrieval failure is logged server-side and its cause never leaks", as
   const logged = [];
   const logger = { error: (err) => logged.push(err) };
   const sessions = makeFakeSessionService({
-    submitError: new WorkbenchSessionError(SESSION_ERROR_CODES.RETRIEVAL_FAILED, "knowledge retrieval failed", new Error("vector store secret")),
+    activateError: new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED, "failed to activate session draft", new Error("vector store secret"), {
+      sessionId: "session-failed", lifecycleStatus: "draft_failed", pendingQuestion: "q",
+    }),
   });
   const { base } = await startApi(t, { sessions, logger });
 
-  const res = await fetch(base + "/chat/prompts", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s", question: "q" }),
+  const res = await fetch(base + "/chat/sessions", {
+    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ scope: { kind: "independent" }, question: "q" }),
   });
   assert.equal(res.status, 502);
   const body = await res.json();
-  assert.equal(body.error.code, "ERETRIEVAL_FAILED");
-  assert.equal(body.error.message, "knowledge retrieval failed");
+  assert.equal(body.error.code, "EDRAFT_ACTIVATION_FAILED");
+  assert.equal(body.error.message, "failed to activate session draft");
   assert.equal(body.error.stack, undefined);
   assert.equal(body.error.cause, undefined);
 

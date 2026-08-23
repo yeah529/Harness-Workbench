@@ -23,17 +23,21 @@ export const SESSION_ERROR_CODES = Object.freeze({
   RETRIEVAL_FAILED: "ERETRIEVAL_FAILED",
   CHAT_PERSIST_FAILED: "ECHAT_PERSIST_FAILED",
   SESSION_CREATE_FAILED: "ESESSION_CREATE_FAILED",
-  CHAT_NOT_FOUND: "ECHAT_NOT_FOUND",
-  CHAT_KB_MISMATCH: "ECHAT_KB_MISMATCH",
+  DRAFT_ACTIVATION_FAILED: "EDRAFT_ACTIVATION_FAILED",
+  DRAFT_NOT_RETRYABLE: "EDRAFT_NOT_RETRYABLE",
+  SESSION_RENAME_FAILED: "ESESSION_RENAME_FAILED",
+  SESSION_DELETE_FAILED: "ESESSION_DELETE_FAILED",
+  SESSION_DELETE_UNAVAILABLE: "ESESSION_DELETE_UNAVAILABLE",
   SESSION_RESUME_FAILED: "ESESSION_RESUME_FAILED",
 });
 
 /** Session-layer error: a stable code and a clean message, never a stack leak. */
 export class WorkbenchSessionError extends Error {
-  constructor(code, message, cause) {
+  constructor(code, message, cause, details) {
     super(message);
     this.name = "WorkbenchSessionError";
     this.code = code;
     if (cause !== undefined) this.cause = cause;
+    if (details !== undefined) this.details = details;
   }
 }

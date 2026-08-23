@@ -47,10 +47,9 @@ export function createScheduledRunPrompt(sessionService) {
   return async function runScheduledPrompt({ kind = "schedule", projectId, prompt }) {
     let session = null;
     try {
-      session = await sessionService.createSession({ projectId, scheduled: true });
+      session = await sessionService.createSession({ scope: { kind: "project", id: projectId }, scheduled: true });
       let result = await sessionService.submitPrompt({
         sessionId: session.sessionId,
-        projectId,
         question: prompt,
       });
       if ((kind === "summary" || kind === "todo") && result.outcome?.reason?.kind !== "completed") {
@@ -61,7 +60,6 @@ export function createScheduledRunPrompt(sessionService) {
         const requestedOutput = kind === "summary" ? "最终中文总结正文" : "最终待办逐行清单";
         result = await sessionService.submitPrompt({
           sessionId: session.sessionId,
-          projectId,
           question: `上一条响应不是可展示的${requestedOutput}。不要调用任何工具，不要输出 DSML、XML、代码或分析过程；只依据上一条消息已提供的数据，直接输出${requestedOutput}。`,
         });
         if (result.outcome?.reason?.kind !== "completed") {

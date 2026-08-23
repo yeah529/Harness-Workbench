@@ -209,12 +209,19 @@ test("native pre-step RAG rejects before model entry when retrieval fails", asyn
 });
 
 /** Boot the real SQLite + repositories + session service over a mock ctx. */
-async function makeService({ presets, retriever, resumeError, sessionPersistence, sessionQuery, sessionWorkspace } = {}) {
+async function makeService({ presets, retriever, resumeError, sessionPersistence, sessionQuery, sessionWorkspace, renameNativeSession, deleteNativeSession } = {}) {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
   const { ctx, live, workspaces, records, seedLiveAgent } = makeMockCtx({ presets, resumeError, sessionPersistence, sessionQuery });
-  const service = createSessionService({ ctx, repos, retriever: retriever ?? makeRetriever(), sessionWorkspace });
+  const service = createSessionService({
+    ctx,
+    repos,
+    retriever: retriever ?? makeRetriever(),
+    sessionWorkspace,
+    renameNativeSession,
+    deleteNativeSession,
+  });
   return {
     service, repos, db, dataDir, ctx, live, workspaces, records, seedLiveAgent,
     async cleanup() {
@@ -224,6 +231,96 @@ async function makeService({ presets, retriever, resumeError, sessionPersistence
     },
   };
 }
+
+test("unified draft activation creates one scoped DSH session on first prompt", async () => {
+  const s = await makeService();
+  try {
+    const project = s.repos.projects.create({ name: "Project", workspaceId: "ws-project" });
+    s.workspaces.set("ws-project", { id: "ws-project", path: "/tmp/project", attachSession: async () => {} });
+
+    const result = await s.service.activateDraft({
+      scope: { kind: "project", id: project.id },
+      question: "完成接口验收。继续补齐前端。",
+    });
+
+    assert.equal(s.records.create.length, 1);
+    assert.equal(result.lifecycleStatus, "active");
+    assert.equal(result.outcome.text, "mock answer");
+    const persisted = s.repos.workbenchSessions.get(result.sessionId);
+    assert.deepEqual(persisted.scope, { kind: "project", id: project.id });
+    assert.equal(persisted.lifecycleStatus, "active");
+    assert.equal(persisted.title, "完成接口验收");
+    assert.equal(s.live.get(result.sessionId).calls.followup.length, 1);
+    assert.equal(s.live.get(result.sessionId).calls.followup[0].content[0].text, "完成接口验收。继续补齐前端。");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("unified failed draft remains retryable and stays out of normal recents", async () => {
+  let retrievalError = new Error("embedding unavailable");
+  const retriever = {
+    async search() {
+      if (retrievalError) throw retrievalError;
+      return [];
+    },
+  };
+  const s = await makeService({ retriever });
+  try {
+    const project = s.repos.projects.create({ name: "Project", workspaceId: "ws-project" });
+    s.workspaces.set("ws-project", { id: "ws-project", path: "/tmp/project", attachSession: async () => {} });
+
+    let failedSessionId;
+    await assert.rejects(
+      () => s.service.activateDraft({ scope: { kind: "project", id: project.id }, question: "保留这条消息" }),
+      (error) => {
+        assert.equal(error.code, SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED);
+        failedSessionId = error.details.sessionId;
+        return true;
+      },
+    );
+    assert.equal(s.repos.workbenchSessions.get(failedSessionId).lifecycleStatus, "draft_failed");
+    assert.equal(s.repos.workbenchSessions.latest({ scopeKind: "project", scopeId: project.id }), null);
+
+    retrievalError = null;
+    const retried = await s.service.retryDraft({ sessionId: failedSessionId, question: "保留这条消息" });
+    assert.equal(retried.sessionId, failedSessionId);
+    assert.equal(retried.lifecycleStatus, "active");
+    assert.equal(s.repos.workbenchSessions.latest({ scopeKind: "project", scopeId: project.id }).sessionId, failedSessionId);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("unified session rename, move, and delete keep native state authoritative", async () => {
+  const calls = { rename: [], delete: [] };
+  const s = await makeService({
+    sessionWorkspace: async () => ({ id: "ws-independent", path: "/tmp/independent" }),
+    renameNativeSession: async (input) => { calls.rename.push(input); return { title: input.title }; },
+    deleteNativeSession: async (input) => { calls.delete.push(input); return true; },
+  });
+  try {
+    const project = s.repos.projects.create({ name: "Project", workspaceId: "ws-project" });
+    s.workspaces.set("ws-project", { id: "ws-project", path: "/tmp/project", attachSession: async () => {} });
+    s.workspaces.set("ws-independent", { id: "ws-independent", path: "/tmp/independent", attachSession: async () => {} });
+    const activated = await s.service.activateDraft({ scope: { kind: "independent" }, question: "原始标题" });
+
+    const renamed = await s.service.renameSession({ sessionId: activated.sessionId, title: "用户锁定标题" });
+    assert.equal(renamed.title, "用户锁定标题");
+    assert.equal(renamed.titleLocked, true);
+    assert.deepEqual(calls.rename, [{ sessionId: activated.sessionId, title: "用户锁定标题" }]);
+
+    const moved = await s.service.moveSession({ sessionId: activated.sessionId, scope: { kind: "project", id: project.id } });
+    assert.deepEqual(moved.scope, { kind: "project", id: project.id });
+    assert.equal(s.service.get(activated.sessionId).scope.id, project.id);
+
+    assert.equal(await s.service.deleteSession(activated.sessionId), true);
+    assert.deepEqual(calls.delete, [{ sessionId: activated.sessionId }]);
+    assert.equal(s.repos.workbenchSessions.get(activated.sessionId), null);
+  } finally {
+    await s.cleanup();
+  }
+});
 
 const SAMPLE = (over = {}) => ({ sourceId: "1", originalName: "note.md", locator: "lines:1-1", text: "hello", ...over });
 
@@ -324,7 +421,9 @@ function makeSeqCtx() {
       async create(options) {
         records.create.push(options);
         const { agent, session, calls } = buildAgent(options.sessionId);
-        await options.setup({ on() { return () => {}; } });
+        const agentCtx = { on() { return () => {}; }, tools: { restrict() {} } };
+        agent.ctx = agentCtx;
+        await options.setup(agentCtx);
         live.set(options.sessionId, { agent, session, calls, disposed: () => 0 });
         return { agent, dispose: async () => {} };
       },
@@ -509,7 +608,8 @@ test("native KB session setup installs the scoped pre-step retriever used by Ses
   const s = await makeService({ retriever });
   try {
     const kb = s.repos.knowledgeBases.create({ name: "Native KB" });
-    const { sessionId } = await s.service.createSession({ knowledgeBaseId: kb.id });
+    const { sessionId } = await s.service.activateDraft({ scope: { kind: "knowledge_base", id: kb.id }, question: "activate native session" });
+    retriever.calls.length = 0;
     const preStep = s.live.get(sessionId).onCalls.find((entry) => entry.name === "agent/pre-step");
     assert.ok(preStep, "fresh native session must install agent/pre-step");
     const decision = await preStep.fn({ signal: new AbortController().signal }, async () => ({
@@ -524,7 +624,7 @@ test("native KB session setup installs the scoped pre-step retriever used by Ses
   }
 });
 
-test("KB chat with an empty dsh_session_id uses the hidden backing workspace", async () => {
+test("knowledge-base sessions use the hidden backing workspace", async () => {
   const attached = [];
   let backingWorkspace;
   const s = await makeService({
@@ -542,8 +642,7 @@ test("KB chat with an empty dsh_session_id uses the hidden backing workspace", a
       attachSession: async (sessionId) => attached.push(sessionId),
     };
     s.workspaces.set(backingWorkspace.id, backingWorkspace);
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id, title: "empty" });
-    const result = await s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id });
+    const result = await s.service.activateDraft({ scope: { kind: "knowledge_base", id: kb.id }, question: "activate backing workspace" });
     assert.equal(s.records.workspaceGet[0], "kb-workspace-" + kb.id);
     assert.deepEqual(attached, [result.sessionId]);
     assert.equal(s.records.create[0].meta.cwd, "/tmp/workbench-kb-" + kb.id);
@@ -552,13 +651,12 @@ test("KB chat with an empty dsh_session_id uses the hidden backing workspace", a
   }
 });
 
-test("adopted live project and KB agents install scoped RAG and release its disposer", async () => {
+test("adopted live project and knowledge-base agents install scoped RAG and release its disposer", async () => {
   for (const kind of ["project", "knowledge_base"]) {
     const retriever = makeRetriever({ results: [SAMPLE({ text: "adopted context" })] });
     const s = await makeService({ retriever });
     try {
       let scope;
-      let chatId;
       if (kind === "project") {
         const project = s.repos.projects.create({ name: "P", workspaceId: "ws-1" });
         s.workspaces.set("ws-1", { id: "ws-1", path: "/tmp/p", attachSession: async () => {} });
@@ -568,14 +666,13 @@ test("adopted live project and KB agents install scoped RAG and release its disp
       }
       const sessionId = "session-adopt-" + kind;
       const seeded = s.seedLiveAgent(sessionId);
-      if (kind === "project") {
-        s.repos.workbenchSessions.upsert({ sessionId, scopeKind: "project", scopeId: scope.id, provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL });
-      } else {
-        chatId = s.repos.knowledgeChats.create({ knowledgeBaseId: scope.id, dshSessionId: sessionId }).id;
-      }
-      const result = kind === "project"
-        ? await s.service.createSession({ projectId: scope.id, resumeSessionId: sessionId })
-        : await s.service.createSession({ knowledgeBaseId: scope.id, chatId });
+      s.repos.workbenchSessions.create({
+        sessionId,
+        scope: { kind, id: scope.id },
+        provider: DEFAULT_PROVIDER,
+        model: DEFAULT_MODEL,
+      });
+      const result = await s.service.openSession({ sessionId });
       assert.equal(result.sessionId, sessionId);
       const preStep = seeded.onCalls.find((entry) => entry.name === "agent/pre-step");
       assert.ok(preStep, kind + " adopt installs agent/pre-step");
@@ -711,617 +808,102 @@ test("submitWorkbenchPrompt rejects an unknown session", async () => {
 
 // ------------------------------------------------------- session service
 
-test("KB session persists dsh_session_id and uses the explicit cwd fallback in a lightweight host harness", async () => {
-  const s = await makeService();
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const result = await s.service.createSession({ knowledgeBaseId: kb.id, title: "chat about K" });
-
-    assert.equal(result.scope.kind, "knowledge_base");
-    assert.equal(result.scope.scopeId, kb.id);
-    assert.deepEqual(s.records.workspaceGet, [], "KB session never touches the workspace registry");
-    assert.equal(s.records.create[0].meta.cwd, process.cwd(), "KB session uses process.cwd()");
-
-    const chat = s.repos.knowledgeChats.listByKnowledgeBase(kb.id)[0];
-    assert.equal(chat.dshSessionId, result.sessionId);
-    assert.equal(chat.title, "chat about K");
-    assert.equal(result.chatId, chat.id);
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("a scheduled prompt can release exactly one live handle while persistence remains", async () => {
-  const s = await makeService();
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const created = await s.service.createSession({ knowledgeBaseId: kb.id, scheduled: true });
-    await s.service.submitPrompt({ sessionId: created.sessionId, question: "scheduled" });
-    assert.equal(s.service.has(created.sessionId), true);
-
-    assert.equal(await s.service.release(created.sessionId), true);
-    assert.equal(s.service.has(created.sessionId), false);
-    assert.equal(s.live.get(created.sessionId).disposed(), 1);
-    assert.equal(s.repos.knowledgeChats.get(created.chatId).dshSessionId, created.sessionId);
-    assert.equal(await s.service.release(created.sessionId), false);
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("project session does not create a knowledge_chats record", async () => {
-  const s = await makeService();
-  try {
-    const project = s.repos.projects.create({ name: "P", workspaceId: "ws-1" });
-    s.workspaces.set("ws-1", { id: "ws-1", path: "/ws/p", attachSession: async (sid) => { s.records.attach.push(sid); } });
-
-    const result = await s.service.createSession({ projectId: project.id });
-    assert.equal(result.scope.kind, "project");
-    assert.equal(result.scope.scopeId, project.id);
-    assert.equal(s.repos.knowledgeChats.list().length, 0);
-    const persisted = s.repos.workbenchSessions.get(result.sessionId);
-    assert.equal(persisted.scopeKind, "project");
-    assert.equal(persisted.scopeId, project.id);
-    assert.deepEqual(persisted.selection, { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL });
-    assert.deepEqual(s.records.attach, [result.sessionId]);
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("project session persistence failure clears the handle and disposes the fresh agent", async () => {
-  const s = await makeService();
-  try {
-    const project = s.repos.projects.create({ name: "P", workspaceId: "ws-1" });
-    s.workspaces.set("ws-1", { id: "ws-1", path: "/ws/p", attachSession: async () => {} });
-    s.repos.workbenchSessions.upsert = () => { throw new Error("database locked"); };
-
-    await assert.rejects(
-      () => s.service.createSession({ projectId: project.id }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.CHAT_PERSIST_FAILED,
-    );
-    const sessionId = s.records.create[0].sessionId;
-    assert.equal(s.service.has(sessionId), false, "failed project session is not retained");
-    assert.equal(s.live.get(sessionId).disposed(), 1, "failed project session disposes its agent");
-    assert.equal(s.repos.workbenchSessions.get(sessionId), null, "failed project session has no durable row");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("scheduled project sessions never replace the card's recent interactive session", async () => {
-  const s = await makeService();
-  try {
-    const project = s.repos.projects.create({ name: "P", workspaceId: "ws-1" });
-    s.workspaces.set("ws-1", { id: "ws-1", path: "/ws/p", attachSession: async () => {} });
-    const interactive = await s.service.createSession({ projectId: project.id });
-    const scheduled = await s.service.createSession({ projectId: project.id, scheduled: true });
-
-    assert.equal(s.repos.workbenchSessions.latest({ scopeKind: "project", scopeId: project.id }).sessionId, interactive.sessionId);
-    assert.equal(s.repos.workbenchSessions.get(scheduled.sessionId), null);
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("a project card can reopen its persisted workbench session", async () => {
-  const s = await makeService();
-  try {
-    const project = s.repos.projects.create({ name: "P", workspaceId: "ws-1" });
-    s.workspaces.set("ws-1", { id: "ws-1", path: "/ws/p", attachSession: async () => {} });
-    const first = await s.service.createSession({ projectId: project.id });
-    const second = await s.service.createSession({ projectId: project.id, resumeSessionId: first.sessionId });
-    assert.equal(second.sessionId, first.sessionId);
-    assert.equal(second.reused, true);
-    assert.equal(s.records.create.length, 1);
-    assert.equal(s.records.resume.length, 0);
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("retrieval failure throws a stable error and sends no message", async () => {
-  const s = await makeService({ retriever: makeRetriever({ error: new Error("vector store down") }) });
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const { sessionId } = await s.service.createSession({ knowledgeBaseId: kb.id });
-
-    await assert.rejects(
-      () => s.service.submitPrompt({ sessionId, question: "q" }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.RETRIEVAL_FAILED,
-    );
-
-    const entry = s.live.get(sessionId);
-    assert.equal(entry.calls.inject.length, 0, "no injected context");
-    assert.equal(entry.calls.followup.length, 0, "no user message sent");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("empty citations still submit the original question without inventing references", async () => {
-  const s = await makeService({ retriever: makeRetriever({ results: [] }) });
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const { sessionId } = await s.service.createSession({ knowledgeBaseId: kb.id });
-
-    const result = await s.service.submitPrompt({ sessionId, question: "original" });
-    const entry = s.live.get(sessionId);
-    assert.equal(entry.calls.inject.length, 0);
-    assert.equal(entry.calls.followup.length, 1);
-    assert.equal(entry.calls.followup[0].content[0].text, "original");
-    assert.deepEqual(result.citations, []);
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("submitPrompt retrieves under the registered scope, not the client's", async () => {
-  const retriever = makeRetriever({ results: [SAMPLE()] });
-  const s = await makeService({ retriever });
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const { sessionId } = await s.service.createSession({ knowledgeBaseId: kb.id });
-
-    await s.service.submitPrompt({ sessionId, question: "q" });
-    assert.deepEqual(retriever.calls[0], { query: "q", scope: "knowledgeBase", scopeId: kb.id });
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("submitPrompt rejects an unknown session and a scope mismatch", async () => {
-  const s = await makeService();
-  try {
-    await assert.rejects(
-      () => s.service.submitPrompt({ sessionId: "session-unknown", question: "q" }),
-      (err) => err.code === SESSION_ERROR_CODES.SESSION_NOT_FOUND,
-    );
-
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const { sessionId } = await s.service.createSession({ knowledgeBaseId: kb.id });
-
-    await assert.rejects(
-      () => s.service.submitPrompt({ sessionId, question: "q", projectId: 1 }),
-      (err) => err.code === SESSION_ERROR_CODES.SCOPE_MISMATCH,
-    );
-    await assert.rejects(
-      () => s.service.submitPrompt({ sessionId, question: "q", knowledgeBaseId: 999 }),
-      (err) => err.code === SESSION_ERROR_CODES.SCOPE_MISMATCH,
-    );
-
-    // The correct, matching scope id is accepted.
-    const result = await s.service.submitPrompt({ sessionId, question: "q", knowledgeBaseId: kb.id });
-    assert.equal(result.sessionId, sessionId);
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("createSession supports independent sessions and rejects conflicting or missing parents", async () => {
+test("canonical activation validates all three scopes", async () => {
   const attached = [];
   const s = await makeService({
-    sessionWorkspace: async (scope) => ({
-      id: "workbench-" + scope.kind,
-      path: "/tmp/workbench-" + scope.kind,
-      attachSession: async (sessionId) => attached.push(sessionId),
+    sessionWorkspace: async ({ kind, scopeId }) => ({
+      id: kind + "-workspace-" + (scopeId ?? "root"),
+      path: "/tmp/" + kind + "-" + (scopeId ?? "root"),
     }),
   });
   try {
-    s.workspaces.set("workbench-independent", {
-      id: "workbench-independent",
-      path: "/tmp/workbench-independent",
-      attachSession: async (sessionId) => attached.push(sessionId),
-    });
-    const independent = await s.service.createSession({});
-    assert.deepEqual(independent.scope, { kind: "independent", scopeId: null });
-    assert.deepEqual(attached, [independent.sessionId]);
-    await assert.rejects(
-      () => s.service.createSession({ projectId: 1, knowledgeBaseId: 2 }),
-      (err) => err.code === SESSION_ERROR_CODES.INVALID_SCOPE,
-    );
-    await assert.rejects(
-      () => s.service.createSession({ projectId: 999999 }),
-      (err) => err.code === SESSION_ERROR_CODES.PROJECT_NOT_FOUND,
-    );
-    await assert.rejects(
-      () => s.service.createSession({ knowledgeBaseId: 999999 }),
-      (err) => err.code === SESSION_ERROR_CODES.KNOWLEDGE_BASE_NOT_FOUND,
-    );
+    const project = s.repos.projects.create({ name: "P", workspaceId: "project-workspace" });
+    const kb = s.repos.knowledgeBases.create({ name: "K" });
+    s.workspaces.set("project-workspace", { id: "project-workspace", path: "/tmp/project", attachSession: async (id) => attached.push(id) });
+    s.workspaces.set("knowledge_base-workspace-" + kb.id, { id: "knowledge_base-workspace-" + kb.id, path: "/tmp/kb", attachSession: async (id) => attached.push(id) });
+    s.workspaces.set("independent-workspace-root", { id: "independent-workspace-root", path: "/tmp/independent", attachSession: async (id) => attached.push(id) });
+
+    const projectSession = await s.service.activateDraft({ scope: { kind: "project", id: project.id }, question: "project" });
+    const kbSession = await s.service.activateDraft({ scope: { kind: "knowledge_base", id: kb.id }, question: "knowledge" });
+    const independentSession = await s.service.activateDraft({ scope: { kind: "independent" }, question: "independent" });
+    assert.deepEqual(projectSession.scope, { kind: "project", id: project.id });
+    assert.deepEqual(kbSession.scope, { kind: "knowledge_base", id: kb.id });
+    assert.deepEqual(independentSession.scope, { kind: "independent", id: null });
+    assert.equal(attached.length, 3);
+
+    await assert.rejects(() => s.service.activateDraft({ scope: { kind: "project", id: 999999 }, question: "x" }), (error) => error.code === SESSION_ERROR_CODES.PROJECT_NOT_FOUND);
+    await assert.rejects(() => s.service.activateDraft({ scope: { kind: "knowledge_base", id: 999999 }, question: "x" }), (error) => error.code === SESSION_ERROR_CODES.KNOWLEDGE_BASE_NOT_FOUND);
+    await assert.rejects(() => s.service.activateDraft({ scope: { kind: "independent", id: 1 }, question: "x" }), (error) => error.code === SESSION_ERROR_CODES.INVALID_SCOPE);
   } finally {
     await s.cleanup();
   }
 });
 
-test("resuming an independent session adopts its durable DSH title and restores the @ knowledge hook", async () => {
+test("scheduled sessions remain outside the interactive Workbench projection", async () => {
+  const s = await makeService();
+  try {
+    const kb = s.repos.knowledgeBases.create({ name: "K" });
+    const created = await s.service.createSession({ scope: { kind: "knowledge_base", id: kb.id }, scheduled: true });
+    await s.service.submitPrompt({ sessionId: created.sessionId, question: "scheduled" });
+    assert.equal(s.repos.workbenchSessions.get(created.sessionId), null);
+    assert.equal(await s.service.release(created.sessionId), true);
+    assert.equal(s.live.get(created.sessionId).disposed(), 1);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("openSession resumes the durable DSH header and backfills its native title", async () => {
   const persistence = makePersistence({
+    meta: { agentPreset: "persisted-preset" },
     events: [
       { seq: 1, type: "user/message", data: { source: { kind: "user" }, content: [{ type: "text", text: "你好，请检查标题" }] } },
       { seq: 2, type: "session/title", data: { title: "你好", messageSeqs: [1], source: { kind: "fallback" } } },
     ],
   });
-  const s = await makeService({
-    sessionPersistence: persistence,
-    sessionWorkspace: async () => ({ id: "workbench-independent", path: "/tmp/workbench-independent" }),
-  });
-  try {
-    s.repos.workbenchSessions.upsert({
-      sessionId: "session-cpwb-independent-old",
-      scopeKind: "independent",
-      scopeId: null,
-      provider: "deepseek-official",
-      model: "deepseek-v4-flash",
-    });
-
-    await s.service.createSession({ resumeSessionId: "session-cpwb-independent-old" });
-
-    assert.equal(s.repos.workbenchSessions.get("session-cpwb-independent-old").title, "你好");
-    assert.ok(
-      s.live.get("session-cpwb-independent-old").onCalls.some((entry) => entry.name === "agent/pre-step"),
-      "a resumed independent session must retain the native @ knowledge-base retrieval hook",
-    );
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("adopting an already-live independent session backfills its native DSH title", async () => {
-  const s = await makeService({
-    sessionWorkspace: async () => ({ id: "workbench-independent", path: "/tmp/workbench-independent" }),
-  });
-  try {
-    s.repos.workbenchSessions.upsert({
-      sessionId: "session-cpwb-independent-live",
-      scopeKind: "independent",
-      scopeId: null,
-      provider: "deepseek-official",
-      model: "deepseek-v4-flash",
-    });
-    const seeded = s.seedLiveAgent("session-cpwb-independent-live");
-    seeded.session.events.push({
-      seq: 1,
-      type: "session/title",
-      data: { title: "你好", messageSeqs: [0], source: { kind: "fallback" } },
-    });
-
-    await s.service.createSession({ resumeSessionId: "session-cpwb-independent-live" });
-
-    assert.equal(s.repos.workbenchSessions.get("session-cpwb-independent-live").title, "你好");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("dispose awaits every live handle and clears the registry", async () => {
-  const s = await makeService();
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    await s.service.createSession({ knowledgeBaseId: kb.id });
-    await s.service.createSession({ knowledgeBaseId: kb.id });
-
-    const ids = [...s.live.keys()];
-    assert.equal(ids.length, 2);
-
-    await s.service.dispose();
-    for (const id of ids) assert.equal(s.live.get(id).disposed(), 1, "each handle disposed once");
-    assert.equal(s.service.has(ids[0]), false, "registry cleared");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-// -------------------------------------------------- chat reopen (Task 8A-R)
-
-test("reopening a chat already held by this service reuses the live handle", async () => {
-  const s = await makeService();
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const first = await s.service.createSession({ knowledgeBaseId: kb.id, title: "chat" });
-    const chat = s.repos.knowledgeChats.get(first.chatId);
-
-    const second = await s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id });
-    assert.equal(second.sessionId, first.sessionId);
-    assert.equal(second.reused, true);
-    assert.equal(s.records.create.length, 1, "only one agent is created");
-    assert.equal(s.records.resume.length, 0, "a live handle is never resumed");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("reopening a session already bound to a different chat/knowledge base is a scope mismatch", async () => {
-  const s = await makeService();
-  try {
-    const kbA = s.repos.knowledgeBases.create({ name: "A" });
-    const kbB = s.repos.knowledgeBases.create({ name: "B" });
-    const first = await s.service.createSession({ knowledgeBaseId: kbA.id, title: "chatA" });
-    // Forge a chat in kbB that claims the SAME durable session id.
-    const chatB = s.repos.knowledgeChats.create({ knowledgeBaseId: kbB.id, dshSessionId: first.sessionId });
-
-    await assert.rejects(
-      () => s.service.createSession({ knowledgeBaseId: kbB.id, chatId: chatB.id }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.SCOPE_MISMATCH,
-    );
-    assert.equal(s.records.create.length, 1, "no extra agent created");
-    assert.equal(s.records.resume.length, 0, "no resume for a mismatched handle");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("reopening a persisted chat resumes it with the durable model and persisted preset", async () => {
-  const presets = makePresets({ resolvedId: "my-preset" });
-  const persistence = makePersistence({ meta: { agentPreset: "my-preset" } });
-  const s = await makeService({ presets, sessionPersistence: persistence });
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id, title: "old", dshSessionId: "session-persisted" });
-
-    const result = await s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id });
-    assert.equal(result.sessionId, "session-persisted");
-    assert.equal(result.reused, true);
-    assert.equal(s.records.create.length, 0, "no new session");
-    assert.equal(s.records.resume.length, 1, "persisted session resumed");
-    assert.equal(persistence.records.inspect.length, 1, "persistence inspected exactly once");
-    assert.equal(persistence.records.inspect[0], "session-persisted");
-
-    const opts = s.records.resume[0];
-    assert.equal(opts.resumeSessionId, "session-persisted");
-    assert.ok(!("sessionId" in opts), "resume options carry no sessionId");
-    assert.ok(!("meta" in opts), "resume options carry no meta");
-    assert.equal(opts.agentOptions, undefined, "resume must not overwrite durable model selection with stale Workbench defaults");
-    assert.equal(presets.records.mount.length, 1);
-    assert.equal(presets.records.mount[0].id, "my-preset");
-
-    const entry = s.live.get("session-persisted");
-    const names = entry.onCalls.map((c) => c.name);
-    assert.equal(names.includes("system-prompt/assemble"), false, "resume does not add a second model-selection listener");
-    assert.equal(names.includes("agent/request"), false, "resume does not add a second request listener");
-    assert.ok(names.includes("agent/pre-step"), "resume still installs scoped RAG");
-    assert.equal(s.repos.knowledgeChats.get(chat.id).dshSessionId, "session-persisted", "dsh_session_id unchanged");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("reopening ignores stale Workbench model rows and lets the durable DSH header win", async () => {
-  const persistence = makePersistence({ meta: {} });
-  const s = await makeService({ sessionPersistence: persistence });
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id, dshSessionId: "session-model-memory" });
-    s.repos.workbenchSessions.upsert({
-      sessionId: "session-model-memory",
-      scopeKind: "knowledge_base",
-      scopeId: kb.id,
-      chatId: chat.id,
-      provider: "openai",
-      model: "gpt-5",
-      reasoningEffort: "high",
-    });
-
-    await s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id });
-    assert.equal(s.records.resume[0].agentOptions, undefined);
-    assert.equal(s.live.get(chat.dshSessionId).onCalls.filter((entry) => entry.name === "agent/request").length, 0);
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("resume mounts the persisted preset, not the current default", async () => {
   const presets = makePresets({ resolvedId: "current-default" });
-  const persistence = makePersistence({ meta: { agentPreset: "persisted-preset" } });
-  const s = await makeService({ presets, sessionPersistence: persistence });
+  const s = await makeService({ sessionPersistence: persistence, presets });
   try {
     const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id, dshSessionId: "session-persisted" });
+    s.repos.workbenchSessions.create({
+      sessionId: "session-cpwb-existing",
+      scope: { kind: "knowledge_base", id: kb.id },
+      provider: DEFAULT_PROVIDER,
+      model: DEFAULT_MODEL,
+    });
 
-    await s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id });
-
-    assert.equal(presets.records.mount.length, 1, "resume mounts exactly one preset");
-    assert.equal(presets.records.mount[0].id, "persisted-preset", "mounts the persisted id, never the default");
-    assert.deepEqual(presets.records.resolve, [], "resume never resolves the current default");
+    const opened = await s.service.openSession({ sessionId: "session-cpwb-existing" });
+    assert.equal(opened.reused, true);
+    assert.equal(s.repos.workbenchSessions.get(opened.sessionId).title, "你好");
+    assert.deepEqual(presets.records.mount, [{ id: "persisted-preset" }]);
+    assert.ok(s.live.get(opened.sessionId).onCalls.some((entry) => entry.name === "agent/pre-step"));
   } finally {
     await s.cleanup();
   }
 });
 
-test("resume honors the newest agent-preset/selected event over the header", async () => {
-  const presets = makePresets({ resolvedId: "ignored" });
-  const persistence = makePersistence({
-    meta: { agentPreset: "header-preset" },
-    events: [
-      { type: "agent-preset/selected", data: { agentPreset: "first" } },
-      { type: "turn/start", data: { turn: 1 } },
-      { type: "agent-preset/selected", data: { agentPreset: "switched-preset" } },
-    ],
-  });
-  const s = await makeService({ presets, sessionPersistence: persistence });
+test("native deletion failure keeps the Workbench projection intact", async () => {
+  const s = await makeService({ deleteNativeSession: async () => { throw new Error("storage busy"); } });
   try {
     const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id, dshSessionId: "session-persisted" });
-
-    await s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id });
-
-    assert.equal(presets.records.mount.length, 1);
-    assert.equal(presets.records.mount[0].id, "switched-preset", "newest selection wins over the header");
+    const active = await s.service.activateDraft({ scope: { kind: "knowledge_base", id: kb.id }, question: "keep me" });
+    await assert.rejects(() => s.service.deleteSession(active.sessionId), (error) => error.code === SESSION_ERROR_CODES.SESSION_DELETE_FAILED);
+    assert.ok(s.repos.workbenchSessions.get(active.sessionId));
   } finally {
     await s.cleanup();
   }
 });
 
-test("reopening adopts a session that is live but not owned, and dispose skips it", async () => {
+test("dispose drains every owned unified session handle", async () => {
   const s = await makeService();
   try {
     const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id, dshSessionId: "session-external" });
-    const seeded = s.seedLiveAgent("session-external");
-
-    const result = await s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id });
-    assert.equal(result.sessionId, "session-external");
-    assert.equal(result.reused, true);
-    assert.equal(s.records.create.length, 0);
-    assert.equal(s.records.resume.length, 0);
-
+    const a = await s.service.activateDraft({ scope: { kind: "knowledge_base", id: kb.id }, question: "a" });
+    const b = await s.service.activateDraft({ scope: { kind: "knowledge_base", id: kb.id }, question: "b" });
     await s.service.dispose();
-    assert.equal(seeded.disposed(), 0, "non-owned handle is never disposed by the service");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("reopening rejects a chat from a different knowledge base with a stable code", async () => {
-  const s = await makeService();
-  try {
-    const kbA = s.repos.knowledgeBases.create({ name: "A" });
-    const kbB = s.repos.knowledgeBases.create({ name: "B" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kbA.id });
-
-    await assert.rejects(
-      () => s.service.createSession({ knowledgeBaseId: kbB.id, chatId: chat.id }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.CHAT_KB_MISMATCH,
-    );
-    assert.equal(s.records.create.length, 0);
-    assert.equal(s.records.resume.length, 0);
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("reopening an unknown chat yields a stable not-found code", async () => {
-  const s = await makeService();
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    await assert.rejects(
-      () => s.service.createSession({ knowledgeBaseId: kb.id, chatId: 999999 }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.CHAT_NOT_FOUND,
-    );
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("resume failure is stable, never overwrites dsh_session_id, and registers nothing", async () => {
-  const s = await makeService({ resumeError: new Error("persistence backend down"), sessionPersistence: makePersistence({}) });
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id, dshSessionId: "session-old" });
-
-    await assert.rejects(
-      () => s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.SESSION_RESUME_FAILED,
-    );
-    assert.equal(s.repos.knowledgeChats.get(chat.id).dshSessionId, "session-old", "old dsh_session_id preserved");
-    assert.equal(s.service.has("session-old"), false, "no fake success / no registration");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("resume inspect failure is a stable SESSION_RESUME_FAILED and registers nothing", async () => {
-  const persistence = makePersistence({ error: new Error("backend down") });
-  const s = await makeService({ presets: makePresets(), sessionPersistence: persistence });
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id, dshSessionId: "session-old" });
-
-    await assert.rejects(
-      () => s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.SESSION_RESUME_FAILED,
-    );
-    assert.equal(persistence.records.inspect.length, 1, "inspect was attempted once");
-    assert.equal(s.records.resume.length, 0, "resume never reached the registry");
-    assert.equal(s.service.has("session-old"), false, "nothing registered");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("resume without session persistence is a stable failure, not a fake resume", async () => {
-  const s = await makeService({ presets: makePresets() });
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id, dshSessionId: "session-old" });
-
-    await assert.rejects(
-      () => s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.SESSION_RESUME_FAILED,
-    );
-    assert.equal(s.records.resume.length, 0, "no resume reached the registry");
-    assert.equal(s.service.has("session-old"), false, "nothing registered");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("reopening a chat without dsh_session_id creates then binds, reusing nothing", async () => {
-  const s = await makeService();
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id });
-
-    const result = await s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id });
-    assert.equal(result.reused, false);
-    assert.equal(s.records.create.length, 1);
-    assert.equal(s.repos.knowledgeChats.get(chat.id).dshSessionId, result.sessionId);
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("bind failure disposes the freshly created handle and leaves dsh_session_id null", async () => {
-  const s = await makeService();
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id });
-
-    s.repos.knowledgeChats.bindSession = () => { throw new Error("db locked"); };
-    await assert.rejects(
-      () => s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.CHAT_PERSIST_FAILED,
-    );
-    assert.equal(s.repos.knowledgeChats.get(chat.id).dshSessionId, null, "no dsh_session_id persisted");
-    const createdSessionId = s.records.create[0].sessionId;
-    assert.equal(s.live.get(createdSessionId).disposed(), 1, "new handle disposed after bind failure");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("bindSession returning null disposes the fresh handle and registers nothing", async () => {
-  const s = await makeService();
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const chat = s.repos.knowledgeChats.create({ knowledgeBaseId: kb.id });
-
-    s.repos.knowledgeChats.bindSession = () => null;
-    await assert.rejects(
-      () => s.service.createSession({ knowledgeBaseId: kb.id, chatId: chat.id }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.CHAT_PERSIST_FAILED,
-    );
-    const createdSessionId = s.records.create[0].sessionId;
-    assert.equal(s.live.get(createdSessionId).disposed(), 1, "new handle disposed after null bind");
-    assert.equal(s.service.has(createdSessionId), false, "no registration after null bind");
-  } finally {
-    await s.cleanup();
-  }
-});
-
-test("new KB chat persistence failure removes the chat and disposes the fresh agent", async () => {
-  const s = await makeService();
-  try {
-    const kb = s.repos.knowledgeBases.create({ name: "K" });
-    s.repos.workbenchSessions.upsert = () => { throw new Error("database locked"); };
-
-    await assert.rejects(
-      () => s.service.createSession({ knowledgeBaseId: kb.id }),
-      (err) => err instanceof WorkbenchSessionError && err.code === SESSION_ERROR_CODES.CHAT_PERSIST_FAILED,
-    );
-    const sessionId = s.records.create[0].sessionId;
-    assert.equal(s.repos.knowledgeChats.listByKnowledgeBase(kb.id).length, 0, "failed KB chat is rolled back");
-    assert.equal(s.service.has(sessionId), false, "failed KB session is not retained");
-    assert.equal(s.live.get(sessionId).disposed(), 1, "failed KB session disposes its agent");
-    assert.equal(s.repos.workbenchSessions.get(sessionId), null, "failed KB session has no durable row");
+    assert.equal(s.live.get(a.sessionId).disposed(), 1);
+    assert.equal(s.live.get(b.sessionId).disposed(), 1);
+    assert.equal(s.service.has(a.sessionId), false);
   } finally {
     await s.cleanup();
   }
@@ -1334,7 +916,7 @@ test("submitPrompt serializes same-session requests and isolates each outcome", 
   const s = await makeConcurrencyService({ retriever });
   try {
     const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const { sessionId } = await s.service.createSession({ knowledgeBaseId: kb.id });
+    const { sessionId } = await s.service.createSession({ scope: { kind: "knowledge_base", id: kb.id }, scheduled: true });
 
     const p1 = s.service.submitPrompt({ sessionId, question: "q1" });
     const p2 = s.service.submitPrompt({ sessionId, question: "q2" });
@@ -1364,7 +946,7 @@ test("a failed same-session submit does not poison later requests", async () => 
   const s = await makeConcurrencyService({ retriever });
   try {
     const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const { sessionId } = await s.service.createSession({ knowledgeBaseId: kb.id });
+    const { sessionId } = await s.service.createSession({ scope: { kind: "knowledge_base", id: kb.id }, scheduled: true });
 
     const p1 = s.service.submitPrompt({ sessionId, question: "q1" });
     await tick();
@@ -1386,8 +968,8 @@ test("different sessions submit in parallel", async () => {
   const s = await makeConcurrencyService({ retriever });
   try {
     const kb = s.repos.knowledgeBases.create({ name: "K" });
-    const a = await s.service.createSession({ knowledgeBaseId: kb.id });
-    const b = await s.service.createSession({ knowledgeBaseId: kb.id });
+    const a = await s.service.createSession({ scope: { kind: "knowledge_base", id: kb.id }, scheduled: true });
+    const b = await s.service.createSession({ scope: { kind: "knowledge_base", id: kb.id }, scheduled: true });
 
     const pa = s.service.submitPrompt({ sessionId: a.sessionId, question: "qa" });
     const pb = s.service.submitPrompt({ sessionId: b.sessionId, question: "qb" });

@@ -45,11 +45,12 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** An HTTP error carrying a stable machine-readable code and a clean message. */
 class ApiError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    if (details !== undefined) this.details = details;
   }
 }
 
@@ -65,8 +66,11 @@ const SESSION_ERROR_STATUS = {
   [SESSION_ERROR_CODES.RETRIEVAL_FAILED]: 502,
   [SESSION_ERROR_CODES.CHAT_PERSIST_FAILED]: 500,
   [SESSION_ERROR_CODES.SESSION_CREATE_FAILED]: 500,
-  [SESSION_ERROR_CODES.CHAT_NOT_FOUND]: 404,
-  [SESSION_ERROR_CODES.CHAT_KB_MISMATCH]: 409,
+  [SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED]: 502,
+  [SESSION_ERROR_CODES.DRAFT_NOT_RETRYABLE]: 409,
+  [SESSION_ERROR_CODES.SESSION_RENAME_FAILED]: 500,
+  [SESSION_ERROR_CODES.SESSION_DELETE_FAILED]: 500,
+  [SESSION_ERROR_CODES.SESSION_DELETE_UNAVAILABLE]: 501,
   [SESSION_ERROR_CODES.SESSION_RESUME_FAILED]: 500,
 };
 
@@ -74,6 +78,32 @@ const SESSION_ERROR_STATUS = {
 
 function isPositiveInt(value) {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+function normalizeSessionScope(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError(422, "INVALID_SCOPE", "scope is required");
+  }
+  if (!["project", "knowledge_base", "independent"].includes(value.kind)) {
+    throw new ApiError(422, "INVALID_SCOPE", "scope.kind must be project, knowledge_base, or independent");
+  }
+  if (value.kind === "independent") {
+    if (value.id !== undefined && value.id !== null) {
+      throw new ApiError(422, "INVALID_SCOPE", "independent scope cannot have an id");
+    }
+    return { kind: "independent", id: null };
+  }
+  if (!isPositiveInt(value.id)) {
+    throw new ApiError(422, "INVALID_SCOPE", value.kind + " scope requires a positive id");
+  }
+  return { kind: value.kind, id: value.id };
+}
+
+function optionalSourceList(body, field) {
+  const value = body[field];
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new ApiError(422, "INVALID_FIELD", field + " must be an array");
+  return value;
 }
 
 /** True for a strict YYYY-MM-DD string that names a real calendar day. */
@@ -99,8 +129,15 @@ function ok(res, payload, status = 200) {
   sendJson(res, status, payload);
 }
 
-function fail(res, status, code, message) {
-  sendJson(res, status, { error: { code, message } });
+function fail(res, status, code, message, details) {
+  sendJson(res, status, { error: { code, message, ...(details === undefined ? {} : { details }) } });
+}
+
+function safeSessionErrorDetails(error) {
+  if (error?.code !== SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED || !error.details) return undefined;
+  const { sessionId, lifecycleStatus, pendingQuestion } = error.details;
+  if (typeof sessionId !== "string" || lifecycleStatus !== "draft_failed" || typeof pendingQuestion !== "string") return undefined;
+  return { sessionId, lifecycleStatus, pendingQuestion };
 }
 
 /** Map any thrown value into an ApiError with a stable, non-leaking code. */
@@ -119,7 +156,7 @@ function toApiError(err) {
     return new ApiError(422, err.code, err.message);
   }
   if (err instanceof WorkbenchSessionError) {
-    return new ApiError(SESSION_ERROR_STATUS[err.code] ?? 500, err.code, err.message);
+    return new ApiError(SESSION_ERROR_STATUS[err.code] ?? 500, err.code, err.message, safeSessionErrorDetails(err));
   }
   return new ApiError(500, "INTERNAL_ERROR", "internal server error");
 }
@@ -376,7 +413,11 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
 
   const hasRunSchedule = typeof services.runSchedule === "function";
   const hasRunSummary = typeof services.runSummary === "function";
-  const hasSessions = typeof sessions?.createSession === "function" && typeof sessions?.submitPrompt === "function";
+  const hasSessions = typeof sessions?.activateDraft === "function"
+    && typeof sessions?.retryDraft === "function"
+    && typeof sessions?.renameSession === "function"
+    && typeof sessions?.moveSession === "function"
+    && typeof sessions?.deleteSession === "function";
   const logError = typeof logger?.error === "function" ? logger.error.bind(logger) : () => {};
   const configuredTimeZone = () => settings?.get?.("timezone") ?? DEFAULT_TIME_ZONE;
 
@@ -926,29 +967,6 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, repos.automation?.update?.(patch) ?? patch);
   }
 
-  async function handleKnowledgeChatsList(req, res, { url }) {
-    const kbRaw = url.searchParams.get("knowledgeBaseId");
-    if (kbRaw != null) {
-      const knowledgeBaseId = queryPositiveInt(kbRaw, "knowledgeBaseId");
-      if (!repos.knowledgeBases.get(knowledgeBaseId)) {
-        throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + knowledgeBaseId);
-      }
-      ok(res, repos.knowledgeChats.listByKnowledgeBase(knowledgeBaseId));
-      return;
-    }
-    ok(res, repos.knowledgeChats.list());
-  }
-
-  async function handleKnowledgeChatCreate(req, res) {
-    const body = await readJsonBody(req);
-    const knowledgeBaseId = requirePositiveInt(body, "knowledgeBaseId");
-    if (!repos.knowledgeBases.get(knowledgeBaseId)) {
-      throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + knowledgeBaseId);
-    }
-    const title = optionalString(body, "title");
-    ok(res, repos.knowledgeChats.create({ knowledgeBaseId, title }), 201);
-  }
-
   // ----- project <-> knowledge-base association -----
 
   async function handleProjectKbs(req, res, { params }) {
@@ -986,74 +1004,81 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       throw new ApiError(501, "NOT_IMPLEMENTED", "session service is not available");
     }
     const body = await readJsonBody(req);
-    const projectId = body.projectId === undefined ? undefined : requirePositiveInt(body, "projectId");
-    const knowledgeBaseId = body.knowledgeBaseId === undefined ? undefined : requirePositiveInt(body, "knowledgeBaseId");
-    if (projectId !== undefined && knowledgeBaseId !== undefined) {
-      throw new ApiError(422, "INVALID_SCOPE", "provide at most one of projectId or knowledgeBaseId");
+    const legacyFields = ["projectId", "knowledgeBaseId", "chatId", "resumeSessionId"];
+    if (legacyFields.some((field) => body[field] !== undefined)) {
+      throw new ApiError(422, "INVALID_SCOPE", "use the canonical scope object");
     }
-    const title = optionalString(body, "title");
-    const chatId = body.chatId === undefined ? undefined : requirePositiveInt(body, "chatId");
-    const resumeSessionId = optionalString(body, "resumeSessionId");
-    const input = { title };
-    if (projectId !== undefined) input.projectId = projectId;
-    if (knowledgeBaseId !== undefined) input.knowledgeBaseId = knowledgeBaseId;
-    if (chatId !== undefined) input.chatId = chatId;
-    if (resumeSessionId != null) input.resumeSessionId = resumeSessionId;
-    const result = await sessions.createSession(input);
+    const input = {
+      scope: normalizeSessionScope(body.scope),
+      question: requireString(body, "question"),
+      pinnedSources: optionalSourceList(body, "pinnedSources"),
+      oneShotSources: optionalSourceList(body, "oneShotSources"),
+    };
+    const result = await sessions.activateDraft(input);
     ok(res, result, 201);
   }
 
   async function handleChatSessionList(req, res, { url }) {
-    const projectId = url.searchParams.get("projectId");
-    const knowledgeBaseId = url.searchParams.get("knowledgeBaseId");
-    if (projectId != null && knowledgeBaseId != null) {
-      throw new ApiError(422, "INVALID_SCOPE", "provide at most one of projectId or knowledgeBaseId");
-    }
-    if (projectId != null) {
-      const id = parseId(projectId);
-      if (!repos.projects.get(id)) throw new ApiError(404, "NOT_FOUND", "project not found: " + id);
-      ok(res, repos.workbenchSessions.list({ scopeKind: "project", scopeId: id }));
-      return;
-    }
-    if (knowledgeBaseId != null) {
-      const id = parseId(knowledgeBaseId);
-      if (!repos.knowledgeBases.get(id)) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + id);
-      ok(res, repos.workbenchSessions.list({ scopeKind: "knowledge_base", scopeId: id }));
-      return;
-    }
-
     const limit = Math.min(queryPositiveInt(url.searchParams.get("limit"), "limit") ?? 8, 100);
     const offset = queryNonNegativeInt(url.searchParams.get("offset"), "offset", 0);
     const query = url.searchParams.get("query") ?? "";
-    const scopeKind = url.searchParams.get("context");
+    const scopeKind = url.searchParams.get("scopeKind");
     if (scopeKind != null && !["project", "knowledge_base", "independent"].includes(scopeKind)) {
-      throw new ApiError(422, "INVALID_SCOPE", "context must be project, knowledge_base, or independent");
+      throw new ApiError(422, "INVALID_SCOPE", "scopeKind must be project, knowledge_base, or independent");
+    }
+    const scopeIdRaw = url.searchParams.get("scopeId");
+    if (scopeKind === "project" || scopeKind === "knowledge_base") {
+      const scopeId = queryPositiveInt(scopeIdRaw, "scopeId");
+      if (scopeId === undefined) throw new ApiError(422, "INVALID_SCOPE", "scopeId is required for this scopeKind");
+      ok(res, {
+        items: repos.workbenchSessions.list({ scopeKind, scopeId, lifecycleStatus: "active", limit, offset }),
+        total: repos.workbenchSessions.list({ scopeKind, scopeId, lifecycleStatus: "active", limit: 500, offset: 0 }).length,
+        limit,
+        offset,
+      });
+      return;
+    }
+    if (scopeKind === "independent" && scopeIdRaw != null) {
+      throw new ApiError(422, "INVALID_SCOPE", "independent scope cannot have a scopeId");
     }
     ok(res, {
-      items: repos.workbenchSessions.listAll({ scopeKind, query, limit, offset }),
-      total: repos.workbenchSessions.countAll({ scopeKind, query }),
+      items: repos.workbenchSessions.listAll({ scopeKind, query, lifecycleStatus: "active", limit, offset }),
+      total: repos.workbenchSessions.countAll({ scopeKind, query, lifecycleStatus: "active" }),
       limit,
       offset,
     });
   }
 
-  async function handleChatPromptCreate(req, res) {
+  async function handleChatSessionPatch(req, res, { params }) {
     if (!hasSessions) {
       throw new ApiError(501, "NOT_IMPLEMENTED", "session service is not available");
     }
     const body = await readJsonBody(req);
-    const sessionId = requireString(body, "sessionId");
-    const question = requireString(body, "question");
-    const projectId = body.projectId === undefined ? undefined : requirePositiveInt(body, "projectId");
-    const knowledgeBaseId = body.knowledgeBaseId === undefined ? undefined : requirePositiveInt(body, "knowledgeBaseId");
-    if (projectId !== undefined && knowledgeBaseId !== undefined) {
-      throw new ApiError(422, "INVALID_SCOPE", "provide at most one of projectId or knowledgeBaseId");
+    const sessionId = params.sessionId;
+    if (body.operation === "rename") {
+      ok(res, await sessions.renameSession({ sessionId, title: requireString(body, "title") }));
+      return;
     }
-    const input = { sessionId, question };
-    if (projectId !== undefined) input.projectId = projectId;
-    if (knowledgeBaseId !== undefined) input.knowledgeBaseId = knowledgeBaseId;
-    const result = await sessions.submitPrompt(input);
-    ok(res, result);
+    if (body.operation === "move") {
+      ok(res, await sessions.moveSession({ sessionId, scope: normalizeSessionScope(body.scope) }));
+      return;
+    }
+    if (body.operation === "retryDraft") {
+      ok(res, await sessions.retryDraft({
+        sessionId,
+        question: requireString(body, "question"),
+        oneShotSources: optionalSourceList(body, "oneShotSources"),
+      }));
+      return;
+    }
+    throw new ApiError(422, "INVALID_OPERATION", "operation must be rename, move, or retryDraft");
+  }
+
+  async function handleChatSessionDelete(req, res, { params }) {
+    if (!hasSessions) throw new ApiError(501, "NOT_IMPLEMENTED", "session service is not available");
+    const deleted = await sessions.deleteSession(params.sessionId);
+    if (!deleted) throw new ApiError(404, "NOT_FOUND", "session not found: " + params.sessionId);
+    ok(res, { deleted: true });
   }
 
   // ----- dispatcher (single source of truth for the approved surface) -----
@@ -1061,7 +1086,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
   const routes = [
     { pattern: "/health", methods: { GET: handleHealth } },
     { pattern: "/chat/sessions", methods: { GET: handleChatSessionList, POST: handleChatSessionCreate } },
-    { pattern: "/chat/prompts", methods: { POST: handleChatPromptCreate } },
+    { pattern: "/chat/sessions/:sessionId", methods: { PATCH: handleChatSessionPatch, DELETE: handleChatSessionDelete } },
     { pattern: "/projects", methods: { GET: handleProjectsList, POST: handleProjectCreate } },
     { pattern: "/projects/:id", methods: { PATCH: handleProjectPatch, DELETE: handleProjectDelete } },
     { pattern: "/knowledge-bases", methods: { GET: handleKnowledgeBasesList, POST: handleKnowledgeBaseCreate } },
@@ -1082,7 +1107,6 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     { pattern: "/summaries/run", methods: { POST: handleSummaryRun } },
     { pattern: "/summaries/:id", methods: { DELETE: handleSummaryDelete } },
     { pattern: "/projects/:projectId/automation", methods: { GET: handleAutomationGet, PATCH: handleAutomationPatch } },
-    { pattern: "/knowledge-chats", methods: { GET: handleKnowledgeChatsList, POST: handleKnowledgeChatCreate } },
     { pattern: "/projects/:projectId/knowledge-bases", methods: { GET: handleProjectKbs } },
     { pattern: "/projects/:projectId/knowledge-bases/:knowledgeBaseId", methods: { POST: handleProjectKbLink, DELETE: handleProjectKbUnlink } },
     { pattern: "/settings/embedding", methods: { GET: handleEmbeddingSettings, PATCH: handleEmbeddingPatch } },
@@ -1132,7 +1156,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       }
       const apiError = toApiError(err);
       if (shouldLogError(apiError, err)) logError(err);
-      fail(res, apiError.status, apiError.code, apiError.message);
+      fail(res, apiError.status, apiError.code, apiError.message, apiError.details);
     }
   }
 
