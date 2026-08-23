@@ -156,6 +156,7 @@ export function createRetriever({
   ollama,
   embedding,
   embeddingModel,
+  sessionIndex,
 }) {
   const embedder = embedding ?? ollama;
   const genericEmbedding = embedding != null;
@@ -365,5 +366,12 @@ export function createRetriever({
     return groups.slice(0, limit).map(toCitation);
   }
 
-  return { search };
+  async function searchSession(input) {
+    if (!sessionIndex || typeof sessionIndex.search !== "function") {
+      throw new RetrievalError(RETRIEVAL_ERROR_CODES.UNKNOWN_SCOPE, "session retrieval is unavailable");
+    }
+    return sessionIndex.search(input);
+  }
+
+  return { search, searchSession };
 }

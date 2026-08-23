@@ -137,6 +137,39 @@ test("deleteDocument removes every row of a document", async (t) => {
   assert.equal(hits2.length, 1, "document 2 rows remain");
 });
 
+test("session vectors share the configured LanceDB root but stay isolated by session id", async (t) => {
+  const dataDir = await createTempDir();
+  const idx = createVectorIndex({ dataDir, dimensions: DIM });
+  t.after(async () => {
+    await idx.close();
+    await removeTempDir(dataDir);
+  });
+
+  const sessionRow = (sessionId, ordinal, vectorIndex) => ({
+    row_id: sessionId + ":" + ordinal,
+    source_session_id: sessionId,
+    source_kind: "session",
+    ordinal,
+    message_id: "message-" + ordinal,
+    text: "session text " + ordinal,
+    vector: unit(DIM, vectorIndex),
+    content_hash: "session-hash-" + ordinal,
+    embedding_model: EMBEDDING_MODEL,
+  });
+
+  await idx.replaceSession("session-a", [sessionRow("session-a", 0, 7)]);
+  await idx.replaceSession("session-b", [sessionRow("session-b", 0, 7)]);
+  const hits = await idx.searchSession({ sourceSessionId: "session-a", vector: unit(DIM, 7), limit: 5 });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].sourceSessionId, "session-a");
+  assert.equal(hits[0].sourceKind, "session");
+  assert.equal(hits[0].text, "session text 0");
+
+  assert.equal(await idx.deleteSession("session-a"), 1);
+  assert.deepEqual(await idx.searchSession({ sourceSessionId: "session-a", vector: unit(DIM, 7), limit: 5 }), []);
+  assert.equal((await idx.searchSession({ sourceSessionId: "session-b", vector: unit(DIM, 7), limit: 5 })).length, 1);
+});
+
 test("scope documentIds filter is applied before topK", async (t) => {
   const dataDir = await createTempDir();
   const idx = createVectorIndex({ dataDir, dimensions: DIM });

@@ -45,7 +45,7 @@ test("ctx.config is not injected and must throw (real Cordis shape)", () => {
 });
 
 test("host injects the DSH agent/session/workspace services it composes", () => {
-  for (const name of ["webServer", "agents", "sessions", "workspaceRegistry"]) {
+  for (const name of ["webServer", "agents", "sessions", "workspaceRegistry", "sessionQuery"]) {
     assert.ok(inject.includes(name), "missing inject: " + name);
   }
   assert.equal(inject.includes("llm"), false, "the plugin must not register a generation adapter");

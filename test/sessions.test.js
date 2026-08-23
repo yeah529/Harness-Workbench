@@ -50,6 +50,7 @@ function makeMockAgent() {
     inject(message) { calls.inject.push(message); },
     followup(message) {
       calls.followup.push(message);
+      events.push({ seq: events.length, type: "user/message", data: { id: "user-" + events.length, ...message } });
       events.push({ seq: events.length, type: "turn/start", data: { turn: 1 } });
       events.push({
         seq: events.length,
@@ -238,7 +239,7 @@ test("native pre-step resolves dynamic context sources for every prompt", async 
 });
 
 /** Boot the real SQLite + repositories + session service over a mock ctx. */
-async function makeService({ presets, retriever, resumeError, sessionPersistence, sessionQuery, sessionWorkspace, renameNativeSession, deleteNativeSession } = {}) {
+async function makeService({ presets, retriever, resumeError, sessionPersistence, sessionQuery, sessionWorkspace, renameNativeSession, deleteNativeSession, sessionIndex } = {}) {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
@@ -250,6 +251,7 @@ async function makeService({ presets, retriever, resumeError, sessionPersistence
     sessionWorkspace,
     renameNativeSession,
     deleteNativeSession,
+    sessionIndex,
   });
   return {
     service, repos, db, dataDir, ctx, live, workspaces, records, seedLiveAgent,
@@ -281,6 +283,34 @@ test("unified draft activation creates one scoped DSH session on first prompt", 
     assert.equal(persisted.title, "完成接口验收");
     assert.equal(s.live.get(result.sessionId).calls.followup.length, 1);
     assert.equal(s.live.get(result.sessionId).calls.followup[0].content[0].text, "完成接口验收。继续补齐前端。");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("completed prompts persist one-shot message refs and refresh the session index", async () => {
+  const indexed = [];
+  const s = await makeService({
+    sessionWorkspace: async () => ({ id: "ws-independent", path: "/tmp/independent" }),
+    sessionIndex: { async reindex(sessionId) { indexed.push(sessionId); return 1; }, async remove() {} },
+  });
+  try {
+    const kb = s.repos.knowledgeBases.create({ name: "Referenced KB" });
+    s.workspaces.set("ws-independent", { id: "ws-independent", path: "/tmp/independent", attachSession: async () => {} });
+    const result = await s.service.activateDraft({
+      scope: { kind: "independent" },
+      question: "引用知识库完成回答",
+      oneShotSources: [{ kind: "knowledge_base", id: String(kb.id) }],
+    });
+    assert.deepEqual(indexed, [result.sessionId]);
+    assert.ok(result.userMessageId);
+    assert.deepEqual(s.repos.messageContextRefs.list({ sessionId: result.sessionId }), [{
+      sessionId: result.sessionId,
+      messageId: result.userMessageId,
+      sourceKind: "knowledge_base",
+      sourceId: String(kb.id),
+      createdAt: s.repos.messageContextRefs.list({ sessionId: result.sessionId })[0].createdAt,
+    }]);
   } finally {
     await s.cleanup();
   }

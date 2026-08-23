@@ -26,6 +26,7 @@ import { createEmbeddingAdapter } from "./embedding.js";
 import { localDateKey } from "./timezone.js";
 import { createCodexAuth } from "./codex-auth.js";
 import { createContextResolver } from "./context.js";
+import { createSessionIndexAdapter } from "./session-index.js";
 
 /**
  * Host plugin dependencies: the DSH web server, the LLM adapter registry, and
@@ -33,7 +34,7 @@ import { createContextResolver } from "./context.js";
  * composes. Optional services are read from the injected context without
  * probing the DSH context accessor for names that may not be registered.
  */
-const inject = ["webServer", "agents", "sessions", "workspaceRegistry", "credentials"];
+const inject = ["webServer", "agents", "sessions", "workspaceRegistry", "credentials", "sessionQuery"];
 
 function optionalContextService(ctx, name) {
   // Cordis only exposes injected services as context properties. The `in`
@@ -132,7 +133,11 @@ function apply(ctx, config = {}) {
         }
       };
       indexer = createDocumentIndexer({ repos, vectorIndex, embedding });
-      const retriever = createRetriever({ repos, vectorIndex, embedding });
+      const sessionQuery = optionalContextService(ctx, "sessionQuery");
+      const sessionIndex = sessionQuery && typeof sessionQuery.readSession === "function"
+        ? createSessionIndexAdapter({ sessionQuery, embedding, vectorStore: vectorIndex })
+        : null;
+      const retriever = createRetriever({ repos, vectorIndex, embedding, sessionIndex });
       void indexer.reconcileStale().catch(() => {});
       queue = createIndexQueue({ repos, indexer });
       const sessionWorkspace = async ({ kind, scopeId }) => {
@@ -147,7 +152,7 @@ function apply(ctx, config = {}) {
         const title = kind === "knowledge_base" ? "Workbench KB " + scopeId : "Workbench Independent";
         return existing ?? ctx.workspaceRegistry.create(path, title);
       };
-      sessionService = createSessionService({ ctx, repos, retriever, sessionWorkspace, contextResolver });
+      sessionService = createSessionService({ ctx, repos, retriever, sessionWorkspace, contextResolver, sessionIndex });
       const runPrompt = createScheduledRunPrompt(sessionService);
       scheduler = createScheduler({
         repos,

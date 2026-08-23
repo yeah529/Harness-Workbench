@@ -60,6 +60,11 @@ function messageText(message) {
     .trim();
 }
 
+function userMessageIdentity(event) {
+  const value = event?.data?.id ?? event?.data?.message?.id ?? event?.id ?? event?.seq;
+  return value == null ? null : String(value);
+}
+
 function isWorkbenchRecall(message) {
   return message?.source?.kind === "plugin"
     && message.source.plugin === "dsh-cyberpunk-workbench"
@@ -493,7 +498,16 @@ export async function submitWorkbenchPrompt(ctx, { sessionId, question, citation
   await agent.whenIdle();
   await ctx.sessions.flush(agent.session);
 
-  return { citations, outcome: summarizeTurn(agent.session.events, firstSeq) };
+  const userEvent = agent.session.events.find((event) =>
+    event.seq >= firstSeq
+      && event.type === "user/message"
+      && event.data?.source?.kind === "user",
+  );
+  return {
+    citations,
+    outcome: summarizeTurn(agent.session.events, firstSeq),
+    userMessageId: userMessageIdentity(userEvent),
+  };
 }
 
 // ---------------------------------------------------------- session service
@@ -519,6 +533,7 @@ export function createSessionService({
   contextResolver,
   renameNativeSession,
   deleteNativeSession,
+  sessionIndex,
 }) {
   if (!ctx || !repos || !retriever) {
     throw new Error("createSessionService requires ctx, repos, and retriever");
@@ -827,9 +842,15 @@ export function createSessionService({
         }
       }
 
-      const { outcome } = await submitWorkbenchPrompt(ctx, { sessionId, question, citations });
+      const { outcome, userMessageId } = await submitWorkbenchPrompt(ctx, { sessionId, question, citations });
+      if (userMessageId && oneShotSources.length > 0) {
+        repos.messageContextRefs.addMany({ sessionId, messageId: userMessageId, sources: oneShotSources });
+      }
+      if (sessionIndex && typeof sessionIndex.reindex === "function") {
+        await sessionIndex.reindex(sessionId).catch(() => {});
+      }
       if (repos.workbenchSessions.get(sessionId)) repos.workbenchSessions.touch(sessionId);
-      return { sessionId, citations, outcome };
+      return { sessionId, citations, outcome, userMessageId };
     };
 
     const result = entry.tail.then(work, work);
@@ -948,6 +969,9 @@ export function createSessionService({
     try {
       const deleted = await deleteNativeSession({ sessionId });
       if (deleted === false) throw new Error("native session was not deleted");
+      if (sessionIndex && typeof sessionIndex.remove === "function") {
+        await sessionIndex.remove(sessionId);
+      }
     } catch (error) {
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_DELETE_FAILED, "failed to delete native session", error);
     }
