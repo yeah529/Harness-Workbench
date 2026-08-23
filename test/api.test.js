@@ -142,7 +142,7 @@ function makeFakeIndexer(repos) {
 
 /** A fake unified session service that records calls and returns canned results. */
 function makeFakeSessionService({ activateResult, activateError, retryResult, retryError } = {}) {
-  const calls = { activate: [], retry: [], rename: [], move: [], delete: [] };
+  const calls = { activate: [], retry: [], rename: [], move: [], delete: [], contextGet: [], contextSet: [], contextRemove: [] };
   return {
     calls,
     async activateDraft(input) {
@@ -158,6 +158,9 @@ function makeFakeSessionService({ activateResult, activateError, retryResult, re
     async renameSession(input) { calls.rename.push(input); return { sessionId: input.sessionId, title: input.title, titleLocked: true }; },
     async moveSession(input) { calls.move.push(input); return { sessionId: input.sessionId, scope: input.scope }; },
     async deleteSession(sessionId) { calls.delete.push(sessionId); return true; },
+    getContext(sessionId) { calls.contextGet.push(sessionId); return [{ kind: "knowledge_base", id: "2", state: "inherited", available: true }]; },
+    setContext(input) { calls.contextSet.push(input); return { ...input.source, state: input.mode }; },
+    removeContext(input) { calls.contextRemove.push(input); return true; },
     async dispose() {},
   };
 }
@@ -1345,6 +1348,26 @@ test("DELETE /chat/sessions/:id delegates native-first deletion", async (t) => {
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { deleted: true });
   assert.deepEqual(fake.calls.delete, ["session-1"]);
+});
+
+test("session context API reads, updates, and removes source overrides", async (t) => {
+  const fake = makeFakeSessionService();
+  const { base } = await startApi(t, { sessions: fake });
+  const path = base + "/chat/sessions/session-1/context";
+
+  let res = await fetch(path);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json())[0].state, "inherited");
+  res = await fetch(path, {
+    method: "PUT", headers: JSON_HEADERS,
+    body: JSON.stringify({ source: { kind: "knowledge_base", id: "2" }, mode: "pinned" }),
+  });
+  assert.equal(res.status, 200);
+  res = await fetch(path + "?sourceKind=knowledge_base&sourceId=2", { method: "DELETE" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(fake.calls.contextGet, ["session-1"]);
+  assert.deepEqual(fake.calls.contextSet, [{ sessionId: "session-1", source: { kind: "knowledge_base", id: "2" }, mode: "pinned" }]);
+  assert.deepEqual(fake.calls.contextRemove, [{ sessionId: "session-1", source: { kind: "knowledge_base", id: "2" } }]);
 });
 
 test("unified session API rejects legacy fields and removes /chat/prompts", async (t) => {

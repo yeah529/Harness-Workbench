@@ -167,7 +167,7 @@ export function createRetriever({
     // An empty query is a clean "no results", never an error.
     if (typeof query !== "string" || query.trim() === "") return [];
 
-    if (scope !== "project" && scope !== "knowledgeBase") {
+    if (scope !== "project" && scope !== "knowledgeBase" && scope !== "document") {
       throw new RetrievalError(
         RETRIEVAL_ERROR_CODES.UNKNOWN_SCOPE,
         "unknown retrieval scope: " + String(scope),
@@ -178,7 +178,9 @@ export function createRetriever({
 
     const entity = scope === "project"
       ? repos.projects.get(scopeId)
-      : repos.knowledgeBases.get(scopeId);
+      : scope === "knowledgeBase"
+        ? repos.knowledgeBases.get(scopeId)
+        : repos.documents.get(scopeId);
     if (!entity) {
       throw new RetrievalError(
         RETRIEVAL_ERROR_CODES.INVALID_SCOPE_ID,
@@ -187,7 +189,9 @@ export function createRetriever({
     }
 
     // Resolve the scope live from SQLite associations (ready documents only).
-    const scopeIds = repos.documents.scopeDocumentIds({ scope, scopeId });
+    const scopeIds = scope === "document"
+      ? (entity.status === "ready" ? [entity.id] : [])
+      : repos.documents.scopeDocumentIds({ scope, scopeId });
     if (scopeIds.length === 0) return [];
     const scopeIdSet = new Set(scopeIds);
 

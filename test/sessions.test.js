@@ -208,6 +208,35 @@ test("native pre-step RAG rejects before model entry when retrieval fails", asyn
   assert.deepEqual(result, { kind: "reject" });
 });
 
+test("native pre-step resolves dynamic context sources for every prompt", async () => {
+  const calls = [];
+  const contextResolver = {
+    resolveForPrompt(input) {
+      assert.equal(input.sessionId, "session-dynamic");
+      return [
+        { kind: "workspace_file", id: "4", state: "inherited", available: true },
+        { kind: "knowledge_base", id: "7", state: "pinned", available: true },
+        { kind: "uploaded_file", id: "9", state: "one_shot", available: true },
+      ];
+    },
+  };
+  const listener = createWorkbenchRagPreStep({
+    retriever: { async search(input) { calls.push(input); return []; } },
+    contextResolver,
+    sessionId: "session-dynamic",
+    scope: { kind: "independent", id: null },
+  });
+  await listener({ signal: new AbortController().signal }, async () => ({
+    kind: "enter",
+    messages: [{ content: [{ type: "text", text: "question" }], source: { kind: "user" } }],
+  }));
+  assert.deepEqual(calls.map(({ scope, scopeId }) => [scope, scopeId]), [
+    ["project", 4],
+    ["knowledgeBase", 7],
+    ["document", 9],
+  ]);
+});
+
 /** Boot the real SQLite + repositories + session service over a mock ctx. */
 async function makeService({ presets, retriever, resumeError, sessionPersistence, sessionQuery, sessionWorkspace, renameNativeSession, deleteNativeSession } = {}) {
   const dataDir = await createTempDir();

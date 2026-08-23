@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { saveFile, FileStorageError, FILE_ERROR_CODES } from "./files.js";
 import { RetrievalError } from "./retrieval.js";
 import { WorkbenchSessionError, SESSION_ERROR_CODES } from "./session-errors.js";
+import { ContextSourceError } from "./context.js";
 import { nextScheduleOccurrence, scheduleRuleFromInput } from "./scheduler.js";
 import { DEFAULT_TIME_ZONE } from "./timezone.js";
 import { embeddingIdentity } from "./embedding.js";
@@ -68,6 +69,7 @@ const SESSION_ERROR_STATUS = {
   [SESSION_ERROR_CODES.SESSION_CREATE_FAILED]: 500,
   [SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED]: 502,
   [SESSION_ERROR_CODES.DRAFT_NOT_RETRYABLE]: 409,
+  [SESSION_ERROR_CODES.CONTEXT_SOURCE_UNAVAILABLE]: 422,
   [SESSION_ERROR_CODES.SESSION_RENAME_FAILED]: 500,
   [SESSION_ERROR_CODES.SESSION_DELETE_FAILED]: 500,
   [SESSION_ERROR_CODES.SESSION_DELETE_UNAVAILABLE]: 501,
@@ -104,6 +106,18 @@ function optionalSourceList(body, field) {
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw new ApiError(422, "INVALID_FIELD", field + " must be an array");
   return value;
+}
+
+function normalizeContextSource(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError(422, "INVALID_CONTEXT_SOURCE", "source is required");
+  }
+  if (!["knowledge_base", "workspace_file", "uploaded_file", "session"].includes(value.kind)) {
+    throw new ApiError(422, "INVALID_CONTEXT_SOURCE", "invalid context source kind");
+  }
+  const id = String(value.id ?? "").trim();
+  if (!id) throw new ApiError(422, "INVALID_CONTEXT_SOURCE", "context source id is required");
+  return { kind: value.kind, id };
 }
 
 /** True for a strict YYYY-MM-DD string that names a real calendar day. */
@@ -153,6 +167,9 @@ function toApiError(err) {
     return new ApiError(422, err.code, err.message);
   }
   if (err instanceof RetrievalError) {
+    return new ApiError(422, err.code, err.message);
+  }
+  if (err instanceof ContextSourceError) {
     return new ApiError(422, err.code, err.message);
   }
   if (err instanceof WorkbenchSessionError) {
@@ -418,6 +435,9 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     && typeof sessions?.renameSession === "function"
     && typeof sessions?.moveSession === "function"
     && typeof sessions?.deleteSession === "function";
+  const hasSessionContext = typeof sessions?.getContext === "function"
+    && typeof sessions?.setContext === "function"
+    && typeof sessions?.removeContext === "function";
   const logError = typeof logger?.error === "function" ? logger.error.bind(logger) : () => {};
   const configuredTimeZone = () => settings?.get?.("timezone") ?? DEFAULT_TIME_ZONE;
 
@@ -1081,11 +1101,47 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, { deleted: true });
   }
 
+  async function handleChatSessionContextGet(req, res, { params }) {
+    if (!hasSessionContext) {
+      throw new ApiError(501, "NOT_IMPLEMENTED", "session context service is not available");
+    }
+    ok(res, sessions.getContext(params.sessionId));
+  }
+
+  async function handleChatSessionContextPut(req, res, { params }) {
+    if (!hasSessionContext) {
+      throw new ApiError(501, "NOT_IMPLEMENTED", "session context service is not available");
+    }
+    const body = await readJsonBody(req);
+    if (!["pinned", "disabled"].includes(body.mode)) {
+      throw new ApiError(422, "INVALID_CONTEXT_MODE", "mode must be pinned or disabled");
+    }
+    ok(res, sessions.setContext({
+      sessionId: params.sessionId,
+      source: normalizeContextSource(body.source),
+      mode: body.mode,
+    }));
+  }
+
+  async function handleChatSessionContextDelete(req, res, { params, url }) {
+    if (!hasSessionContext) {
+      throw new ApiError(501, "NOT_IMPLEMENTED", "session context service is not available");
+    }
+    const source = normalizeContextSource({
+      kind: url.searchParams.get("sourceKind"),
+      id: url.searchParams.get("sourceId"),
+    });
+    ok(res, {
+      removed: Boolean(sessions.removeContext({ sessionId: params.sessionId, source })),
+    });
+  }
+
   // ----- dispatcher (single source of truth for the approved surface) -----
 
   const routes = [
     { pattern: "/health", methods: { GET: handleHealth } },
     { pattern: "/chat/sessions", methods: { GET: handleChatSessionList, POST: handleChatSessionCreate } },
+    { pattern: "/chat/sessions/:sessionId/context", methods: { GET: handleChatSessionContextGet, PUT: handleChatSessionContextPut, DELETE: handleChatSessionContextDelete } },
     { pattern: "/chat/sessions/:sessionId", methods: { PATCH: handleChatSessionPatch, DELETE: handleChatSessionDelete } },
     { pattern: "/projects", methods: { GET: handleProjectsList, POST: handleProjectCreate } },
     { pattern: "/projects/:id", methods: { PATCH: handleProjectPatch, DELETE: handleProjectDelete } },

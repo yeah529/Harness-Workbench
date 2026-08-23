@@ -618,6 +618,31 @@ test("retriever isolates project scope and expands knowledgeBase scope from live
   );
 });
 
+test("retriever can target one uploaded document without expanding its container links", async (t) => {
+  const h = await makeHarness(makeFixedOllama(unit(DIM, 0)));
+  t.after(h.dispose);
+  const first = await seedDocument({
+    repos: h.repos,
+    vectorIndex: h.vectorIndex,
+    sha256: "1".repeat(64),
+    originalName: "first.md",
+    chunks: [mkChunk(0, "needle first")],
+    vectors: [unit(DIM, 1)],
+  });
+  const second = await seedDocument({
+    repos: h.repos,
+    vectorIndex: h.vectorIndex,
+    sha256: "2".repeat(64),
+    originalName: "second.md",
+    chunks: [mkChunk(0, "needle second")],
+    vectors: [unit(DIM, 1)],
+  });
+
+  const result = await h.retriever.search({ query: "needle", scope: "document", scopeId: first.doc.id });
+  assert.deepEqual([...new Set(result.map((item) => item.documentId))], [first.doc.id]);
+  assert.ok(!result.some((item) => item.documentId === second.doc.id));
+});
+
 test("failed, stale, and parsing documents are invisible despite live chunks and vectors", async (t) => {
   const h = await makeHarness(makeFixedOllama(unit(DIM, 0)));
   t.after(h.dispose);

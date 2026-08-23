@@ -25,6 +25,7 @@ import { createWorkbenchSettings } from "./settings.js";
 import { createEmbeddingAdapter } from "./embedding.js";
 import { localDateKey } from "./timezone.js";
 import { createCodexAuth } from "./codex-auth.js";
+import { createContextResolver } from "./context.js";
 
 /**
  * Host plugin dependencies: the DSH web server, the LLM adapter registry, and
@@ -96,6 +97,7 @@ function apply(ctx, config = {}) {
     try {
       db = openDatabase({ dataDir });
       const repos = createRepositories(db);
+      const contextResolver = createContextResolver({ repos });
       const settings = createWorkbenchSettings({ repos, dshInitial: config.settings?.initial });
       const ollama = createOllamaClient();
       vectorIndex = createVectorIndex({ dataDir });
@@ -145,7 +147,7 @@ function apply(ctx, config = {}) {
         const title = kind === "knowledge_base" ? "Workbench KB " + scopeId : "Workbench Independent";
         return existing ?? ctx.workspaceRegistry.create(path, title);
       };
-      sessionService = createSessionService({ ctx, repos, retriever, sessionWorkspace });
+      sessionService = createSessionService({ ctx, repos, retriever, sessionWorkspace, contextResolver });
       const runPrompt = createScheduledRunPrompt(sessionService);
       scheduler = createScheduler({
         repos,

@@ -78,6 +78,15 @@ function retrievalScopeKind(scopeKind) {
   return scopeKind === "knowledge_base" ? "knowledgeBase" : scopeKind;
 }
 
+function retrievalInputForSource(source) {
+  const scopeId = Number(source.id);
+  if (!Number.isSafeInteger(scopeId) || scopeId <= 0) return null;
+  if (source.kind === "knowledge_base") return { scope: "knowledgeBase", scopeId };
+  if (source.kind === "workspace_file") return { scope: "project", scopeId };
+  if (source.kind === "uploaded_file") return { scope: "document", scopeId };
+  return null;
+}
+
 /** Derive a concise persistent title from the first natural user sentence. */
 export function deriveSessionTitle(value) {
   const plain = stripKnowledgeBaseReferences(value)
@@ -102,7 +111,7 @@ function persistedSessionTitle(events) {
  * model step. The adapter is deliberately fail-closed: a retrieval failure
  * rejects the step, so the native SessionFace never sends a model request.
  */
-export function createWorkbenchRagPreStep({ retriever, scope, onQuestion }) {
+export function createWorkbenchRagPreStep({ retriever, scope, onQuestion, contextResolver, sessionId }) {
   if (!retriever || typeof retriever.search !== "function") {
     throw new TypeError("createWorkbenchRagPreStep requires retriever.search");
   }
@@ -119,16 +128,31 @@ export function createWorkbenchRagPreStep({ retriever, scope, onQuestion }) {
     try { await onQuestion?.(rawQuestion); } catch { /* title metadata never blocks a model turn */ }
     if (decision.messages.some(isWorkbenchRecall)) return decision;
     const question = stripKnowledgeBaseReferences(rawQuestion);
-    const scopes = [];
-    if (isKnowledgeScopedSession(scope)) scopes.push({ scope: retrievalScopeKind(scope.kind), scopeId: scopeIdOf(scope) });
-    for (const scopeId of extractKnowledgeBaseReferenceIds(rawQuestion)) {
-      if (!scopes.some((item) => item.scope === "knowledgeBase" && item.scopeId === scopeId)) {
-        scopes.push({ scope: "knowledgeBase", scopeId });
-      }
-    }
-    if (scopes.length === 0) return decision;
+    let scopes = [];
     let citations = [];
     try {
+      if (contextResolver && sessionId) {
+        const sources = contextResolver.resolveForPrompt({
+          sessionId,
+          oneShotSources: extractKnowledgeBaseReferenceIds(rawQuestion).map((id) => ({ kind: "knowledge_base", id: String(id) })),
+        });
+        scopes = sources.map(retrievalInputForSource).filter(Boolean);
+        const sessionSources = sources.filter((source) => source.kind === "session");
+        if (sessionSources.length > 0 && typeof retriever.searchSession !== "function") {
+          return { kind: "reject" };
+        }
+        for (const source of sessionSources) {
+          const found = await retriever.searchSession({ sourceSessionId: source.id, query: question || rawQuestion, signal });
+          if (Array.isArray(found)) citations.push(...found);
+        }
+      } else {
+        if (isKnowledgeScopedSession(scope)) scopes.push({ scope: retrievalScopeKind(scope.kind), scopeId: scopeIdOf(scope) });
+        for (const scopeId of extractKnowledgeBaseReferenceIds(rawQuestion)) {
+          if (!scopes.some((item) => item.scope === "knowledgeBase" && item.scopeId === scopeId)) {
+            scopes.push({ scope: "knowledgeBase", scopeId });
+          }
+        }
+      }
       for (const item of scopes) {
         const found = await retriever.search({ query: question || rawQuestion, ...item, signal });
         if (Array.isArray(found)) citations.push(...found);
@@ -492,6 +516,7 @@ export function createSessionService({
   repos,
   retriever,
   sessionWorkspace,
+  contextResolver,
   renameNativeSession,
   deleteNativeSession,
 }) {
@@ -542,7 +567,7 @@ export function createSessionService({
     if (title) repos.workbenchSessions.setTitleIfEmpty(sessionId, title);
   }
 
-  function installScopedRag(agent, scope, sessionId) {
+  function installScopedRag(agent, scope, sessionId, useResolvedContext = true) {
     if (typeof agent?.ctx?.on !== "function") {
       throw new WorkbenchSessionError(
         SESSION_ERROR_CODES.SESSION_CREATE_FAILED,
@@ -552,6 +577,8 @@ export function createSessionService({
     return agent.ctx.on("agent/pre-step", createWorkbenchRagPreStep({
       retriever,
       scope,
+      contextResolver: useResolvedContext ? contextResolver : undefined,
+      sessionId,
       onQuestion: (question) => recordTitle(sessionId, question),
     }), { prepend: true });
   }
@@ -736,7 +763,7 @@ export function createSessionService({
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_CREATE_FAILED, "session create failed", err);
     }
 
-    const cleanup = installScopedRag(created.agent, scope, created.sessionId);
+    const cleanup = installScopedRag(created.agent, scope, created.sessionId, !scheduled);
     registerHandle(created.sessionId, { dispose: created.dispose, cleanup, scope, owned: true });
     return { sessionId: created.sessionId, scope, reused: false, scheduled };
   }
@@ -751,7 +778,7 @@ export function createSessionService({
     return createScopedSession({ scope, scheduled: true });
   }
 
-  async function submitPrompt({ sessionId, question }) {
+  async function submitPrompt({ sessionId, question, oneShotSources = [] }) {
     const entry = handles.get(sessionId);
     if (!entry) {
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "session not found: " + sessionId);
@@ -768,7 +795,27 @@ export function createSessionService({
       recordTitle(sessionId, question);
       // Retrieve BEFORE any message is sent: a retrieval failure sends nothing.
       let citations = [];
-      if (isKnowledgeScopedSession(entry.scope)) {
+      if (contextResolver && repos.workbenchSessions.get(sessionId)) {
+        try {
+          const sources = contextResolver.resolveForPrompt({ sessionId, oneShotSources });
+          for (const source of sources) {
+            if (source.kind === "session") {
+              if (typeof retriever.searchSession !== "function") {
+                throw new Error("session context index is unavailable");
+              }
+              const found = await retriever.searchSession({ sourceSessionId: source.id, query: question });
+              if (Array.isArray(found)) citations.push(...found);
+              continue;
+            }
+            const input = retrievalInputForSource(source);
+            if (!input) continue;
+            const found = await retriever.search({ query: question, ...input });
+            if (Array.isArray(found)) citations.push(...found);
+          }
+        } catch (err) {
+          throw new WorkbenchSessionError(SESSION_ERROR_CODES.RETRIEVAL_FAILED, "knowledge retrieval failed", err);
+        }
+      } else if (isKnowledgeScopedSession(entry.scope)) {
         try {
           citations = await retriever.search({
             query: question,
@@ -790,7 +837,7 @@ export function createSessionService({
     return result;
   }
 
-  async function activateDraft({ scope, question }) {
+  async function activateDraft({ scope, question, pinnedSources = [], oneShotSources = [] }) {
     const title = deriveSessionTitle(question);
     if (!title) {
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED, "first prompt must not be empty");
@@ -805,7 +852,12 @@ export function createSessionService({
       dispose: handles.get(created.sessionId)?.dispose,
     });
     try {
-      const result = await submitPrompt({ sessionId: created.sessionId, question });
+      if (contextResolver) {
+        for (const source of pinnedSources) {
+          contextResolver.setOverride({ sessionId: created.sessionId, source, mode: "pinned" });
+        }
+      }
+      const result = await submitPrompt({ sessionId: created.sessionId, question, oneShotSources });
       const saved = repos.workbenchSessions.updateLifecycle({ sessionId: created.sessionId, lifecycleStatus: "active" });
       return { ...result, ...saved };
     } catch (error) {
@@ -819,7 +871,7 @@ export function createSessionService({
     }
   }
 
-  async function retryDraft({ sessionId, question }) {
+  async function retryDraft({ sessionId, question, oneShotSources = [] }) {
     const saved = repos.workbenchSessions.get(sessionId);
     if (!saved) throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "workbench session not found: " + sessionId);
     if (saved.lifecycleStatus !== "draft_failed") {
@@ -827,7 +879,7 @@ export function createSessionService({
     }
     if (!handles.has(sessionId)) await reopenScopedSession({ sessionId });
     try {
-      const result = await submitPrompt({ sessionId, question });
+      const result = await submitPrompt({ sessionId, question, oneShotSources });
       const active = repos.workbenchSessions.updateLifecycle({ sessionId, lifecycleStatus: "active" });
       return { ...result, ...active };
     } catch (error) {
@@ -878,7 +930,9 @@ export function createSessionService({
       entry.cleanup = installScopedRag(ctx.agents.get(SessionId(sessionId)), scope, sessionId);
       entry.scope = scope;
     }
-    return repos.workbenchSessions.updateScope({ sessionId, scope });
+    const moved = repos.workbenchSessions.updateScope({ sessionId, scope });
+    contextResolver?.rebase({ sessionId, fromScope: saved.scope, toScope: scope });
+    return moved;
   }
 
   async function deleteSession(sessionId) {
@@ -898,6 +952,29 @@ export function createSessionService({
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_DELETE_FAILED, "failed to delete native session", error);
     }
     return repos.workbenchSessions.remove(sessionId);
+  }
+
+  function requireContextResolver() {
+    if (!contextResolver) {
+      throw new WorkbenchSessionError(
+        SESSION_ERROR_CODES.CONTEXT_SOURCE_UNAVAILABLE,
+        "session context resolver is unavailable",
+      );
+    }
+    return contextResolver;
+  }
+
+  function getContext(sessionId) {
+    return requireContextResolver().resolve({ sessionId });
+  }
+
+  function setContext({ sessionId, source, mode }) {
+    requireContextResolver().setOverride({ sessionId, source, mode });
+    return getContext(sessionId);
+  }
+
+  function removeContext({ sessionId, source }) {
+    return requireContextResolver().removeOverride({ sessionId, source });
   }
 
   async function dispose() {
@@ -941,6 +1018,9 @@ export function createSessionService({
     renameSession,
     moveSession,
     deleteSession,
+    getContext,
+    setContext,
+    removeContext,
     readProjectDailyConversation,
     release,
     dispose,
