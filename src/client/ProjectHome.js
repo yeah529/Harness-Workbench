@@ -1,6 +1,7 @@
 import React from "react";
 import { ArrowUpRight, Database, PencilSimple, Trash } from "@phosphor-icons/react";
 import { glyph, ICONS, Empty } from "./icons.js";
+import { ContainerDeleteDialog } from "./ContainerDeleteDialog.js";
 
 let homeOpen = true;
 const homeListeners = new Set();
@@ -153,7 +154,6 @@ export function ProjectHome(props) {
   });
   const error = enterError || state.error;
   const renaming = !!(state.action && state.action.type === "renameProject" && state.action.status === "running");
-  const deleting = !!(state.action && state.action.type === "deleteProject" && state.action.status === "running");
 
   const addFolder = function () {
     if (creatingProject) return;
@@ -180,16 +180,6 @@ export function ProjectHome(props) {
       setRenameDraft("");
     }).catch(function (err) {
       setEnterError(err && err.message ? err.message : "修改项目名称失败");
-    });
-  };
-
-  const confirmDelete = function () {
-    if (!deleteTarget || deleting) return;
-    setEnterError(null);
-    store.actions.deleteProject(deleteTarget.id).then(function () {
-      setDeleteTarget(null);
-    }).catch(function (err) {
-      setEnterError(err && err.message ? err.message : "删除项目失败");
     });
   };
 
@@ -264,21 +254,5 @@ export function ProjectHome(props) {
     React.createElement("div", { className: "cpwb-modal-actions" },
       React.createElement("button", { type: "button", className: "cpwb-btn", disabled: renaming, onClick: function () { setRenameTarget(null); } }, "取消"),
       React.createElement("button", { type: "submit", className: "cpwb-btn cpwb-btn-primary", disabled: renaming || renameDraft.trim() === "" }, renaming ? "保存中…" : "保存名称")))) : null,
-    deleteTarget ? React.createElement("div", {
-      className: "cpwb-modal-backdrop",
-      onMouseDown: function (event) { if (event.target === event.currentTarget && !deleting) setDeleteTarget(null); },
-    }, React.createElement("section", {
-      className: "cpwb-modal cpwb-danger-modal cpwb-project-modal",
-      role: "dialog",
-      "aria-modal": true,
-      "aria-labelledby": "cpwb-delete-project-title",
-    },
-    React.createElement("div", { className: "cpwb-modal-kicker" }, "PROJECT / DELETE"),
-    React.createElement("h3", { id: "cpwb-delete-project-title" }, "从 Workbench 删除「" + deleteTarget.name + "」？"),
-    React.createElement("p", null, "项目的待办、定时任务、总结、项目会话及仅属于该项目的文档与向量将永久删除；共享文档和关联知识库会保留。"),
-    React.createElement("div", { className: "cpwb-danger-confirm" }, React.createElement("span", null, "磁盘目录与 DSH workspace 不会被删除。")),
-    React.createElement("div", { className: "cpwb-modal-actions" },
-      React.createElement("button", { type: "button", className: "cpwb-btn", disabled: deleting, onClick: function () { setDeleteTarget(null); } }, "取消"),
-      React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-danger cpwb-button-content", disabled: deleting, onClick: confirmDelete },
-        React.createElement(Trash, { size: 14, "aria-hidden": true }), React.createElement("span", null, deleting ? "删除中…" : "删除项目"))))) : null);
+    deleteTarget ? React.createElement(ContainerDeleteDialog, { kind: "project", target: deleteTarget, store, onClose: () => setDeleteTarget(null) }) : null);
 }

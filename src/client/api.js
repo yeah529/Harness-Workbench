@@ -87,8 +87,11 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       update({ id, name }, { signal } = {}) {
         return request({ method: "PATCH", path: "/projects/" + id, body: { name }, signal });
       },
-      remove(id, { signal } = {}) {
-        return request({ method: "DELETE", path: "/projects/" + id, signal });
+      deletionPlan(id, { signal } = {}) {
+        return request({ path: "/projects/" + id + "/deletion-plan", signal });
+      },
+      remove(id, { sessionPolicy = "detach", signal } = {}) {
+        return request({ method: "DELETE", path: "/projects/" + id, query: { sessionPolicy }, signal });
       },
     },
 
@@ -99,8 +102,11 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       create({ name, description }, { signal } = {}) {
         return request({ method: "POST", path: "/knowledge-bases", body: { name, description }, signal });
       },
-      remove(id, { signal } = {}) {
-        return request({ method: "DELETE", path: "/knowledge-bases/" + id, signal });
+      deletionPlan(id, { signal } = {}) {
+        return request({ path: "/knowledge-bases/" + id + "/deletion-plan", signal });
+      },
+      remove(id, { sessionPolicy = "detach", signal } = {}) {
+        return request({ method: "DELETE", path: "/knowledge-bases/" + id, query: { sessionPolicy }, signal });
       },
     },
 

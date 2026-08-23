@@ -384,6 +384,13 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
 .cpwb-context-card > strong { overflow-wrap: anywhere; color: var(--cpwb-text); font-size: 11px; }
 .cpwb-context-card > small { color: var(--cpwb-text-muted); font-size: 9px; line-height: 1.45; }
 .cpwb-context-empty { padding: 28px 12px; color: var(--cpwb-text-muted); border: 1px dashed rgba(77,232,244,.2); text-align: center; font-size: 10px; }
+.cpwb-global-schedules { display: grid; gap: 9px; }
+.cpwb-context-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; padding-bottom: 9px; border-bottom: 1px solid rgba(77,232,244,.14); }
+.cpwb-context-filters label { display: grid; gap: 5px; color: var(--cpwb-text-muted); font: 650 7px/1 var(--cpwb-code); letter-spacing: .1em; }
+.cpwb-context-filters label:last-child { grid-column: 1 / -1; }
+.cpwb-context-filters select, .cpwb-context-filters input { box-sizing: border-box; width: 100%; min-width: 0; height: 32px; padding: 0 8px; color: var(--cpwb-text); border: 1px solid rgba(77,232,244,.25); background: #080d13; outline: none; font: 550 9px/1 var(--cpwb-code); color-scheme: dark; }
+.cpwb-context-filters select:hover, .cpwb-context-filters input:hover, .cpwb-context-filters select:focus, .cpwb-context-filters input:focus { border-color: var(--cpwb-cyan); }
+.cpwb-context-filter-count { color: var(--cpwb-cyan); font: 650 7px/1 var(--cpwb-code); letter-spacing: .1em; text-align: right; }
 
 /* Right workbench inspector */
 .cpwb-rail-host { color: var(--cpwb-text); }
@@ -433,6 +440,27 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
 .cpwb-page-modal-host { box-sizing: border-box !important; position: fixed; z-index: 220; inset: 0; place-items: center; width: 100vw; max-width: none !important; height: 100dvh; max-height: none !important; margin: 0; padding: 18px; overflow: auto; color: var(--cpwb-text); border: 0 !important; border-radius: 0 !important; background: transparent !important; box-shadow: none !important; clip-path: none !important; }
 .cpwb-page-modal-host[open] { display: grid; }.cpwb-page-modal-host:not([open]) { display: none; }.cpwb-page-modal-host::backdrop { background: rgba(2,3,6,.72); backdrop-filter: blur(12px); }
 .cpwb-page-modal-host .cpwb-modal { max-height: min(90dvh, 720px); clip-path: var(--cpwb-cut-lg); }
+.cpwb-container-delete-modal { width: min(100%, 620px); }
+.cpwb-delete-impact { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: -7px 0 18px; border: 1px solid rgba(0,240,255,.22); background: rgba(0,240,255,.16); }
+.cpwb-delete-impact span { display: grid; gap: 5px; min-width: 0; padding: 11px 9px; color: var(--cpwb-text-muted); background: rgba(8,12,18,.94); font: 600 8px/1.2 var(--cpwb-code); letter-spacing: .06em; text-transform: uppercase; }
+.cpwb-delete-impact b { overflow: hidden; color: var(--cpwb-cyan); font-size: 16px; text-overflow: ellipsis; }
+.cpwb-delete-loading { margin: -7px 0 18px; padding: 14px; color: var(--cpwb-cyan); border: 1px dashed rgba(0,240,255,.28); font: 600 9px/1.4 var(--cpwb-code); letter-spacing: .08em; }
+.cpwb-delete-policy { display: grid; gap: 8px; }
+.cpwb-delete-policy > label { display: grid; grid-template-columns: 18px 24px minmax(0,1fr); align-items: center; gap: 10px; margin: 0; padding: 13px; border: 1px solid rgba(139,159,181,.2); background: rgba(4,8,13,.6); cursor: pointer; transition: border-color .16s ease, background .16s ease, transform .16s ease; }
+.cpwb-delete-policy > label:hover { border-color: rgba(0,240,255,.55); background: rgba(0,240,255,.055); transform: translateX(2px); }
+.cpwb-delete-policy > label.cpwb-selected { border-color: var(--cpwb-cyan); box-shadow: inset 3px 0 var(--cpwb-cyan); }
+.cpwb-delete-policy > label.cpwb-danger-choice.cpwb-selected { border-color: var(--cpwb-magenta); box-shadow: inset 3px 0 var(--cpwb-magenta); }
+.cpwb-delete-policy input { width: 14px; accent-color: var(--cpwb-cyan); }
+.cpwb-delete-policy svg { color: var(--cpwb-cyan); }
+.cpwb-delete-policy .cpwb-danger-choice svg { color: #ff7188; }
+.cpwb-delete-policy span { display: grid; gap: 5px; }
+.cpwb-delete-policy strong { color: var(--cpwb-text); font: 650 12px/1.3 inherit; letter-spacing: 0; }
+.cpwb-delete-policy strong em { margin-left: 8px; padding: 2px 5px; color: #061114; background: var(--cpwb-cyan); font: 700 7px/1 var(--cpwb-code); letter-spacing: .08em; }
+.cpwb-delete-policy small { color: var(--cpwb-text-muted); font: 500 9px/1.5 inherit; letter-spacing: 0; }
+.cpwb-delete-confirm-zone { margin-top: 10px; padding: 12px; border: 1px solid rgba(255,42,109,.24); background: rgba(255,42,109,.04); }
+.cpwb-delete-confirm-zone label { margin: 0; }
+.cpwb-delete-confirm-zone .cpwb-form-error { display: flex; align-items: center; gap: 6px; }
+@media (max-width: 620px) { .cpwb-delete-impact { grid-template-columns: repeat(2, 1fr); } .cpwb-delete-policy > label { grid-template-columns: 16px 20px minmax(0,1fr); padding: 11px 9px; } }
  .cpwb-native-settings-section { min-width: 0; overflow: auto; padding: 22px 26px; color: var(--cpwb-text); background: linear-gradient(180deg, rgba(12,13,19,.94), rgba(8,9,13,.98)); } .cpwb-native-settings-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid rgba(0,240,255,.16); }.cpwb-settings-nav { display: grid; align-content: start; gap: 3px; padding: 18px 12px; border-right: 1px solid rgba(0,240,255,.13); }.cpwb-settings-nav > span { margin: 13px 8px 7px; color: var(--cpwb-cyan); font: 600 8px/1 var(--cpwb-code); letter-spacing: .15em; }.cpwb-settings-nav button { padding: 10px 9px; color: #92a1b4; border: 0; background: transparent; cursor: pointer; text-align: left; font-size: 11px; }.cpwb-settings-nav button:hover, .cpwb-settings-nav button.cpwb-active { color: var(--cpwb-text); background: rgba(0,240,255,.1); box-shadow: inset 2px 0 var(--cpwb-amber); }.cpwb-settings-content { min-width: 0; overflow: auto; padding: 34px; }.cpwb-settings-panel { max-width: 680px; display: grid; gap: 12px; padding: 20px; border: 1px solid rgba(0,240,255,.2); background: rgba(255,255,255,.02); }.cpwb-settings-panel h2 { margin: 0 0 4px; }.cpwb-settings-panel p { color: var(--cpwb-muted); font-size: 12px; line-height: 1.55; }.cpwb-settings-panel label { display: grid; gap: 6px; color: #9da9b8; font: 600 9px/1 var(--cpwb-code); letter-spacing: .08em; }.cpwb-settings-panel input, .cpwb-settings-panel select { min-width: 0; padding: 9px; color: var(--cpwb-text); border: 1px solid rgba(139,159,181,.25); background: rgba(0,0,0,.25); outline: none; }.cpwb-settings-panel input:focus, .cpwb-settings-panel select:focus { border-color: var(--cpwb-cyan); box-shadow: inset 2px 0 var(--cpwb-cyan); }.cpwb-settings-panel button { justify-self: start; padding: 8px 12px; color: var(--cpwb-text); border: 1px solid rgba(0,240,255,.3); background: rgba(0,240,255,.05); cursor: pointer; }.cpwb-settings-panel button:hover { color: var(--cpwb-cyan); border-color: var(--cpwb-cyan); }.cpwb-settings-actions, .cpwb-settings-index { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }.cpwb-settings-panel fieldset { display: grid; gap: 9px; border: 1px solid rgba(139,159,181,.2); }.cpwb-settings-panel legend { color: var(--cpwb-cyan); font: 600 9px/1 var(--cpwb-code); }.cpwb-settings-message { color: var(--cpwb-green) !important; }.cpwb-settings-panel pre { max-width: 100%; overflow: auto; color: var(--cpwb-cyan); font-size: 10px; }
 
 /* Workbench section inside the native SettingsRoot. Native settings owns the

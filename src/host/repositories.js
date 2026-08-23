@@ -299,14 +299,17 @@ export function createRepositories(db) {
       const sessionIds = db.prepare(
         "SELECT session_id FROM workbench_sessions WHERE scope_kind = 'project' AND scope_id = ? ORDER BY session_id",
       ).all(id).map((row) => row.session_id);
-      return { project, linkedDocuments, orphanDocuments, sessionIds };
+      const relationshipCount = Number(db.prepare(
+        "SELECT COUNT(*) AS n FROM project_knowledge_bases WHERE project_id = ?",
+      ).get(id).n);
+      return { project, linkedDocuments, orphanDocuments, sessionIds, relationshipCount };
     },
 
-    removeCascade(id) {
+    removeContainer(id) {
       const plan = this.deletionPlan(id);
       if (!plan) return null;
+      if (plan.sessionIds.length > 0) throw new Error("project still owns sessions");
       return transaction(db, () => {
-        db.prepare("DELETE FROM workbench_sessions WHERE scope_kind = 'project' AND scope_id = ?").run(id);
         db.prepare("DELETE FROM projects WHERE id = ?").run(id);
         for (const document of plan.orphanDocuments) {
           db.prepare("DELETE FROM documents WHERE id = ?").run(document.id);
@@ -537,14 +540,17 @@ export function createRepositories(db) {
       const sessionIds = db.prepare(
         "SELECT session_id FROM workbench_sessions WHERE scope_kind = 'knowledge_base' AND scope_id = ? ORDER BY session_id",
       ).all(id).map((row) => row.session_id);
-      return { knowledgeBase, linkedDocuments, orphanDocuments, sessionIds };
+      const relationshipCount = Number(db.prepare(
+        "SELECT COUNT(*) AS n FROM project_knowledge_bases WHERE knowledge_base_id = ?",
+      ).get(id).n);
+      return { knowledgeBase, linkedDocuments, orphanDocuments, sessionIds, relationshipCount };
     },
 
-    removeCascade(id) {
+    removeContainer(id) {
       const plan = this.deletionPlan(id);
       if (!plan) return null;
+      if (plan.sessionIds.length > 0) throw new Error("knowledge base still owns sessions");
       return transaction(db, () => {
-        db.prepare("DELETE FROM workbench_sessions WHERE scope_kind = 'knowledge_base' AND scope_id = ?").run(id);
         db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(id);
         for (const document of plan.orphanDocuments) {
           db.prepare("DELETE FROM documents WHERE id = ?").run(document.id);

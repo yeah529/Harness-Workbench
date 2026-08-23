@@ -438,6 +438,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
   const hasSessionContext = typeof sessions?.getContext === "function"
     && typeof sessions?.setContext === "function"
     && typeof sessions?.removeContext === "function";
+  const permanentSessionDeletion = services.permanentSessionDeletion === true;
   const logError = typeof logger?.error === "function" ? logger.error.bind(logger) : () => {};
   const configuredTimeZone = () => settings?.get?.("timezone") ?? DEFAULT_TIME_ZONE;
 
@@ -638,15 +639,58 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, repos.projects.update({ id, name }));
   }
 
-  async function handleProjectDelete(req, res, { params }) {
+  function deletionPlanResponse(kind, plan) {
+    const container = kind === "project" ? plan.project : plan.knowledgeBase;
+    return {
+      kind,
+      id: container.id,
+      name: container.name,
+      sessionCount: plan.sessionIds.length,
+      relationshipCount: plan.relationshipCount,
+      documentCount: plan.linkedDocuments.length,
+      orphanDocumentCount: plan.orphanDocuments.length,
+      permanentDeletionAvailable: permanentSessionDeletion,
+    };
+  }
+
+  function deletionPolicy(url) {
+    const value = url.searchParams.get("sessionPolicy") || "detach";
+    if (value !== "detach" && value !== "delete") {
+      throw new ApiError(422, "INVALID_FIELD", "sessionPolicy must be detach or delete");
+    }
+    return value;
+  }
+
+  async function handleProjectDeletionPlan(req, res, { params }) {
     const id = parseId(params.id);
-    if (!repos.projects.get(id)) throw new ApiError(404, "NOT_FOUND", "project not found: " + id);
+    const plan = repos.projects.deletionPlan(id);
+    if (!plan) throw new ApiError(404, "NOT_FOUND", "project not found: " + id);
+    ok(res, deletionPlanResponse("project", plan));
+  }
+
+  async function handleProjectDelete(req, res, { params, url }) {
+    const id = parseId(params.id);
+    const preview = repos.projects.deletionPlan(id);
+    if (!preview) throw new ApiError(404, "NOT_FOUND", "project not found: " + id);
+    const sessionPolicy = deletionPolicy(url);
+    if (sessionPolicy === "delete" && preview.sessionIds.length > 0 && !permanentSessionDeletion) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_DELETE_UNAVAILABLE, "native DSH session deletion is unavailable");
+    }
     const plan = typeof services.deleteProject === "function"
-      ? await services.deleteProject(id)
-      : repos.projects.removeCascade(id);
+      ? await services.deleteProject({ projectId: id, sessionPolicy })
+      : (() => {
+          for (const sessionId of preview.sessionIds) {
+            if (sessionPolicy === "delete") repos.workbenchSessions.remove(sessionId);
+            else repos.workbenchSessions.updateScope({ sessionId, scope: { kind: "independent", id: null } });
+          }
+          return repos.projects.removeContainer(id);
+        })();
     ok(res, {
       removed: true,
       projectId: id,
+      sessionPolicy,
+      detachedSessionCount: sessionPolicy === "detach" ? preview.sessionIds.length : 0,
+      deletedSessionCount: sessionPolicy === "delete" ? preview.sessionIds.length : 0,
       orphanDocumentIds: (plan?.orphanDocuments || []).map((document) => document.id),
     });
   }
@@ -665,15 +709,36 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, repos.knowledgeBases.create({ name, description }), 201);
   }
 
-  async function handleKnowledgeBaseDelete(req, res, { params }) {
+  async function handleKnowledgeBaseDeletionPlan(req, res, { params }) {
     const id = parseId(params.id);
-    if (!repos.knowledgeBases.get(id)) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + id);
+    const plan = repos.knowledgeBases.deletionPlan(id);
+    if (!plan) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + id);
+    ok(res, deletionPlanResponse("knowledge_base", plan));
+  }
+
+  async function handleKnowledgeBaseDelete(req, res, { params, url }) {
+    const id = parseId(params.id);
+    const preview = repos.knowledgeBases.deletionPlan(id);
+    if (!preview) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + id);
+    const sessionPolicy = deletionPolicy(url);
+    if (sessionPolicy === "delete" && preview.sessionIds.length > 0 && !permanentSessionDeletion) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_DELETE_UNAVAILABLE, "native DSH session deletion is unavailable");
+    }
     const plan = typeof services.deleteKnowledgeBase === "function"
-      ? await services.deleteKnowledgeBase(id)
-      : repos.knowledgeBases.removeCascade(id);
+      ? await services.deleteKnowledgeBase({ knowledgeBaseId: id, sessionPolicy })
+      : (() => {
+          for (const sessionId of preview.sessionIds) {
+            if (sessionPolicy === "delete") repos.workbenchSessions.remove(sessionId);
+            else repos.workbenchSessions.updateScope({ sessionId, scope: { kind: "independent", id: null } });
+          }
+          return repos.knowledgeBases.removeContainer(id);
+        })();
     ok(res, {
       removed: true,
       knowledgeBaseId: id,
+      sessionPolicy,
+      detachedSessionCount: sessionPolicy === "detach" ? preview.sessionIds.length : 0,
+      deletedSessionCount: sessionPolicy === "delete" ? preview.sessionIds.length : 0,
       orphanDocumentIds: (plan?.orphanDocuments || []).map((document) => document.id),
     });
   }
@@ -1158,8 +1223,10 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     { pattern: "/chat/sessions/:sessionId/open", methods: { POST: handleChatSessionOpen } },
     { pattern: "/chat/sessions/:sessionId", methods: { PATCH: handleChatSessionPatch, DELETE: handleChatSessionDelete } },
     { pattern: "/projects", methods: { GET: handleProjectsList, POST: handleProjectCreate } },
+    { pattern: "/projects/:id/deletion-plan", methods: { GET: handleProjectDeletionPlan } },
     { pattern: "/projects/:id", methods: { PATCH: handleProjectPatch, DELETE: handleProjectDelete } },
     { pattern: "/knowledge-bases", methods: { GET: handleKnowledgeBasesList, POST: handleKnowledgeBaseCreate } },
+    { pattern: "/knowledge-bases/:id/deletion-plan", methods: { GET: handleKnowledgeBaseDeletionPlan } },
     { pattern: "/knowledge-bases/:id", methods: { DELETE: handleKnowledgeBaseDelete } },
     { pattern: "/documents", methods: { GET: handleDocumentsList, POST: handleUpload } },
     { pattern: "/documents/:id/reindex", methods: { POST: handleReindex } },

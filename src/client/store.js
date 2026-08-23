@@ -652,10 +652,19 @@ export function createWorkbenchStore(api) {
       return updated;
     },
 
-    deleteProject: async function deleteProject(id) {
+    loadProjectDeletionPlan: async function loadProjectDeletionPlan(id) {
       const ac = track(new AbortController());
       try {
-        await runAction("deleteProject", () => api.projects.remove(id, { signal: ac.signal }), { projectId: id });
+        return await runAction("loadProjectDeletionPlan", () => api.projects.deletionPlan(id, { signal: ac.signal }), { projectId: id });
+      } finally {
+        untrack(ac);
+      }
+    },
+
+    deleteProject: async function deleteProject({ id, sessionPolicy = "detach" }) {
+      const ac = track(new AbortController());
+      try {
+        await runAction("deleteProject", () => api.projects.remove(id, { sessionPolicy, signal: ac.signal }), { projectId: id, sessionPolicy });
       } finally {
         untrack(ac);
       }
@@ -685,10 +694,19 @@ export function createWorkbenchStore(api) {
       return created;
     },
 
-    deleteKnowledgeBase: async function deleteKnowledgeBase(id) {
+    loadKnowledgeBaseDeletionPlan: async function loadKnowledgeBaseDeletionPlan(id) {
       const ac = track(new AbortController());
       try {
-        await runAction("deleteKnowledgeBase", () => api.knowledgeBases.remove(id, { signal: ac.signal }), { knowledgeBaseId: id });
+        return await runAction("loadKnowledgeBaseDeletionPlan", () => api.knowledgeBases.deletionPlan(id, { signal: ac.signal }), { knowledgeBaseId: id });
+      } finally {
+        untrack(ac);
+      }
+    },
+
+    deleteKnowledgeBase: async function deleteKnowledgeBase({ id, sessionPolicy = "detach" }) {
+      const ac = track(new AbortController());
+      try {
+        await runAction("deleteKnowledgeBase", () => api.knowledgeBases.remove(id, { sessionPolicy, signal: ac.signal }), { knowledgeBaseId: id, sessionPolicy });
       } finally {
         untrack(ac);
       }

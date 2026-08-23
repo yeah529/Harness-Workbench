@@ -60,7 +60,7 @@ test("one document links to many projects and knowledge bases", async (t) => {
   assert.deepEqual(repos.documents.listByKnowledgeBase(k1.id).map((d) => d.id), [doc.id]);
 });
 
-test("projects rename in place and delete only Workbench-owned project data", async (t) => {
+test("projects detach owned sessions before deleting only Workbench-owned project data", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
@@ -88,12 +88,16 @@ test("projects rename in place and delete only Workbench-owned project data", as
   assert.equal(renamed.createdAt, "2026-08-21T01:00:00.000Z");
   assert.equal(renamed.updatedAt, "2026-08-21T02:00:00.000Z");
 
-  const plan = repos.projects.removeCascade(project.id);
+  const plan = repos.projects.deletionPlan(project.id);
   assert.deepEqual(plan.sessionIds, ["session-cpwb-project-delete"]);
   assert.deepEqual(plan.orphanDocuments.map((document) => document.id), [orphan.id]);
+  assert.equal(plan.relationshipCount, 1);
+  assert.throws(() => repos.projects.removeContainer(project.id), /owns sessions/i);
+  repos.workbenchSessions.updateScope({ sessionId: "session-cpwb-project-delete", scope: { kind: "independent", id: null } });
+  repos.projects.removeContainer(project.id);
   assert.equal(repos.projects.get(project.id), null);
   assert.equal(repos.projects.get(other.id).name, "Other");
-  assert.equal(repos.workbenchSessions.get("session-cpwb-project-delete"), null);
+  assert.deepEqual(repos.workbenchSessions.get("session-cpwb-project-delete").scope, { kind: "independent", id: null });
   assert.equal(repos.documents.get(orphan.id), null);
   assert.equal(repos.documents.get(shared.id).id, shared.id);
   assert.equal(repos.todos.list({ projectId: project.id }).length, 0);
@@ -252,7 +256,7 @@ test("schedules persist modal metadata and support deletion with run cascade", a
   assert.deepEqual(repos.schedules.listRuns(schedule.id), []);
 });
 
-test("knowledge-base cascade deletes only documents that become orphaned", async (t) => {
+test("knowledge-base deletion preserves detached sessions and only removes orphaned documents", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
@@ -267,10 +271,17 @@ test("knowledge-base cascade deletes only documents that become orphaned", async
   repos.documents.link({ documentId: shared.id, scope: "knowledgeBase", scopeId: target.id });
   repos.documents.link({ documentId: shared.id, scope: "knowledgeBase", scopeId: other.id });
   repos.documents.link({ documentId: shared.id, scope: "project", scopeId: project.id });
+  repos.projectKnowledgeBases.link({ projectId: project.id, knowledgeBaseId: target.id });
+  repos.workbenchSessions.create({ sessionId: "session-cpwb-kb-delete", scope: { kind: "knowledge_base", id: target.id } });
 
-  const plan = repos.knowledgeBases.removeCascade(target.id);
+  const plan = repos.knowledgeBases.deletionPlan(target.id);
   assert.deepEqual(plan.orphanDocuments.map((item) => item.id), [orphan.id]);
+  assert.equal(plan.relationshipCount, 1);
+  assert.throws(() => repos.knowledgeBases.removeContainer(target.id), /owns sessions/i);
+  repos.workbenchSessions.updateScope({ sessionId: "session-cpwb-kb-delete", scope: { kind: "independent", id: null } });
+  repos.knowledgeBases.removeContainer(target.id);
   assert.equal(repos.knowledgeBases.get(target.id), null);
+  assert.deepEqual(repos.workbenchSessions.get("session-cpwb-kb-delete").scope, { kind: "independent", id: null });
   assert.equal(repos.documents.get(orphan.id), null);
   assert.equal(repos.documents.get(shared.id).id, shared.id);
   assert.equal(repos.documents.listLinks(shared.id).length, 2);

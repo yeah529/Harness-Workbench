@@ -1033,6 +1033,10 @@ export function createSessionService({
     return entry ? { scope: entry.scope } : null;
   }
 
+  function canDeleteNativeSessions() {
+    return typeof deleteNativeSession === "function";
+  }
+
   return {
     createSession,
     openSession,
@@ -1050,5 +1054,6 @@ export function createSessionService({
     dispose,
     has,
     get,
+    canDeleteNativeSessions,
   };
 }

@@ -485,7 +485,7 @@ test("projects CRUD (create + list + validation)", async (t) => {
   assert.equal((await res.json()).error.code, "INVALID_FIELD");
 });
 
-test("project rename and delete expose one item route without touching workspace files", async (t) => {
+test("project deletion plan defaults to detaching sessions and never touches workspace files", async (t) => {
   const { base, repos } = await startApi(t);
   const project = repos.projects.create({ name: "Before", path: "/workspace/keep-me", workspaceId: "ws-keep" });
   repos.todos.create({ projectId: project.id, title: "Child", dueAt: "2026-08-22T10:00:00.000Z" });
@@ -505,14 +505,40 @@ test("project rename and delete expose one item route without touching workspace
   assert.equal(response.status, 422);
   assert.equal((await response.json()).error.code, "INVALID_FIELD");
 
+  repos.workbenchSessions.create({ sessionId: "session-cpwb-project-owned", scope: { kind: "project", id: project.id } });
+  response = await fetch(base + "/projects/" + project.id + "/deletion-plan");
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    kind: "project",
+    id: project.id,
+    name: "After",
+    sessionCount: 1,
+    relationshipCount: 0,
+    documentCount: 0,
+    orphanDocumentCount: 0,
+    permanentDeletionAvailable: false,
+  });
+
   response = await fetch(base + "/projects/" + project.id, { method: "DELETE" });
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { removed: true, projectId: project.id, orphanDocumentIds: [] });
+  assert.deepEqual(await response.json(), { removed: true, projectId: project.id, sessionPolicy: "detach", detachedSessionCount: 1, deletedSessionCount: 0, orphanDocumentIds: [] });
   assert.equal(repos.projects.get(project.id), null);
   assert.equal(repos.todos.list({ projectId: project.id }).length, 0);
+  assert.deepEqual(repos.workbenchSessions.get("session-cpwb-project-owned").scope, { kind: "independent", id: null });
 
   response = await fetch(base + "/projects/" + project.id, { method: "DELETE" });
   assert.equal(response.status, 404);
+});
+
+test("permanent project deletion fails closed before any data changes when native deletion is unavailable", async (t) => {
+  const { base, repos } = await startApi(t);
+  const project = repos.projects.create({ name: "Keep until supported" });
+  repos.workbenchSessions.create({ sessionId: "session-cpwb-keep", scope: { kind: "project", id: project.id } });
+  const response = await fetch(base + "/projects/" + project.id + "?sessionPolicy=delete", { method: "DELETE" });
+  assert.equal(response.status, 501);
+  assert.equal((await response.json()).error.code, "ESESSION_DELETE_UNAVAILABLE");
+  assert.equal(repos.projects.get(project.id).name, "Keep until supported");
+  assert.deepEqual(repos.workbenchSessions.get("session-cpwb-keep").scope, { kind: "project", id: project.id });
 });
 
 test("knowledge-bases CRUD", async (t) => {
@@ -833,12 +859,18 @@ test("knowledge-base DELETE removes its exclusive documents and keeps shared doc
   repos.documents.link({ documentId: orphan.id, scope: "knowledgeBase", scopeId: target.id });
   repos.documents.link({ documentId: shared.id, scope: "knowledgeBase", scopeId: target.id });
   repos.documents.link({ documentId: shared.id, scope: "knowledgeBase", scopeId: other.id });
+  repos.workbenchSessions.create({ sessionId: "session-cpwb-kb-owned", scope: { kind: "knowledge_base", id: target.id } });
+
+  const preview = await fetch(base + "/knowledge-bases/" + target.id + "/deletion-plan");
+  assert.equal(preview.status, 200);
+  assert.equal((await preview.json()).sessionCount, 1);
 
   const response = await fetch(base + "/knowledge-bases/" + target.id, { method: "DELETE" });
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).orphanDocumentIds, [orphan.id]);
   assert.equal(repos.documents.get(orphan.id), null);
   assert.equal(repos.documents.get(shared.id).id, shared.id);
+  assert.deepEqual(repos.workbenchSessions.get("session-cpwb-kb-owned").scope, { kind: "independent", id: null });
 });
 
 test("schedule runs list exposes status, session id, timestamp, and error", async (t) => {

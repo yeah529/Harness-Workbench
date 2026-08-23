@@ -162,6 +162,38 @@ function apply(ctx, config = {}) {
         projectConversations: (input) => sessionService.readProjectDailyConversation(input),
       });
       scheduler.start();
+      const permanentSessionDeletion = sessionService.canDeleteNativeSessions();
+      const deleteContainer = async ({ kind, id, sessionPolicy }) => {
+        const repository = kind === "project" ? repos.projects : repos.knowledgeBases;
+        const plan = repository.deletionPlan(id);
+        if (!plan) return null;
+        const sourceScope = { kind, id };
+        const moved = [];
+        try {
+          for (const sessionId of plan.sessionIds) {
+            if (sessionPolicy === "delete") await sessionService.deleteSession(sessionId);
+            else {
+              await sessionService.moveSession({ sessionId, scope: { kind: "independent", id: null } });
+              moved.push(sessionId);
+            }
+          }
+          for (const document of plan.orphanDocuments) await vectorIndex.deleteDocument(document.id);
+          const removed = repository.removeContainer(id);
+          for (const document of plan.orphanDocuments) {
+            await unlink(join(dataDir, "files", document.sha256)).catch((error) => {
+              if (error?.code !== "ENOENT") throw error;
+            });
+          }
+          return removed;
+        } catch (error) {
+          if (sessionPolicy === "detach" && repository.get(id)) {
+            for (const sessionId of moved.reverse()) {
+              await sessionService.moveSession({ sessionId, scope: sourceScope }).catch(() => {});
+            }
+          }
+          throw error;
+        }
+      };
       const api = createApi({
         repos,
         queue,
@@ -176,32 +208,9 @@ function apply(ctx, config = {}) {
         codexAuth,
         dshAdapter: optionalContextService(ctx, "dshAdapter") ?? null,
         services: {
-          deleteProject: async (projectId) => {
-            const plan = repos.projects.deletionPlan(projectId);
-            if (!plan) return null;
-            for (const sessionId of plan.sessionIds) await sessionService.release(sessionId);
-            for (const document of plan.orphanDocuments) await vectorIndex.deleteDocument(document.id);
-            const removed = repos.projects.removeCascade(projectId);
-            for (const document of plan.orphanDocuments) {
-              await unlink(join(dataDir, "files", document.sha256)).catch((error) => {
-                if (error?.code !== "ENOENT") throw error;
-              });
-            }
-            return removed;
-          },
-          deleteKnowledgeBase: async (knowledgeBaseId) => {
-            const plan = repos.knowledgeBases.deletionPlan(knowledgeBaseId);
-            if (!plan) return null;
-            for (const sessionId of plan.sessionIds) await sessionService.release(sessionId);
-            for (const document of plan.orphanDocuments) await vectorIndex.deleteDocument(document.id);
-            const removed = repos.knowledgeBases.removeCascade(knowledgeBaseId);
-            for (const document of plan.orphanDocuments) {
-              await unlink(join(dataDir, "files", document.sha256)).catch((error) => {
-                if (error?.code !== "ENOENT") throw error;
-              });
-            }
-            return removed;
-          },
+          permanentSessionDeletion,
+          deleteProject: ({ projectId, sessionPolicy }) => deleteContainer({ kind: "project", id: projectId, sessionPolicy }),
+          deleteKnowledgeBase: ({ knowledgeBaseId, sessionPolicy }) => deleteContainer({ kind: "knowledge_base", id: knowledgeBaseId, sessionPolicy }),
           runSchedule: (schedule) => scheduler.runScheduleNow(schedule),
           runSummary: ({ projectId, summaryDate }) => scheduler.runSummary(
             { id: projectId },

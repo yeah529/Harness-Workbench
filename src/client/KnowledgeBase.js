@@ -20,6 +20,7 @@ import React from "react";
 import { Trash } from "@phosphor-icons/react";
 import { glyph, ICONS, Badge, Empty } from "./icons.js";
 import { openWorkbenchSession } from "./workbenchSessions.js";
+import { ContainerDeleteDialog } from "./ContainerDeleteDialog.js";
 
 /** Mirrors files.js ALLOWED_EXTENSIONS — the host remains the real authority. */
 const ACCEPT_EXTENSIONS = [
@@ -155,7 +156,6 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
   const unlinkingKb = !!(action && action.type === "unlinkProjectKnowledgeBase" && action.status === "running");
   const reindexing = !!(action && action.type === "reindexDocument" && action.status === "running");
   const unlinkingDoc = !!(action && action.type === "unlinkDocument" && action.status === "running");
-  const deletingKb = !!(action && action.type === "deleteKnowledgeBase" && action.status === "running");
 
   React.useEffect(function () {
     if (projectId == null) return;
@@ -370,14 +370,7 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
                   glyph(ICONS.book), " " + (session.title || "未命名会话")));
             })))
       : null,
-    deleteTarget ? React.createElement("div", { className: "cpwb-modal-backdrop", onMouseDown: (event) => { if (event.target === event.currentTarget) setDeleteTarget(null); } },
-      React.createElement("section", { className: "cpwb-modal cpwb-danger-modal", role: "dialog", "aria-modal": true, "aria-labelledby": "cpwb-delete-kb-title" },
-        React.createElement("div", { className: "cpwb-modal-kicker" }, "KNOWLEDGE / DELETE"),
-        React.createElement("h3", { id: "cpwb-delete-kb-title" }, "删除「" + deleteTarget.name + "」？"),
-        React.createElement("p", null, "知识库、会话和仅属于它的文档/向量将永久删除；仍被其他项目或知识库使用的共享文档会保留。"),
-        React.createElement("div", { className: "cpwb-modal-actions" },
-          React.createElement("button", { type: "button", className: "cpwb-btn", onClick: () => setDeleteTarget(null) }, "取消"),
-          React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-danger cpwb-button-content", disabled: deletingKb, onClick: () => store.actions.deleteKnowledgeBase(deleteTarget.id).then(() => setDeleteTarget(null)).catch(() => {}) }, React.createElement(Trash, { size: 14 }), React.createElement("span", null, deletingKb ? "删除中…" : "永久删除"))))) : null);
+    deleteTarget ? React.createElement(ContainerDeleteDialog, { kind: "knowledge_base", target: deleteTarget, store, onClose: () => setDeleteTarget(null) }) : null);
 }
 
 export function KnowledgeCenterPage(props) {

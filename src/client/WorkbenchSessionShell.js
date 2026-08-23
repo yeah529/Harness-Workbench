@@ -18,6 +18,7 @@ import {
 import { DrawerDialog, useWorkbenchLayoutMode } from "./responsive.js";
 import { useNativeModelSelectionLabel } from "./ModelIndicator.js";
 import { SubagentDrawer } from "./SubagentDrawer.js";
+import { DEFAULT_TIME_ZONE, localDateTimeParts } from "./timezone.js";
 
 export { parseNativeModelSelectionLabel } from "./ModelIndicator.js";
 
@@ -141,17 +142,47 @@ function useContextRailSeat(scopeKey) {
   return !nativeDetailsOpen;
 }
 
-function GlobalSchedulesPanel({ state, store }) {
+function instantDateKey(value, timeZone) {
+  if (!value) return "";
+  try {
+    const parts = localDateTimeParts(value, timeZone);
+    return [parts.year, String(parts.month).padStart(2, "0"), String(parts.day).padStart(2, "0")].join("-");
+  } catch { return ""; }
+}
+
+export function GlobalSchedulesPanel({ state, store }) {
   React.useEffect(function () { store.actions.loadGlobalSchedules?.().catch(function () {}); }, [store]);
   const rows = Array.isArray(state.globalSchedules) ? state.globalSchedules : [];
-  if (!rows.length) return React.createElement("div", { className: "cpwb-context-empty" }, "暂无全局定时任务");
-  return React.createElement("div", { className: "cpwb-context-list" }, rows.map((schedule) => {
+  const [projectFilter, setProjectFilter] = React.useState("all");
+  const [statusFilter, setStatusFilter] = React.useState("all");
+  const [dateFilter, setDateFilter] = React.useState("");
+  const timeZone = state.settings?.timezone || DEFAULT_TIME_ZONE;
+  const visibleRows = rows.filter((schedule) => {
+    if (projectFilter !== "all" && String(schedule.projectId) !== projectFilter) return false;
+    if (statusFilter === "enabled" && schedule.enabled === false) return false;
+    if (statusFilter === "paused" && schedule.enabled !== false) return false;
+    if (dateFilter && instantDateKey(schedule.nextRunAt || schedule.startsAt, timeZone) !== dateFilter) return false;
+    return true;
+  });
+  return React.createElement("div", { className: "cpwb-global-schedules" },
+    React.createElement("div", { className: "cpwb-context-filters", "aria-label": "筛选全局定时任务" },
+      React.createElement("label", null, "项目", React.createElement("select", { value: projectFilter, onChange: (event) => setProjectFilter(event.target.value) },
+        React.createElement("option", { value: "all" }, "全部项目"),
+        (state.projects || []).map((project) => React.createElement("option", { key: project.id, value: String(project.id) }, project.name)))),
+      React.createElement("label", null, "状态", React.createElement("select", { value: statusFilter, onChange: (event) => setStatusFilter(event.target.value) },
+        React.createElement("option", { value: "all" }, "全部状态"),
+        React.createElement("option", { value: "enabled" }, "已启用"),
+        React.createElement("option", { value: "paused" }, "已暂停"))),
+      React.createElement("label", null, "触发日期", React.createElement("input", { type: "date", value: dateFilter, onChange: (event) => setDateFilter(event.target.value) }))),
+    React.createElement("div", { className: "cpwb-context-filter-count" }, "显示 " + visibleRows.length + " / " + rows.length + " 项"),
+    visibleRows.length === 0 ? React.createElement("div", { className: "cpwb-context-empty" }, rows.length ? "没有符合筛选条件的定时任务" : "暂无全局定时任务") : null,
+    React.createElement("div", { className: "cpwb-context-list" }, visibleRows.map((schedule) => {
     const project = state.projects?.find?.((item) => item.id === schedule.projectId);
     return React.createElement("article", { key: schedule.id, className: "cpwb-context-card" },
       React.createElement("span", null, project?.name || "项目 #" + schedule.projectId),
       React.createElement("strong", null, schedule.name),
       React.createElement("small", null, (schedule.enabled ? "已启用" : "已暂停") + " · " + (schedule.nextRunAt || schedule.startsAt || "待计算")));
-  }));
+    })));
 }
 
 function SessionContextPanel({ sessionId, scope, state, store }) {

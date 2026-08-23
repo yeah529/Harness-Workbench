@@ -5,12 +5,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { createWorkbenchStore } from "../src/client/store.js";
 import { NewSessionDialog } from "../src/client/NewSessionDialog.js";
+import { ContainerDeleteDialog } from "../src/client/ContainerDeleteDialog.js";
 import { WorkbenchSidebar, partitionSidebarSessions } from "../src/client/WorkbenchSidebar.js";
 import {
   WorkbenchSessionShell,
   PROJECT_TOOL_TABS,
   KNOWLEDGE_TOOL_TABS,
   INDEPENDENT_TOOL_TABS,
+  GlobalSchedulesPanel,
 } from "../src/client/WorkbenchSessionShell.js";
 
 function sessionApi({ activateError } = {}) {
@@ -168,4 +170,41 @@ test("right rail follows the project, knowledge-base, and independent tool matri
     const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, { sessionId, open: true, store, layoutMode: "desktop" }));
     for (const [, label] of labels) assert.match(html, new RegExp(label));
   }
+});
+
+test("container deletion defaults to preserving sessions and discloses every cleanup boundary", () => {
+  const snapshot = { action: null };
+  const store = { subscribe: () => () => {}, getSnapshot: () => snapshot, actions: {} };
+  const html = renderToStaticMarkup(React.createElement(ContainerDeleteDialog, {
+    kind: "knowledge_base",
+    target: { id: 2, name: "架构资料" },
+    store,
+    initialPlan: {
+      kind: "knowledge_base", id: 2, name: "架构资料", sessionCount: 3,
+      relationshipCount: 2, documentCount: 8, orphanDocumentCount: 5,
+      permanentDeletionAvailable: false,
+    },
+    onClose() {},
+  }));
+  assert.match(html, /保留会话并移为独立会话/);
+  assert.match(html, /推荐/);
+  assert.match(html, /3<\/b> 个会话/);
+  assert.match(html, /2<\/b> 个关联项目/);
+  assert.match(html, /外部原文件与本地 embedding 模型不会删除/);
+  assert.match(html, /checked="" value="detach"/);
+});
+
+test("global schedules identify their project and expose project, status, and trigger-date filters", () => {
+  const state = {
+    settings: { timezone: "Asia/Shanghai" },
+    projects: [{ id: 1, name: "Workbench" }, { id: 2, name: "Docs" }],
+    globalSchedules: [{ id: 7, projectId: 2, name: "每日索引", enabled: true, nextRunAt: "2026-08-23T13:00:00.000Z" }],
+  };
+  const store = { actions: { loadGlobalSchedules: async () => {} } };
+  const html = renderToStaticMarkup(React.createElement(GlobalSchedulesPanel, { state, store }));
+  assert.match(html, /全部项目/);
+  assert.match(html, /全部状态/);
+  assert.match(html, /触发日期/);
+  assert.match(html, /Docs/);
+  assert.match(html, /每日索引/);
 });
