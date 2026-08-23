@@ -25,6 +25,7 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 
 import { WorkbenchSessionError, SESSION_ERROR_CODES } from "./session-errors.js";
+import { localDateKey } from "./timezone.js";
 import {
   extractKnowledgeBaseReferenceIds,
   stripKnowledgeBaseReferences,
@@ -489,6 +490,32 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
 
   const handles = new Map(); // sessionId -> { dispose, scope, chatId, owned, tail }
 
+  async function readProjectDailyConversation({ projectId, date, timeZone }) {
+    const sessionQuery = ctx.get("sessionQuery");
+    if (!sessionQuery || typeof sessionQuery.readSession !== "function") {
+      throw new Error("DSH session query service is unavailable");
+    }
+    const rows = [];
+    for (let offset = 0;; offset += 500) {
+      const page = repos.workbenchSessions.list({ scopeKind: "project", scopeId: projectId, limit: 500, offset });
+      rows.push(...page);
+      if (page.length < 500) break;
+    }
+    const conversations = [];
+    for (const row of rows) {
+      const snapshot = await sessionQuery.readSession(SessionId(row.sessionId));
+      const messages = snapshot.events.flatMap((event) => {
+        if (event.type !== "user/message" && event.type !== "assistant/message") return [];
+        if (!Number.isFinite(event.time) || localDateKey(new Date(event.time), timeZone) !== date) return [];
+        const text = messageText(event.type === "assistant/message" ? event.data?.message : event.data);
+        if (!text) return [];
+        return [{ role: event.type === "user/message" ? "user" : "assistant", text, time: event.time }];
+      });
+      if (messages.length > 0) conversations.push({ sessionId: row.sessionId, title: row.title, messages });
+    }
+    return conversations.sort((a, b) => a.messages[0].time - b.messages[0].time);
+  }
+
   function registerHandle(sessionId, { dispose, cleanup, scope, chatId, owned }) {
     handles.set(sessionId, {
       dispose: owned ? dispose : null,
@@ -927,5 +954,5 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
     return entry ? { scope: entry.scope, chatId: entry.chatId } : null;
   }
 
-  return { createSession, submitPrompt, release, dispose, has, get };
+  return { createSession, submitPrompt, readProjectDailyConversation, release, dispose, has, get };
 }

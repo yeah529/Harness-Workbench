@@ -35,7 +35,7 @@ export function buildProxyEnv({ env = process.env, mode = "inherit", proxyUrl, n
     return {
       ...env,
       NODE_USE_ENV_PROXY: "1",
-      HTTP_PROXY: url, HTTPS_PROXY: url, http_proxy: "", https_proxy: "", NO_PROXY: noProxy, no_proxy: noProxy
+      HTTP_PROXY: url, HTTPS_PROXY: url, http_proxy: url, https_proxy: url, NO_PROXY: noProxy, no_proxy: noProxy
     };
   }
   return noProxy

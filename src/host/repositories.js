@@ -768,6 +768,10 @@ export function createRepositories(db) {
       return mapTodo(db.prepare("SELECT * FROM todos WHERE id = ?").get(id), now);
     },
 
+    remove(id) {
+      return db.prepare("DELETE FROM todos WHERE id = ?").run(id).changes > 0;
+    },
+
     list({ projectId, now = new Date() } = {}) {
       const rows = projectId != null
         ? db.prepare("SELECT * FROM todos WHERE project_id = ?").all(projectId)

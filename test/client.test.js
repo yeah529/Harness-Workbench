@@ -235,10 +235,10 @@ test("api: search posts scope/query/limit", async () => {
   await api.search({ scope: "knowledgeBase", scopeId: 2, query: "q", limit: 4 });
 });
 
-test("api: todos list/create/update use exact contract", async () => {
+test("api: todos list/create/update/delete use exact contract", async () => {
   const fetchImpl = makeFetch(({ url, init }, i) => {
     const { pathname, searchParams } = parse(url);
-    assert.equal(pathname, "/api/cpwb/todos");
+    assert.equal(pathname, i === 3 ? "/api/cpwb/todos/5" : "/api/cpwb/todos");
     if (i === 0) {
       assert.equal(init.method ?? "GET", "GET");
       assert.equal(searchParams.get("projectId"), "1");
@@ -249,14 +249,19 @@ test("api: todos list/create/update use exact contract", async () => {
       assert.deepEqual(JSON.parse(init.body), { projectId: 1, title: "pl", dueAt: "2026-08-18T10:00:00.000Z", source: "manual" });
       return jsonResponse(201, todo);
     }
-    assert.equal(init.method, "PATCH");
-    assert.deepEqual(JSON.parse(init.body), { id: 5, done: true });
-    return jsonResponse(200, { ...todo, done: true, completedAt: ISO });
+    if (i === 2) {
+      assert.equal(init.method, "PATCH");
+      assert.deepEqual(JSON.parse(init.body), { id: 5, done: true });
+      return jsonResponse(200, { ...todo, done: true, completedAt: ISO });
+    }
+    assert.equal(init.method, "DELETE");
+    return jsonResponse(200, { removed: true, todoId: 5 });
   });
   const api = createCpwbApi({ fetchImpl });
   await api.todos.list({ projectId: 1 });
   await api.todos.create({ projectId: 1, title: "pl", dueAt: "2026-08-18T10:00:00.000Z", source: "manual" });
   await api.todos.update({ id: 5, done: true });
+  await api.todos.remove(5);
 });
 
 test("api: Codex connect uses the explicit local-auth import endpoint", async () => {
@@ -268,6 +273,19 @@ test("api: Codex connect uses the explicit local-auth import endpoint", async ()
   });
   const result = await createCpwbApi({ fetchImpl }).settings.connectCodex();
   assert.equal(result.configured, true);
+});
+
+test("api: automation prompts use the Workbench settings endpoint", async () => {
+  const fetchImpl = makeFetch(({ url, init }, index) => {
+    assert.equal(parse(url).pathname, "/api/cpwb/settings/automation-prompts");
+    if (index === 0) return jsonResponse(200, { summaryPrompt: "Summary", todoPrompt: "Todo" });
+    assert.equal(init.method, "PATCH");
+    assert.deepEqual(JSON.parse(init.body), { summaryPrompt: "New summary", todoPrompt: "New todo" });
+    return jsonResponse(200, { summaryPrompt: "New summary", todoPrompt: "New todo" });
+  });
+  const api = createCpwbApi({ fetchImpl });
+  assert.equal((await api.settings.automationPrompts()).summaryPrompt, "Summary");
+  assert.equal((await api.settings.updateAutomationPrompts({ summaryPrompt: "New summary", todoPrompt: "New todo" })).todoPrompt, "New todo");
 });
 
 test("api: schedules create/update/delete/run/history use the modal contract", async () => {
@@ -491,6 +509,22 @@ test("store: refresh pulls health/projects/knowledgeBases/documents and reaches 
   assert.equal(s.citations.length, 0);
 });
 
+test("store: automation prompt settings load and update the visible snapshot", async () => {
+  let prompts = { summaryPrompt: "Summary", todoPrompt: "Todo" };
+  const api = {
+    health: async () => ({ ok: true }),
+    settings: {
+      automationPrompts: async () => prompts,
+      updateAutomationPrompts: async (next) => { prompts = next; return prompts; },
+    },
+  };
+  const store = createWorkbenchStore(api);
+  await store.actions.loadSettings();
+  assert.deepEqual(store.getSnapshot().settings.automationPrompts, prompts);
+  await store.actions.updateAutomationPrompts({ summaryPrompt: "New summary", todoPrompt: "New todo" });
+  assert.deepEqual(store.getSnapshot().settings.automationPrompts, { summaryPrompt: "New summary", todoPrompt: "New todo" });
+});
+
 test("store: refresh failure reaches error phase with code/message", async () => {
   const api = createCpwbApi({ fetchImpl: scenarioFetch({ failOnce: true }) });
   const store = createWorkbenchStore(api);
@@ -546,6 +580,26 @@ test("store: createTodo mutates then re-fetches todos", async () => {
   await store.actions.createTodo({ projectId: 1, title: "new", dueAt: "2026-08-18T10:00:00.000Z", source: "manual" });
   const s = store.getSnapshot();
   assert.equal(s.todos.length, 2);
+});
+
+test("store: deleteTodo deletes then re-fetches the active project todos", async () => {
+  let rows = [todo];
+  const fetchImpl = makeFetch(({ url, init }) => {
+    const { pathname } = parse(url);
+    const method = init.method ?? "GET";
+    if (pathname === "/api/cpwb/todos/5" && method === "DELETE") {
+      rows = [];
+      return jsonResponse(200, { removed: true, todoId: 5 });
+    }
+    if (pathname === "/api/cpwb/todos" && method === "GET") return jsonResponse(200, rows);
+    if (pathname === "/api/cpwb/schedules" && method === "GET") return jsonResponse(200, []);
+    if (pathname === "/api/cpwb/summaries" && method === "GET") return jsonResponse(200, []);
+    return jsonResponse(404, { error: { code: "NOT_FOUND", message: "nf" } });
+  });
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
+  await store.actions.refreshProject(1, "2026-08-23");
+  await store.actions.deleteTodo(5);
+  assert.deepEqual(store.getSnapshot().todos, []);
 });
 
 test("store: project rename/delete refresh the authoritative project list", async () => {

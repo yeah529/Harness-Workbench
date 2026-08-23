@@ -149,7 +149,13 @@ function apply(ctx, config = {}) {
       };
       sessionService = createSessionService({ ctx, repos, retriever, sessionWorkspace });
       const runPrompt = createScheduledRunPrompt(sessionService);
-      scheduler = createScheduler({ repos, runPrompt, timeZone: () => settings.get("timezone") });
+      scheduler = createScheduler({
+        repos,
+        runPrompt,
+        timeZone: () => settings.get("timezone"),
+        automationPrompts: () => settings.get("automationPrompts"),
+        projectConversations: (input) => sessionService.readProjectDailyConversation(input),
+      });
       scheduler.start();
       const api = createApi({
         repos,

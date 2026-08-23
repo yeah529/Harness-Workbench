@@ -648,6 +648,12 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, updated);
   }
 
+  async function handleTodoDelete(req, res, { params }) {
+    const id = parseId(params.id);
+    if (!repos.todos.remove(id)) { notFound(res, "todo not found: " + id); return; }
+    ok(res, { removed: true, todoId: id });
+  }
+
   function requireSettings() {
     if (!settings) throw new ApiError(501, "NOT_IMPLEMENTED", "Workbench settings service is not available");
     return settings;
@@ -718,6 +724,26 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     const body = await readJsonBody(req);
     if (typeof body.timezone !== "string") throw new ApiError(422, "INVALID_TIMEZONE", "timezone must be an IANA time zone ID");
     ok(res, { timezone: requireSettings().set("timezone", body.timezone) });
+  }
+
+  async function handleAutomationPromptsSettings(req, res) {
+    ok(res, requireSettings().get("automationPrompts"));
+  }
+
+  async function handleAutomationPromptsPatch(req, res) {
+    const body = await readJsonBody(req);
+    const patch = {};
+    for (const key of ["summaryPrompt", "todoPrompt"]) {
+      if (body[key] === undefined) continue;
+      if (typeof body[key] !== "string" || body[key].trim() === "" || body[key].length > 20_000) {
+        throw new ApiError(422, "INVALID_AUTOMATION_PROMPT", `${key} must be a non-empty string up to 20000 characters`);
+      }
+      patch[key] = body[key].trim();
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new ApiError(422, "INVALID_AUTOMATION_PROMPT", "provide summaryPrompt or todoPrompt");
+    }
+    ok(res, requireSettings().set("automationPrompts", patch));
   }
 
   async function handleNetworkSettings(req, res) {
@@ -1047,6 +1073,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     { pattern: "/documents/:id", methods: { GET: handleDocumentGet } },
     { pattern: "/search", methods: { POST: handleSearch } },
     { pattern: "/todos", methods: { GET: handleTodosList, POST: handleTodoCreate, PATCH: handleTodoPatch } },
+    { pattern: "/todos/:id", methods: { DELETE: handleTodoDelete } },
     { pattern: "/schedules", methods: { GET: handleSchedulesList, POST: handleScheduleCreate, PATCH: handleSchedulePatch } },
     { pattern: "/schedules/:id", methods: { DELETE: handleScheduleDelete } },
     { pattern: "/schedules/:id/runs", methods: { GET: handleScheduleRuns } },
@@ -1064,6 +1091,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     { pattern: "/settings/index/reindex", methods: { POST: handleIndexReindex } },
     { pattern: "/settings/embedding/credential", methods: { PUT: handleCredentialPut, DELETE: handleCredentialDelete } },
     { pattern: "/settings/timezone", methods: { GET: handleTimezoneSettings, PATCH: handleTimezonePatch } },
+    { pattern: "/settings/automation-prompts", methods: { GET: handleAutomationPromptsSettings, PATCH: handleAutomationPromptsPatch } },
     { pattern: "/settings/network", methods: { GET: handleNetworkSettings, PATCH: handleNetworkPatch } },
     { pattern: "/settings/network/test", methods: { POST: handleNetworkTest } },
     { pattern: "/settings/auth/status", methods: { GET: handleAuthStatus } },

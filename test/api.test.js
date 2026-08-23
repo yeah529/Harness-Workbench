@@ -278,6 +278,29 @@ test("settings API exposes global timezone, validates embedding before save, and
   });
 });
 
+test("automation prompt settings expose defaults, persist edits, and reject blank prompts", async (t) => {
+  const { base } = await startApi(t);
+  const initial = await fetch(base + "/settings/automation-prompts");
+  assert.equal(initial.status, 200);
+  assert.match((await initial.json()).summaryPrompt, /最终中文总结正文/);
+
+  const updated = await fetch(base + "/settings/automation-prompts", {
+    method: "PATCH",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ summaryPrompt: "Custom summary", todoPrompt: "Custom todo" }),
+  });
+  assert.equal(updated.status, 200);
+  assert.deepEqual(await updated.json(), { summaryPrompt: "Custom summary", todoPrompt: "Custom todo" });
+
+  const invalid = await fetch(base + "/settings/automation-prompts", {
+    method: "PATCH",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ summaryPrompt: "   " }),
+  });
+  assert.equal(invalid.status, 422);
+  assert.equal((await invalid.json()).error.code, "INVALID_AUTOMATION_PROMPT");
+});
+
 test("network test performs the configured embedding check and refuses a missing DSH provider adapter", async (t) => {
   const calls = [];
   const { base } = await startApi(t, {
@@ -718,6 +741,14 @@ test("todos CRUD validates dueAt and supports completion", async (t) => {
   });
   assert.equal(res.status, 422);
   assert.equal((await res.json()).error.code, "INVALID_DATETIME");
+
+  res = await fetch(base + "/todos/" + todo.id, { method: "DELETE" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { removed: true, todoId: todo.id });
+  assert.equal(repos.todos.list({ projectId: p.id }).length, 0);
+
+  res = await fetch(base + "/todos/" + todo.id, { method: "DELETE" });
+  assert.equal(res.status, 404);
 });
 
 test("todos API rejects an invalid source", async (t) => {

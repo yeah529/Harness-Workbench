@@ -4,6 +4,7 @@ import { Key, Plug, ShieldCheck, SpinnerGap, WarningCircle } from "@phosphor-ico
 const WORKBENCH_SECTIONS = [
   ["workbench", "总览"],
   ["timezone", "时区"],
+  ["automation", "自动化提示词"],
   ["embedding", "向量模型"],
   ["network", "网络 / Proxy"],
   ["auth", "Codex"],
@@ -32,6 +33,32 @@ function TimezonePanel({ settings, store }) {
       ...["Asia/Shanghai", "Asia/Tokyo", "Asia/Singapore", "Europe/London", "America/Los_Angeles", "America/New_York", "UTC"].map((zone) => React.createElement("option", { key: zone, value: zone }, zone))),
     React.createElement("input", { value: draft, onChange: (event) => setDraft(event.target.value), placeholder: "合法 IANA ID，例如 Europe/Berlin", "aria-label": "自定义 IANA 时区" }),
     React.createElement("button", { type: "button", onClick: save, disabled: saving }, saving ? "保存中…" : "保存时区"),
+    React.createElement(ActionMessage, { message }),
+  );
+}
+
+function AutomationPromptsPanel({ settings, store }) {
+  const prompts = settings.automationPrompts || { summaryPrompt: "", todoPrompt: "" };
+  const [draft, setDraft] = React.useState(prompts);
+  const [message, setMessage] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  React.useEffect(() => setDraft(prompts), [prompts.summaryPrompt, prompts.todoPrompt]);
+  const patch = (key) => (event) => setDraft((current) => ({ ...current, [key]: event.target.value }));
+  const save = async () => {
+    setSaving(true); setMessage("");
+    try { await store.actions.updateAutomationPrompts(draft); setMessage("自动化提示词已保存；后续生成将使用新内容。"); }
+    catch (error) { setMessage(error?.message || "提示词保存失败"); }
+    finally { setSaving(false); }
+  };
+  return React.createElement("div", { className: "cpwb-settings-panel cpwb-prompt-settings" },
+    React.createElement("span", { className: "cpwb-eyebrow" }, "AUTOMATION / PROMPT CONTROL"),
+    React.createElement("h2", null, "自动化提示词"),
+    React.createElement("p", null, "支持变量 {{projectId}}、{{date}}、{{nextDate}}；运行时项目数据会由系统安全追加。"),
+    React.createElement("label", null, "每日总结提示词",
+      React.createElement("textarea", { rows: 8, value: draft.summaryPrompt, onChange: patch("summaryPrompt"), "aria-label": "每日总结提示词" })),
+    React.createElement("label", null, "次日待办提示词",
+      React.createElement("textarea", { rows: 8, value: draft.todoPrompt, onChange: patch("todoPrompt"), "aria-label": "次日待办提示词" })),
+    React.createElement("button", { type: "button", onClick: save, disabled: saving }, saving ? "保存中…" : "保存提示词"),
     React.createElement(ActionMessage, { message }),
   );
 }
@@ -172,6 +199,7 @@ function AuthPanel({ settings, store }) {
 
 function WorkbenchPanel({ section, settings, store }) {
   if (section === "timezone") return React.createElement(TimezonePanel, { settings, store });
+  if (section === "automation") return React.createElement(AutomationPromptsPanel, { settings, store });
   if (section === "embedding") return React.createElement(EmbeddingPanel, { settings, store });
   if (section === "network") return React.createElement(NetworkPanel, { settings, store });
   if (section === "auth") return React.createElement(AuthPanel, { settings, store });

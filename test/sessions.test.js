@@ -92,7 +92,7 @@ function makePersistence({ meta = {}, events = [], error = null } = {}) {
  * so installModelSelection's listeners are observable, and stores the live
  * agent so submitWorkbenchPrompt's ctx.agents.get() resolves it.
  */
-function makeMockCtx({ presets, resumeError = null, sessionPersistence, nativeSelection } = {}) {
+function makeMockCtx({ presets, resumeError = null, sessionPersistence, sessionQuery, nativeSelection } = {}) {
   const live = new Map(); // sessionId -> { agent, session, calls, onCalls, disposed() }
   const workspaces = new Map();
   const records = { create: [], resume: [], workspaceGet: [], flush: [], attach: [], restrict: [] };
@@ -147,6 +147,7 @@ function makeMockCtx({ presets, resumeError = null, sessionPersistence, nativeSe
     get(name) {
       if (name === "agentPresets") return presets;
       if (name === "sessionPersistence") return sessionPersistence;
+      if (name === "sessionQuery") return sessionQuery;
       return undefined;
     },
   };
@@ -208,11 +209,11 @@ test("native pre-step RAG rejects before model entry when retrieval fails", asyn
 });
 
 /** Boot the real SQLite + repositories + session service over a mock ctx. */
-async function makeService({ presets, retriever, resumeError, sessionPersistence, sessionWorkspace } = {}) {
+async function makeService({ presets, retriever, resumeError, sessionPersistence, sessionQuery, sessionWorkspace } = {}) {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
-  const { ctx, live, workspaces, records, seedLiveAgent } = makeMockCtx({ presets, resumeError, sessionPersistence });
+  const { ctx, live, workspaces, records, seedLiveAgent } = makeMockCtx({ presets, resumeError, sessionPersistence, sessionQuery });
   const service = createSessionService({ ctx, repos, retriever: retriever ?? makeRetriever(), sessionWorkspace });
   return {
     service, repos, db, dataDir, ctx, live, workspaces, records, seedLiveAgent,
@@ -227,6 +228,54 @@ async function makeService({ presets, retriever, resumeError, sessionPersistence
 const SAMPLE = (over = {}) => ({ sourceId: "1", originalName: "note.md", locator: "lines:1-1", text: "hello", ...over });
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("daily project conversation reads only that project's user and final assistant text", async () => {
+  const reads = [];
+  const projectSessionId = "session-cpwb-project-day";
+  const knowledgeSessionId = "session-cpwb-kb-day";
+  const eventTime = Date.parse("2026-08-20T01:00:00.000Z");
+  const sessionQuery = {
+    async readSession(sessionId) {
+      reads.push(sessionId);
+      if (sessionId === knowledgeSessionId) throw new Error("knowledge-base conversation must not be read");
+      return {
+        session: { id: sessionId },
+        events: [
+          { seq: 0, type: "user/message", time: Date.parse("2026-08-19T01:00:00.000Z"), data: { content: [{ type: "text", text: "昨天的内容" }] } },
+          { seq: 1, type: "user/message", time: eventTime, data: { content: [{ type: "text", text: "完成登录页" }] } },
+          { seq: 2, type: "reasoning-chunks", time: eventTime + 1, data: { chunks: ["内部思考"] } },
+          { seq: 3, type: "assistant/message", time: eventTime + 2, data: { message: { content: [
+            { type: "reasoning", text: "不要进入总结" },
+            { type: "tool-call", name: "bash", arguments: { command: "pwd" } },
+            { type: "text", text: "登录页已完成，并通过测试。" },
+          ] } } },
+        ],
+      };
+    },
+  };
+  const s = await makeService({ sessionQuery });
+  try {
+    const project = s.repos.projects.create({ name: "Project", workspaceId: "ws-project" });
+    const kb = s.repos.knowledgeBases.create({ name: "KB" });
+    s.repos.workbenchSessions.upsert({ sessionId: projectSessionId, scopeKind: "project", scopeId: project.id, provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL, now: "2026-08-20T03:00:00.000Z" });
+    s.repos.workbenchSessions.upsert({ sessionId: knowledgeSessionId, scopeKind: "knowledge_base", scopeId: kb.id, provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL, now: "2026-08-20T03:00:00.000Z" });
+    s.repos.workbenchSessions.setTitleIfEmpty(projectSessionId, "登录页交付", "2026-08-20T03:00:00.000Z");
+
+    const result = await s.service.readProjectDailyConversation({ projectId: project.id, date: "2026-08-20", timeZone: "Asia/Shanghai" });
+
+    assert.deepEqual(reads, [projectSessionId]);
+    assert.deepEqual(result, [{
+      sessionId: projectSessionId,
+      title: "登录页交付",
+      messages: [
+        { role: "user", text: "完成登录页", time: eventTime },
+        { role: "assistant", text: "登录页已完成，并通过测试。", time: eventTime + 2 },
+      ],
+    }]);
+  } finally {
+    await s.cleanup();
+  }
+});
 
 /** A retriever whose search() blocks until the test releases or fails it. */
 function makeGatedRetriever() {

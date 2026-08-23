@@ -14,8 +14,12 @@ mkdir -p "$PROFILE/node_modules"
 LINK="$PROFILE/node_modules/dsh-cyberpunk-workbench"
 if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$PLUGIN_DIR" ]; then
   echo "    already linked -> $PLUGIN_DIR"
-elif [ -e "$LINK" ] || [ -L "$LINK" ]; then
-  echo "    refusing to replace existing non-matching path: $LINK" >&2
+elif [ -L "$LINK" ]; then
+  OLD_TARGET="$(readlink "$LINK")"
+  ln -sfn "$PLUGIN_DIR" "$LINK"
+  echo "    relinked $OLD_TARGET -> $PLUGIN_DIR"
+elif [ -e "$LINK" ]; then
+  echo "    refusing to replace existing non-symlink path: $LINK" >&2
   exit 1
 else
   ln -s "$PLUGIN_DIR" "$LINK"

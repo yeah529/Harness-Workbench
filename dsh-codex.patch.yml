@@ -6,3 +6,4 @@
     providers:
       openai-codex:
         apiKeyEnv: OPENAI_CODEX_ACCESS_TOKEN
+        transport: sse

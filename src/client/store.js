@@ -94,7 +94,7 @@ export function createWorkbenchStore(api) {
     knowledgeBases: [],
     documents: [],
     health: null,
-    settings: { timezone: "Asia/Shanghai", embedding: null, network: null, auth: null, index: null },
+    settings: { timezone: "Asia/Shanghai", embedding: null, network: null, auth: null, index: null, automationPrompts: null },
     error: null,
     activeProjectId: null,
     activeKnowledgeBaseId: null,
@@ -317,12 +317,13 @@ export function createWorkbenchStore(api) {
     const readSetting = (name) => typeof api.settings[name] === "function"
       ? Promise.resolve().then(() => api.settings[name]()).catch(() => null)
       : Promise.resolve(null);
-    const [timezone, embedding, network, auth, index] = await Promise.all([
+    const [timezone, embedding, network, auth, index, automationPrompts] = await Promise.all([
       readSetting("timezone"),
       readSetting("embedding"),
       readSetting("network"),
       readSetting("authStatus"),
       readSetting("indexStatus"),
+      readSetting("automationPrompts"),
     ]);
     const next = {
       timezone: timezone?.timezone || timezone || state.settings.timezone,
@@ -330,6 +331,7 @@ export function createWorkbenchStore(api) {
       network: network || state.settings.network,
       auth: auth || state.settings.auth,
       index: index || state.settings.index,
+      automationPrompts: automationPrompts || state.settings.automationPrompts,
     };
     setState({ settings: next });
     return next;
@@ -371,6 +373,12 @@ export function createWorkbenchStore(api) {
     updateTimezone: async function updateTimezone(timezone) {
       const result = await runAction("updateTimezone", () => api.settings.updateTimezone(timezone));
       setState({ settings: { ...state.settings, timezone: result?.timezone || result } });
+      return result;
+    },
+
+    updateAutomationPrompts: async function updateAutomationPrompts(prompts) {
+      const result = await runAction("updateAutomationPrompts", () => api.settings.updateAutomationPrompts(prompts));
+      setState({ settings: { ...state.settings, automationPrompts: result } });
       return result;
     },
 
@@ -726,6 +734,17 @@ export function createWorkbenchStore(api) {
         untrack(ac);
       }
       const projectId = projectIdFor("todos", id);
+      if (projectId != null) await refreshProject(projectId, lastToday ?? localDateKey());
+    },
+
+    deleteTodo: async function deleteTodo(id) {
+      const projectId = projectIdFor("todos", id);
+      const ac = track(new AbortController());
+      try {
+        await runAction("todo", () => api.todos.remove(id, { signal: ac.signal }));
+      } finally {
+        untrack(ac);
+      }
       if (projectId != null) await refreshProject(projectId, lastToday ?? localDateKey());
     },
 

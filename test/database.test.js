@@ -166,6 +166,24 @@ test("todos retain createdAt and become overdue by dueAt", async (t) => {
   assert.equal(after[0].overdue, false, "a completed plan is no longer overdue");
 });
 
+test("todos remove deletes only the requested todo", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => {
+    closeDatabase(db);
+    await removeTempDir(dataDir);
+  });
+
+  const project = repos.projects.create({ name: "Cleanup" });
+  const first = repos.todos.create({ projectId: project.id, title: "Delete me", dueAt: "2026-08-24T10:00:00.000Z" });
+  const second = repos.todos.create({ projectId: project.id, title: "Keep me", dueAt: "2026-08-25T10:00:00.000Z" });
+
+  assert.equal(repos.todos.remove(first.id), true);
+  assert.equal(repos.todos.remove(first.id), false);
+  assert.deepEqual(repos.todos.list({ projectId: project.id }).map((row) => row.id), [second.id]);
+});
+
 test("schedule run key is unique by scheduleId and scheduledAt", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });

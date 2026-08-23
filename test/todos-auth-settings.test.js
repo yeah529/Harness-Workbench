@@ -48,6 +48,28 @@ test("workbench settings initialize once and strips credential material at every
   await removeTempDir(dataDir);
 });
 
+test("automation prompts have editable defaults and persist user changes", async () => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  const settings = createWorkbenchSettings({ repos });
+  const defaults = settings.get("automationPrompts");
+  assert.match(defaults.summaryPrompt, /最终中文总结正文/);
+  assert.match(defaults.todoPrompt, /逐行清单/);
+
+  settings.set("automationPrompts", {
+    summaryPrompt: "CUSTOM SUMMARY {{projectId}} {{date}}",
+    todoPrompt: "CUSTOM TODO {{projectId}} {{date}} {{nextDate}}",
+  });
+  const reopened = createWorkbenchSettings({ repos });
+  assert.deepEqual(reopened.get("automationPrompts"), {
+    summaryPrompt: "CUSTOM SUMMARY {{projectId}} {{date}}",
+    todoPrompt: "CUSTOM TODO {{projectId}} {{date}} {{nextDate}}",
+  });
+  closeDatabase(db);
+  await removeTempDir(dataDir);
+});
+
 test("embedding factory exposes ollama and openai-compatible identity", () => {
   const ollama = createEmbeddingAdapter({ provider: "ollama", baseUrl: "http://127.0.0.1:11434", model: "qwen3-embedding:0.6b", dimensions: 1024, fetchImpl: async () => ({ ok: true, json: async () => ({ embedding: [1, 2] }) }) });
   assert.deepEqual(ollama.identity(), { provider: "ollama", endpoint: "http://127.0.0.1:11434", model: "qwen3-embedding:0.6b", dimensions: 1024 });

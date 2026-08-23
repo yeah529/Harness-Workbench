@@ -18,6 +18,7 @@ import {
 import { createWorkbenchRagPreStep, deriveSessionTitle } from "../src/host/sessions.js";
 import { Automation, buildSummaryMarkdown } from "../src/client/Automation.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
+import { Todos, organizeTodos } from "../src/client/Todos.js";
 
 function staticStore(overrides = {}) {
   const state = {
@@ -124,6 +125,41 @@ test("schedule UI uses a compact add action and exposes date-time plus recurrenc
   assert.match(html, /每周/);
   assert.match(html, /每月/);
   assert.doesNotMatch(html, /daily 21:00 \/ weekly/);
+});
+
+test("todo UI separates completed items and groups pending items by local date status", () => {
+  const todos = [
+    { id: 1, title: "过期", done: false, overdue: true, source: "manual", dueAt: "2026-08-22T02:00:00.000Z", createdAt: "2026-08-20T02:00:00.000Z", completedAt: null },
+    { id: 2, title: "今天", done: false, overdue: false, source: "manual", dueAt: "2026-08-23T10:00:00.000Z", createdAt: "2026-08-20T02:00:00.000Z", completedAt: null },
+    { id: 3, title: "明天", done: false, overdue: false, source: "auto", dueAt: "2026-08-24T10:00:00.000Z", createdAt: "2026-08-20T02:00:00.000Z", completedAt: null },
+    { id: 4, title: "稍后", done: false, overdue: false, source: "manual", dueAt: "2026-08-25T06:00:00.000Z", createdAt: "2026-08-20T02:00:00.000Z", completedAt: null },
+    { id: 5, title: "已经完成", done: true, overdue: false, source: "manual", dueAt: "2026-08-22T02:00:00.000Z", createdAt: "2026-08-20T02:00:00.000Z", completedAt: "2026-08-23T03:00:00.000Z" },
+  ];
+  const input = { timeZone: "Asia/Shanghai", now: new Date("2026-08-23T01:00:00.000Z") };
+
+  assert.deepEqual(organizeTodos(todos, { ...input, view: "pending" }).map((section) => ({
+    key: section.key,
+    label: section.label,
+    ids: section.items.map((item) => item.id),
+  })), [
+    { key: "overdue", label: "已过期", ids: [1] },
+    { key: "2026-08-23", label: "今天，周日", ids: [2] },
+    { key: "2026-08-24", label: "明天，周一", ids: [3] },
+    { key: "2026-08-25", label: "8月25日，周二", ids: [4] },
+  ]);
+  assert.deepEqual(organizeTodos(todos, { ...input, view: "completed" }).flatMap((section) => section.items.map((item) => item.id)), [5]);
+
+  const store = staticStore({ todos });
+  store.actions.updateTodo = async () => {};
+  store.actions.createTodo = async () => {};
+  store.actions.deleteTodo = async () => {};
+  const html = renderToStaticMarkup(React.createElement(Todos, { store, projectId: 1, now: input.now }));
+  assert.match(html, /role="tablist"/);
+  assert.match(html, />待处理<.*>4</);
+  assert.match(html, />已完成<.*>1</);
+  assert.match(html, /cpwb-todo-overdue/);
+  assert.match(html, /aria-label="删除待办 过期"/);
+  assert.doesNotMatch(html, /已经完成/);
 });
 
 test("summary UI exposes generation feedback plus download and delete actions", () => {

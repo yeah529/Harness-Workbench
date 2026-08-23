@@ -6,7 +6,7 @@ import { localDateKey, localDateTimeParts } from "../src/host/timezone.js";
 
 const at = (value) => new Date(value);
 
-function makeRepos({ schedules = [], projects = [], automation = {}, runRows = new Map(), todos = [], sessionActivity = [], summary = null, scheduleRuns = {} } = {}) {
+function makeRepos({ schedules = [], projects = [], automation = {}, runRows = new Map(), todos = [], summary = null, scheduleRuns = {}, knowledgeBases = [], knowledgeDocuments = {}, knowledgeChunks = {} } = {}) {
   const calls = { claims: [], complete: [], failed: [], missed: [], summaries: [], todos: [] };
   return {
     calls,
@@ -35,7 +35,9 @@ function makeRepos({ schedules = [], projects = [], automation = {}, runRows = n
       list: () => todos,
       create(input) { calls.todos.push(input); return input; },
     },
-    knowledgeChats: { listActivityByProject: () => sessionActivity },
+    projectKnowledgeBases: { listByProject: () => knowledgeBases },
+    documents: { listByKnowledgeBase: (knowledgeBaseId) => knowledgeDocuments[knowledgeBaseId] ?? [] },
+    chunks: { listByDocument: (documentId) => knowledgeChunks[documentId] ?? [] },
   };
 }
 
@@ -95,13 +97,12 @@ test("21:00 summary and next-day todo toggles are independent", async () => {
   assert.ok(repos.calls.todos.every((todo) => todo.source === "auto" && todo.dueAt === new Date("2026-08-21T18:00:00").toISOString()));
 });
 
-test("daily summary prompt includes todo changes, schedule outcomes, session activity, and todo completion", async () => {
+test("daily summary prompt includes todo changes, schedule outcomes, and todo completion", async () => {
   const repos = makeRepos({
     projects: [{ id: 1 }],
     schedules: [{ id: 4, projectId: 1, name: "nightly", rule: "daily 21:00", enabled: true }],
     todos: [{ id: 8, title: "Ship patch", done: true, completedAt: "2026-08-20T10:00:00.000Z", dueAt: "2026-08-20T18:00:00.000Z", source: "manual" }],
     scheduleRuns: { 4: [{ scheduleId: 4, status: "completed", sessionId: "session-scheduled-1", scheduledAt: "2026-08-20T21:00:00.000Z", finishedAt: "2026-08-20T13:00:00.000Z" }] },
-    sessionActivity: [{ chatId: 3, knowledgeBaseId: 2, dshSessionId: "session-kb-1", updatedAt: "2026-08-20T12:00:00.000Z" }],
   });
   let prompt;
   const scheduler = createScheduler({ repos, runPrompt: async (input) => { prompt = input.prompt; return { text: "ok" }; } });
@@ -112,13 +113,81 @@ test("daily summary prompt includes todo changes, schedule outcomes, session act
   assert.match(prompt, /Ship patch/);
   assert.match(prompt, /定时任务执行结果：/);
   assert.match(prompt, /session-scheduled-1/);
-  assert.match(prompt, /会话活动：/);
-  assert.match(prompt, /session-kb-1/);
+  assert.match(prompt, /项目会话正文：\[\]/);
   assert.match(prompt, /待办完成情况：/);
   assert.match(prompt, /"done":true/);
   assert.match(prompt, /"completedAt":"2026-08-20T10:00:00.000Z"/);
   assert.match(prompt, /不要调用任何工具/);
   assert.match(prompt, /仅输出最终中文总结正文/);
+});
+
+test("daily summary includes all project conversation text and newly added knowledge content", async () => {
+  const repos = makeRepos({
+    projects: [{ id: 1 }],
+    knowledgeBases: [
+      { id: 2, name: "产品知识库", createdAt: "2026-08-19T01:00:00.000Z" },
+      { id: 3, name: "今日新建知识库", createdAt: "2026-08-20T02:00:00.000Z" },
+    ],
+    knowledgeDocuments: {
+      2: [
+        { id: 8, originalName: "今日方案.md", status: "ready", createdAt: "2026-08-20T03:00:00.000Z", indexedAt: "2026-08-20T03:01:00.000Z" },
+        { id: 9, originalName: "旧资料.md", status: "ready", createdAt: "2026-08-18T03:00:00.000Z", indexedAt: "2026-08-18T03:01:00.000Z" },
+      ],
+    },
+    knowledgeChunks: {
+      8: [{ locator: "lines:1-2", heading: "方案", text: "知识库新增了首页验收标准。" }],
+    },
+  });
+  let prompt;
+  const scheduler = createScheduler({
+    repos,
+    projectConversations: async () => [{
+      sessionId: "session-project-1",
+      title: "交付讨论",
+      messages: [
+        { role: "user", text: "今天完成首页重构", time: Date.parse("2026-08-20T04:00:00.000Z") },
+        { role: "assistant", text: "首页重构已通过测试", time: Date.parse("2026-08-20T04:01:00.000Z") },
+      ],
+    }],
+    runPrompt: async (input) => { prompt = input.prompt; return { text: "ok" }; },
+  });
+
+  await scheduler.runSummary({ id: 1 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-20");
+
+  assert.match(prompt, /项目会话正文：/);
+  assert.match(prompt, /今天完成首页重构/);
+  assert.match(prompt, /首页重构已通过测试/);
+  assert.match(prompt, /知识库新增内容：/);
+  assert.match(prompt, /今日方案\.md/);
+  assert.match(prompt, /知识库新增了首页验收标准/);
+  assert.match(prompt, /今日新建知识库/);
+  assert.doesNotMatch(prompt, /旧资料\.md/);
+  assert.doesNotMatch(prompt, /知识库会话正文/);
+});
+
+test("daily automations render the latest custom prompts and keep runtime project data", async () => {
+  const repos = makeRepos({
+    todos: [{ title: "Ship patch", done: false, dueAt: "2026-08-21T10:00:00.000Z", source: "manual" }],
+  });
+  const prompts = [];
+  let configured = {
+    summaryPrompt: "CUSTOM SUMMARY {{projectId}} {{date}}",
+    todoPrompt: "CUSTOM TODO {{projectId}} {{date}} {{nextDate}}",
+  };
+  const scheduler = createScheduler({
+    repos,
+    automationPrompts: () => configured,
+    runPrompt: async (input) => { prompts.push(input); return { text: input.kind === "todo" ? "Follow up" : "ok" }; },
+  });
+
+  await scheduler.runSummary({ id: 7 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-20");
+  configured = { ...configured, todoPrompt: "UPDATED TODO {{projectId}} {{date}} {{nextDate}}" };
+  await scheduler.runAutoTodos({ id: 7 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-21");
+
+  assert.match(prompts[0].prompt, /^CUSTOM SUMMARY 7 2026-08-20/);
+  assert.match(prompts[0].prompt, /待办完成情况：.*Ship patch/);
+  assert.match(prompts[1].prompt, /^UPDATED TODO 7 2026-08-20 2026-08-21/);
+  assert.match(prompts[1].prompt, /待办：.*Ship patch/);
 });
 
 test("daily summary never persists leaked DSML as completed content", async () => {
