@@ -141,8 +141,8 @@ export function WorkbenchSessionShell(props) {
   const persistedEntry = state.workbenchSessions?.[sessionId];
   const entry = persistedEntry ? { ...runtimeEntry, ...persistedEntry } : runtimeEntry;
   const scope = entry?.scope;
-  const projectId = scope?.kind === "project" ? scope.scopeId : null;
-  const knowledgeBaseId = scope?.kind === "knowledge_base" ? scope.scopeId : null;
+  const projectId = scope?.kind === "project" ? scope.id : null;
+  const knowledgeBaseId = scope?.kind === "knowledge_base" ? scope.id : null;
   const project = projectId == null ? null : projectFor(state, projectId);
   const knowledgeBase = knowledgeBaseId == null ? null : knowledgeBaseFor(state, knowledgeBaseId);
   const [activeTool, setActiveTool] = React.useState("todos");

@@ -5,8 +5,8 @@
  * submitWorkbenchPrompt, buildKnowledgePrompt) and the minimal session service
  * against a mock DSH context — a faithful stand-in for the real Cordis
  * ctx.agents / ctx.sessions / ctx.workspaceRegistry / ctx.get("agentPresets")
- * surface — and a real SQLite database for the knowledge_chats persistence
- * path. The mock records agent creation options, scoped setup registrations
+ * surface — and a real SQLite database for unified Workbench session persistence.
+ * The mock records agent creation options, scoped setup registrations
  * (installModelSelection listeners), preset resolution/mount, workspace
  * attach, message submission (inject/followup), and handle disposal so every
  * observable contract in the task is asserted without a live Ollama or a real

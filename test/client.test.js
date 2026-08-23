@@ -325,7 +325,7 @@ test("api: schedules create/update/delete/run/history use the modal contract", a
   assert.deepEqual(await api.schedules.runs(6), [{ status: "failed", sessionId: "sess", error: "boom" }]);
 });
 
-test("api: summaries list/run and knowledge-chats list/create paths", async () => {
+test("api: summaries list/run/delete paths", async () => {
   const fetchImpl = makeFetch(({ url, init }, i) => {
     const { pathname } = parse(url);
     if (i === 0) {
@@ -342,20 +342,12 @@ test("api: summaries list/run and knowledge-chats list/create paths", async () =
       assert.equal(init.method, "DELETE");
       return jsonResponse(200, { removed: true, id: 9 });
     }
-    if (i === 3) {
-      assert.equal(pathname, "/api/cpwb/knowledge-chats");
-      return jsonResponse(200, []);
-    }
-    assert.equal(pathname, "/api/cpwb/knowledge-chats");
-    assert.deepEqual(JSON.parse(init.body), { knowledgeBaseId: 2, title: "chat" });
-    return jsonResponse(201, { id: 7, knowledgeBaseId: 2, title: "chat" });
+    throw new Error("unexpected request " + pathname);
   });
   const api = createCpwbApi({ fetchImpl });
   await api.summaries.list({ projectId: 1 });
   await api.summaries.run({ projectId: 1 });
   await api.summaries.remove(9);
-  await api.knowledgeChats.list({ knowledgeBaseId: 2 });
-  await api.knowledgeChats.create({ knowledgeBaseId: 2, title: "chat" });
 });
 
 test("store: deleting a summary refreshes the active project's summary list", async () => {

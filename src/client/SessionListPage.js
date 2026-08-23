@@ -23,7 +23,7 @@ export function SessionListPage({ store, onOpenSession }) {
 
   const load = React.useCallback((offset = 0) => store.actions.loadAllSessions({
     query: query.trim(),
-    context: context || null,
+    scopeKind: context || null,
     offset,
     limit: page.limit || 20,
   }), [context, page.limit, query, store]);

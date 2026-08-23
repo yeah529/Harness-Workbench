@@ -45,9 +45,9 @@ export function listWorkbenchSessions(snapshot, scopes = null, activeScope = nul
         ? session
         : (scopes && (scopes[id] ?? scopes[String(id)]));
       const scope = metadata?.scope ?? (
-        metadata?.scopeKind ? { kind: metadata.scopeKind, scopeId: metadata.scopeId } : null
+        metadata?.scopeKind ? { kind: metadata.scopeKind, id: metadata.scopeId } : null
       );
-      return scope?.kind === activeScope.kind && Number(scope.scopeId) === Number(activeScope.scopeId);
+      return scope?.kind === activeScope.kind && Number(scope.id) === Number(activeScope.id);
     })
     .map((session) => session.sessionId ? session : { ...session, sessionId: session.id });
 }

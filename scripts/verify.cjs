@@ -66,7 +66,6 @@ async function verifyBundle() {
   let captured = null;
   const styles = [];
   const sessionCreates = [];
-  let createMode = "project";
   let sessionState = { ids: [], byId: {}, current: undefined, bindingId: undefined, phase: "ready" };
   let workspaceState = { items: [], phase: "ready" };
   globalThis.window = {
@@ -89,11 +88,11 @@ async function verifyBundle() {
     if (pathname.endsWith("/chat/sessions") && init.method === "POST") {
       const body = JSON.parse(init.body || "{}");
       sessionCreates.push(body);
-      const sessionId = createMode === "project" ? "session-cpwb-project" : "session-cpwb-independent";
-      const scope = createMode === "project" ? { kind: "project", scopeId: 1 } : { kind: "independent", scopeId: null };
+      const sessionId = "session-cpwb-project";
+      const scope = body.scope;
       sessionState = { ids: [sessionId], byId: { [sessionId]: { sessionId, cwd: "/tmp/workbench", blank: true } }, current: sessionId, bindingId: sessionId, phase: "ready" };
       workspaceState = { items: [{ workspaceId: "ws-test", path: "/tmp/workbench", sessionIds: [sessionId] }], phase: "ready" };
-      const value = { sessionId, scope, reused: false };
+      const value = { sessionId, scope, lifecycleStatus: "active", citations: [] };
       return { ok: true, status: 201, json: async () => value, text: async () => JSON.stringify(value) };
     }
     const value = pathname.endsWith("/health")
@@ -166,12 +165,12 @@ async function verifyBundle() {
     throw new Error("bundle must not claim native conversation or details slots");
   }
   const store = exports.getStore();
-  await store.actions.openProjectChat({ projectId: 1 });
-  createMode = "independent";
-  const shellProps = shell[0].config.inject();
-  await shellProps.createSession();
-  if (JSON.stringify(sessionCreates.at(-1)) !== "{}") {
-    throw new Error("global new-session action must create an unscoped independent session");
+  store.actions.startDraft({ scope: { kind: "project", id: 1 } });
+  if (sessionCreates.length !== 0) throw new Error("local draft must not create a DSH session");
+  await store.actions.activateDraft({ text: "verify unified session" });
+  const created = sessionCreates.at(-1);
+  if (created.scope?.kind !== "project" || created.scope?.id !== 1 || created.question !== "verify unified session") {
+    throw new Error("first prompt must activate exactly one canonical project session");
   }
   for (const dispose of disposers.reverse()) await dispose();
   console.log("bundle exports, CSS injection, and Slot composition: OK");

@@ -712,6 +712,75 @@ body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"] nav button[aria-cur
 }
 .cpwb-sidebar-settings:hover { color: var(--cpwb-text); background: var(--cpwb-cyan-soft); }
 
+/* A draft is deliberately a Workbench-only surface. The native conversation
+   becomes visible only after the first prompt has created a durable session. */
+.cpwb-draft-conversation {
+  box-sizing: border-box;
+  min-width: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: 64px minmax(0, 1fr) auto;
+  padding: 0 clamp(18px, 3vw, 52px) 28px;
+  color: var(--cpwb-text);
+  background:
+    radial-gradient(circle at 76% 8%, rgba(121, 25, 43, .22), transparent 34%),
+    linear-gradient(180deg, rgba(7, 10, 15, .96), rgba(8, 9, 14, .99));
+}
+.cpwb-draft-conversation > header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  border-bottom: 1px solid rgba(0, 240, 255, .22);
+}
+.cpwb-draft-conversation > header span { color: var(--cpwb-cyan); font: 650 9px/1 var(--cpwb-code); letter-spacing: .16em; }
+.cpwb-draft-conversation > header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cpwb-draft-conversation > header button { margin-left: auto; color: var(--cpwb-muted); border: 0; background: transparent; cursor: pointer; }
+.cpwb-draft-empty { align-self: center; justify-self: center; max-width: 520px; text-align: center; color: var(--cpwb-text-secondary); }
+.cpwb-draft-empty svg { color: var(--cpwb-cyan); }
+.cpwb-draft-empty h2 { margin: 16px 0 8px; color: var(--cpwb-text); font-size: clamp(20px, 2.1vw, 30px); }
+.cpwb-draft-empty p { margin: 0; line-height: 1.75; }
+.cpwb-draft-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  width: min(100%, 920px);
+  margin: 0 auto;
+  padding: 14px;
+  border: 1px solid rgba(0, 240, 255, .38);
+  background: rgba(10, 13, 20, .82);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .32);
+  clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+}
+.cpwb-draft-composer textarea { box-sizing: border-box; min-height: 92px; resize: vertical; padding: 8px 10px; color: var(--cpwb-text); border: 0; outline: 0; background: transparent; font: inherit; }
+.cpwb-draft-composer > button { align-self: end; min-width: 104px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; color: #090a0e; border: 0; background: var(--cpwb-amber); font-weight: 760; cursor: pointer; }
+.cpwb-draft-composer > button:disabled { opacity: .45; cursor: not-allowed; }
+.cpwb-draft-error { grid-column: 1 / -1; margin: 0; color: var(--cpwb-red); font-size: 12px; }
+
+.cpwb-new-session-host { width: min(680px, calc(100vw - 28px)); padding: 0; color: var(--cpwb-text); border: 1px solid rgba(0, 240, 255, .42); background: rgba(8, 10, 16, .97); box-shadow: 0 28px 90px rgba(0, 0, 0, .66); clip-path: var(--cpwb-cut-lg); }
+.cpwb-new-session-host::backdrop { background: rgba(2, 3, 7, .78); backdrop-filter: blur(7px); }
+.cpwb-new-session-dialog { display: grid; gap: 22px; padding: clamp(22px, 4vw, 38px); }
+.cpwb-new-session-dialog header { padding-left: 18px; border-left: 2px solid var(--cpwb-cyan); }
+.cpwb-new-session-dialog header > span { color: var(--cpwb-cyan); font: 650 9px/1 var(--cpwb-code); letter-spacing: .2em; }
+.cpwb-new-session-dialog h2 { margin: 8px 0 6px; font-size: 28px; }
+.cpwb-new-session-dialog header p { margin: 0; color: var(--cpwb-muted); line-height: 1.55; }
+.cpwb-owner-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; padding: 0; border: 0; }
+.cpwb-owner-options legend, .cpwb-owner-select > span { margin-bottom: 9px; color: var(--cpwb-muted); font: 650 9px/1 var(--cpwb-code); letter-spacing: .15em; text-transform: uppercase; }
+.cpwb-owner-options legend { grid-column: 1 / -1; }
+.cpwb-owner-options label { position: relative; display: flex; align-items: center; gap: 9px; min-height: 50px; padding: 0 13px; color: var(--cpwb-text-secondary); border: 1px solid var(--cpwb-border-strong); background: rgba(14, 17, 24, .76); cursor: pointer; }
+.cpwb-owner-options label.cpwb-active { color: var(--cpwb-text); border-color: var(--cpwb-cyan); background: var(--cpwb-cyan-soft); box-shadow: inset 3px 0 0 var(--cpwb-cyan); }
+.cpwb-owner-options input { position: absolute; opacity: 0; pointer-events: none; }
+.cpwb-owner-select { display: grid; }
+.cpwb-owner-select select { min-height: 44px; padding: 0 12px; color: var(--cpwb-text); border: 1px solid var(--cpwb-border-strong); background: var(--cpwb-surface-raised); }
+.cpwb-context-preview { padding: 15px 17px; border: 1px solid rgba(0, 240, 255, .2); background: rgba(0, 240, 255, .035); }
+.cpwb-context-preview > div { display: flex; align-items: center; gap: 9px; color: var(--cpwb-cyan); }
+.cpwb-context-preview ul { margin: 11px 0 0 26px; padding: 0; color: var(--cpwb-text-secondary); line-height: 1.7; }
+.cpwb-new-session-dialog footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
+.cpwb-button-ghost, .cpwb-button-primary { min-height: 42px; padding: 0 17px; border: 1px solid var(--cpwb-border-strong); cursor: pointer; }
+.cpwb-button-ghost { color: var(--cpwb-text-secondary); background: transparent; }
+.cpwb-button-primary { display: inline-flex; align-items: center; gap: 8px; color: #08090d; border-color: var(--cpwb-amber); background: var(--cpwb-amber); font-weight: 760; }
+.cpwb-button-primary:disabled { opacity: .42; cursor: not-allowed; }
+
 @media (min-width: 900px) and (max-width: 1279px) {
   .cpwb-app-shell { grid-template-columns: 190px minmax(0, 1fr); }
   .cpwb-global-sidebar { padding: 14px 12px 12px; }
@@ -766,6 +835,10 @@ body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"] nav button[aria-cur
     overflow-x: auto;
   }
   .cpwb-settings-content { padding-top: 14px; }
+  .cpwb-draft-conversation { grid-template-rows: 58px minmax(0, 1fr) auto; padding: 0 12px 14px; }
+  .cpwb-draft-composer { grid-template-columns: minmax(0, 1fr); }
+  .cpwb-draft-composer > button { justify-self: end; }
+  .cpwb-owner-options { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

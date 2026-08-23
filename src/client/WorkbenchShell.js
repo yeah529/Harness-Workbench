@@ -5,6 +5,7 @@ import { WorkbenchSessionShell } from "./WorkbenchSessionShell.js";
 import { WorkbenchSidebar } from "./WorkbenchSidebar.js";
 import { KnowledgeCenterPage } from "./KnowledgeBase.js";
 import { SessionListPage } from "./SessionListPage.js";
+import { DraftConversation, NewSessionDialog } from "./NewSessionDialog.js";
 import { DrawerDialog, nextDrawerOwner, useWorkbenchLayoutMode } from "./responsive.js";
 
 export function WorkbenchShell(props) {
@@ -17,6 +18,7 @@ export function WorkbenchShell(props) {
   const state = React.useSyncExternalStore(props.store.subscribe, props.store.getSnapshot, props.store.getSnapshot);
   const layoutMode = useWorkbenchLayoutMode(props.layoutMode);
   const [drawerOwner, setDrawerOwner] = React.useState(null);
+  const [newSessionOpen, setNewSessionOpen] = React.useState(false);
   const navigationTriggerRef = React.useRef(null);
 
   const navigate = function (page) {
@@ -33,7 +35,7 @@ export function WorkbenchShell(props) {
   };
   const createSession = function () {
     if (layoutMode === "mobile") closeDrawer();
-    return props.createSession?.();
+    setNewSessionOpen(true);
   };
   const openNativeSettings = function () {
     closeDrawer();
@@ -62,12 +64,22 @@ export function WorkbenchShell(props) {
       onProjectDrawerOpen: () => openDrawer("project"),
       onProjectDrawerClose: closeDrawer,
     });
+  } else if (view.page === "draft") {
+    center = React.createElement(DraftConversation, {
+      store: props.store,
+      onActivated: props.openActivatedSession,
+      onCancel() {
+        props.store.actions.discardDraft();
+        navigation.openHome();
+      },
+    });
   } else if (view.page === "knowledge") {
     center = React.createElement(KnowledgeCenterPage, {
       store: props.store,
       sessions: props.sessions,
       workspaces: props.workspaces,
       onConversationOpen: navigation.openConversation,
+      onDraftOpen: navigation.openDraft,
     });
   } else if (view.page === "sessions") {
     center = React.createElement(SessionListPage, { store: props.store, onOpenSession: openSession });
@@ -85,6 +97,10 @@ export function WorkbenchShell(props) {
       mobile: layoutMode === "mobile",
       settingsTrigger: openNativeSettings,
     });
+
+  const currentScope = state.draft?.scope
+    ?? state.workbenchSessions?.[view.sessionId]?.scope
+    ?? { kind: "independent", id: null };
 
   return React.createElement("div", {
     className: "cpwb-app-shell cpwb-layout-" + layoutMode,
@@ -109,5 +125,16 @@ export function WorkbenchShell(props) {
           triggerRef: navigationTriggerRef,
         }, sidebar))
       : sidebar,
-    React.createElement("section", { className: "cpwb-workbench-stage" }, center));
+    React.createElement("section", { className: "cpwb-workbench-stage" }, center),
+    React.createElement(NewSessionDialog, {
+      open: newSessionOpen,
+      store: props.store,
+      initialScope: currentScope,
+      onClose: () => setNewSessionOpen(false),
+      onStart(input) {
+        props.store.actions.startDraft(input);
+        setNewSessionOpen(false);
+        navigation.openDraft();
+      },
+    }));
 }

@@ -1101,6 +1101,13 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, { deleted: true });
   }
 
+  async function handleChatSessionOpen(req, res, { params }) {
+    if (!hasSessions || typeof sessions.openSession !== "function") {
+      throw new ApiError(501, "NOT_IMPLEMENTED", "session service is not available");
+    }
+    ok(res, await sessions.openSession({ sessionId: params.sessionId }));
+  }
+
   async function handleChatSessionContextGet(req, res, { params }) {
     if (!hasSessionContext) {
       throw new ApiError(501, "NOT_IMPLEMENTED", "session context service is not available");
@@ -1142,6 +1149,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     { pattern: "/health", methods: { GET: handleHealth } },
     { pattern: "/chat/sessions", methods: { GET: handleChatSessionList, POST: handleChatSessionCreate } },
     { pattern: "/chat/sessions/:sessionId/context", methods: { GET: handleChatSessionContextGet, PUT: handleChatSessionContextPut, DELETE: handleChatSessionContextDelete } },
+    { pattern: "/chat/sessions/:sessionId/open", methods: { POST: handleChatSessionOpen } },
     { pattern: "/chat/sessions/:sessionId", methods: { PATCH: handleChatSessionPatch, DELETE: handleChatSessionDelete } },
     { pattern: "/projects", methods: { GET: handleProjectsList, POST: handleProjectCreate } },
     { pattern: "/projects/:id", methods: { PATCH: handleProjectPatch, DELETE: handleProjectDelete } },

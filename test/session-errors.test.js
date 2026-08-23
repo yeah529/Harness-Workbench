@@ -17,8 +17,8 @@ import { WorkbenchSessionError, SESSION_ERROR_CODES } from "../src/host/session-
 test("session-errors.js exports the error class and stable codes", () => {
   assert.equal(typeof WorkbenchSessionError, "function");
   assert.equal(SESSION_ERROR_CODES.RETRIEVAL_FAILED, "ERETRIEVAL_FAILED");
-  assert.equal(SESSION_ERROR_CODES.CHAT_KB_MISMATCH, "ECHAT_KB_MISMATCH");
-  assert.equal(SESSION_ERROR_CODES.CHAT_NOT_FOUND, "ECHAT_NOT_FOUND");
+  assert.equal(SESSION_ERROR_CODES.SCOPE_MISMATCH, "ESCOPE_MISMATCH");
+  assert.equal(SESSION_ERROR_CODES.CONTEXT_SOURCE_UNAVAILABLE, "ECONTEXT_SOURCE_UNAVAILABLE");
   assert.equal(SESSION_ERROR_CODES.SESSION_RESUME_FAILED, "ESESSION_RESUME_FAILED");
 
   const err = new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "gone", new Error("cause"));

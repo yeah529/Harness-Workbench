@@ -142,7 +142,7 @@ function makeFakeIndexer(repos) {
 
 /** A fake unified session service that records calls and returns canned results. */
 function makeFakeSessionService({ activateResult, activateError, retryResult, retryError } = {}) {
-  const calls = { activate: [], retry: [], rename: [], move: [], delete: [], contextGet: [], contextSet: [], contextRemove: [] };
+  const calls = { activate: [], retry: [], open: [], rename: [], move: [], delete: [], contextGet: [], contextSet: [], contextRemove: [] };
   return {
     calls,
     async activateDraft(input) {
@@ -155,6 +155,7 @@ function makeFakeSessionService({ activateResult, activateError, retryResult, re
       if (retryError) throw retryError;
       return retryResult ?? { sessionId: input.sessionId, lifecycleStatus: "active" };
     },
+    async openSession(input) { calls.open.push(input); return { sessionId: input.sessionId, reused: true }; },
     async renameSession(input) { calls.rename.push(input); return { sessionId: input.sessionId, title: input.title, titleLocked: true }; },
     async moveSession(input) { calls.move.push(input); return { sessionId: input.sessionId, scope: input.scope }; },
     async deleteSession(sessionId) { calls.delete.push(sessionId); return true; },
@@ -1348,6 +1349,14 @@ test("DELETE /chat/sessions/:id delegates native-first deletion", async (t) => {
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { deleted: true });
   assert.deepEqual(fake.calls.delete, ["session-1"]);
+});
+
+test("POST /chat/sessions/:id/open resumes one durable native session", async (t) => {
+  const fake = makeFakeSessionService();
+  const { base } = await startApi(t, { sessions: fake });
+  const res = await fetch(base + "/chat/sessions/session-1/open", { method: "POST", headers: JSON_HEADERS, body: "{}" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(fake.calls.open, [{ sessionId: "session-1" }]);
 });
 
 test("session context API reads, updates, and removes source overrides", async (t) => {
