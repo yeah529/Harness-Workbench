@@ -7,6 +7,8 @@ import { createWorkbenchStore } from "../src/client/store.js";
 import { NewSessionDialog } from "../src/client/NewSessionDialog.js";
 import { ContainerDeleteDialog } from "../src/client/ContainerDeleteDialog.js";
 import { WorkbenchSidebar, partitionSidebarSessions } from "../src/client/WorkbenchSidebar.js";
+import { SessionListPage } from "../src/client/SessionListPage.js";
+import { createNavigationStore } from "../src/client/navigation.js";
 import {
   WorkbenchSessionShell,
   PROJECT_TOOL_TABS,
@@ -141,12 +143,39 @@ test("sidebar partitions the current container before unrelated recents", () => 
     currentContainerTotal: 4,
   }));
   assert.match(html, /全部会话/);
+  assert.match(html, /归档会话/);
   assert.match(html, /当前项目/);
   assert.match(html, /Research/);
   assert.match(html, /查看全部 4 个会话/);
   assert.match(html, /其他最近会话/);
   assert.equal((html.match(/项目[一二三]/g) || []).length, 3);
   assert.doesNotMatch(html, /项目四/);
+});
+
+test("archived session page exposes records and recovery without losing open access", () => {
+  const row = {
+    sessionId: "session-cpwb-archived",
+    title: "历史架构讨论",
+    scope: { kind: "project", id: 7 },
+    contextName: "Research",
+    archivedAt: "2026-08-23T09:30:00.000Z",
+    updatedAt: "2026-08-23T09:30:00.000Z",
+  };
+  const state = { sessionPage: { items: [row], total: 1, limit: 20, offset: 0 }, action: null };
+  const store = {
+    subscribe: () => () => {},
+    getSnapshot: () => state,
+    actions: { loadAllSessions: async () => {}, restoreSession: async () => {} },
+  };
+  const html = renderToStaticMarkup(React.createElement(SessionListPage, { archived: true, store }));
+  assert.match(html, /归档会话/);
+  assert.match(html, /历史架构讨论/);
+  assert.match(html, /恢复会话/);
+  assert.match(html, /归档于/);
+
+  const navigation = createNavigationStore();
+  navigation.openArchive();
+  assert.deepEqual(navigation.getSnapshot(), { page: "archive", sessionId: null });
 });
 
 test("right rail follows the project, knowledge-base, and independent tool matrix", () => {

@@ -438,6 +438,8 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
   const hasSessionContext = typeof sessions?.getContext === "function"
     && typeof sessions?.setContext === "function"
     && typeof sessions?.removeContext === "function";
+  const hasSessionArchive = typeof sessions?.archiveSession === "function"
+    && typeof sessions?.restoreSession === "function";
   const permanentSessionDeletion = services.permanentSessionDeletion === true;
   const logError = typeof logger?.error === "function" ? logger.error.bind(logger) : () => {};
   const configuredTimeZone = () => settings?.get?.("timezone") ?? DEFAULT_TIME_ZONE;
@@ -1112,6 +1114,11 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     const limit = Math.min(queryPositiveInt(url.searchParams.get("limit"), "limit") ?? 8, 100);
     const offset = queryNonNegativeInt(url.searchParams.get("offset"), "offset", 0);
     const query = url.searchParams.get("query") ?? "";
+    const archivedRaw = url.searchParams.get("archived");
+    if (archivedRaw != null && archivedRaw !== "true" && archivedRaw !== "false") {
+      throw new ApiError(422, "INVALID_FIELD", "archived must be true or false");
+    }
+    const archived = archivedRaw === "true";
     const scopeKind = url.searchParams.get("scopeKind");
     if (scopeKind != null && !["project", "knowledge_base", "independent"].includes(scopeKind)) {
       throw new ApiError(422, "INVALID_SCOPE", "scopeKind must be project, knowledge_base, or independent");
@@ -1121,8 +1128,8 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       const scopeId = queryPositiveInt(scopeIdRaw, "scopeId");
       if (scopeId === undefined) throw new ApiError(422, "INVALID_SCOPE", "scopeId is required for this scopeKind");
       ok(res, {
-        items: repos.workbenchSessions.list({ scopeKind, scopeId, lifecycleStatus: "active", limit, offset }),
-        total: repos.workbenchSessions.list({ scopeKind, scopeId, lifecycleStatus: "active", limit: 500, offset: 0 }).length,
+        items: repos.workbenchSessions.list({ scopeKind, scopeId, lifecycleStatus: "active", archived, limit, offset }),
+        total: repos.workbenchSessions.list({ scopeKind, scopeId, lifecycleStatus: "active", archived, limit: 500, offset: 0 }).length,
         limit,
         offset,
       });
@@ -1132,8 +1139,8 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       throw new ApiError(422, "INVALID_SCOPE", "independent scope cannot have a scopeId");
     }
     ok(res, {
-      items: repos.workbenchSessions.listAll({ scopeKind, query, lifecycleStatus: "active", limit, offset }),
-      total: repos.workbenchSessions.countAll({ scopeKind, query, lifecycleStatus: "active" }),
+      items: repos.workbenchSessions.listAll({ scopeKind, query, lifecycleStatus: "active", archived, limit, offset }),
+      total: repos.workbenchSessions.countAll({ scopeKind, query, lifecycleStatus: "active", archived }),
       limit,
       offset,
     });
@@ -1153,6 +1160,13 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       ok(res, await sessions.moveSession({ sessionId, scope: normalizeSessionScope(body.scope) }));
       return;
     }
+    if (body.operation === "archive" || body.operation === "restore") {
+      if (!hasSessionArchive) throw new ApiError(501, "NOT_IMPLEMENTED", "session archive service is not available");
+      ok(res, body.operation === "archive"
+        ? await sessions.archiveSession(sessionId)
+        : await sessions.restoreSession(sessionId));
+      return;
+    }
     if (body.operation === "retryDraft") {
       ok(res, await sessions.retryDraft({
         sessionId,
@@ -1161,7 +1175,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       }));
       return;
     }
-    throw new ApiError(422, "INVALID_OPERATION", "operation must be rename, move, or retryDraft");
+    throw new ApiError(422, "INVALID_OPERATION", "operation must be rename, move, archive, restore, or retryDraft");
   }
 
   async function handleChatSessionDelete(req, res, { params }) {

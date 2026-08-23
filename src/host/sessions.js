@@ -956,6 +956,22 @@ export function createSessionService({
     return moved;
   }
 
+  async function archiveSession(sessionId) {
+    if (!repos.workbenchSessions.get(sessionId)) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "workbench session not found: " + sessionId);
+    }
+    await release(sessionId);
+    return repos.workbenchSessions.archive(sessionId);
+  }
+
+  async function restoreSession(sessionId) {
+    const restored = repos.workbenchSessions.restore(sessionId);
+    if (!restored) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "workbench session not found: " + sessionId);
+    }
+    return restored;
+  }
+
   async function deleteSession(sessionId) {
     const saved = repos.workbenchSessions.get(sessionId);
     if (!saved) return false;
@@ -1045,6 +1061,8 @@ export function createSessionService({
     submitPrompt,
     renameSession,
     moveSession,
+    archiveSession,
+    restoreSession,
     deleteSession,
     getContext,
     setContext,

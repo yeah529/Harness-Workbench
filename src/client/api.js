@@ -235,10 +235,10 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
 
     chat: {
       sessions: {
-        list({ scopeKind, scopeId, limit, offset, query } = {}, { signal } = {}) {
+        list({ scopeKind, scopeId, archived, limit, offset, query } = {}, { signal } = {}) {
           return request({
             path: "/chat/sessions",
-            query: { scopeKind, scopeId, limit, offset, query },
+            query: { scopeKind, scopeId, archived, limit, offset, query },
             signal,
           });
         },
@@ -256,6 +256,12 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
         },
         move({ sessionId, scope }, { signal } = {}) {
           return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "move", scope }, signal });
+        },
+        archive(sessionId, { signal } = {}) {
+          return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "archive" }, signal });
+        },
+        restore(sessionId, { signal } = {}) {
+          return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "restore" }, signal });
         },
         remove(sessionId, { signal } = {}) {
           return request({ method: "DELETE", path: "/chat/sessions/" + encodeURIComponent(sessionId), signal });

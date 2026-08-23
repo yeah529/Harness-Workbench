@@ -117,7 +117,7 @@ export function createWorkbenchStore(api) {
     draft: null,
     recentSessions: [],
     recentSessionTotal: 0,
-    sessionPage: { items: [], total: 0, limit: 20, offset: 0, query: "", context: null },
+    sessionPage: { items: [], total: 0, limit: 20, offset: 0, query: "", context: null, archived: false },
     workbenchSessions: {},
     citationsBySession: {},
     contextBySession: {},
@@ -441,8 +441,8 @@ export function createWorkbenchStore(api) {
       return loadRecent.run(limit);
     },
 
-    loadAllSessions: async function loadAllSessions({ query = "", scopeKind = null, scopeId = null, offset = 0, limit = 20 } = {}) {
-      return loadSessionPage.run({ query, scopeKind, scopeId, offset, limit });
+    loadAllSessions: async function loadAllSessions({ query = "", scopeKind = null, scopeId = null, archived = false, offset = 0, limit = 20 } = {}) {
+      return loadSessionPage.run({ query, scopeKind, scopeId, archived, offset, limit });
     },
 
     loadScopeSessions: async function loadScopeSessions(scope) {
@@ -581,6 +581,31 @@ export function createWorkbenchStore(api) {
       const result = await runAction("moveSession", () => api.chat.sessions.move({ sessionId, scope: normalizeSessionScope(scope) }));
       const entry = normalizeSessionRow(result);
       registerWorkbenchSession({ sessionId, scope: entry.scope });
+      setState({ workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry } });
+      await loadRecent.run(8);
+      return entry;
+    },
+
+    archiveSession: async function archiveSession(sessionId) {
+      const result = await runAction("archiveSession", () => api.chat.sessions.archive(sessionId));
+      const entry = normalizeSessionRow(result);
+      const scopeItems = state.scopeSessionPage.items;
+      setState({
+        recentSessions: state.recentSessions.filter((row) => row.sessionId !== sessionId),
+        scopeSessionPage: {
+          ...state.scopeSessionPage,
+          items: scopeItems.filter((row) => row.sessionId !== sessionId),
+          total: Math.max(0, state.scopeSessionPage.total - (scopeItems.some((row) => row.sessionId === sessionId) ? 1 : 0)),
+        },
+        workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry },
+      });
+      await loadRecent.run(8);
+      return entry;
+    },
+
+    restoreSession: async function restoreSession(sessionId) {
+      const result = await runAction("restoreSession", () => api.chat.sessions.restore(sessionId));
+      const entry = normalizeSessionRow(result);
       setState({ workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry } });
       await loadRecent.run(8);
       return entry;

@@ -18,7 +18,7 @@ import { DB_FILENAME, SCHEMA_VERSION, resolveDataRoot } from "./config.js";
  * without artificially inserting spaces. Tokens shorter than three Unicode
  * code points match nothing in trigram and fall back to the vector route.
  * Foreign keys are enabled per connection, WAL is enabled for the database
- * file, and schema version 4 is recorded in PRAGMA user_version.
+ * file, and the current schema version is recorded in PRAGMA user_version.
  */
 
 /**
@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS workbench_sessions (
   title TEXT,
   title_locked INTEGER NOT NULL DEFAULT 0 CHECK (title_locked IN (0, 1)),
   lifecycle_status TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle_status IN ('draft_failed', 'active')),
+  archived_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   CHECK (
@@ -201,6 +202,8 @@ CREATE TABLE IF NOT EXISTS workbench_sessions (
 
 CREATE INDEX IF NOT EXISTS workbench_sessions_scope_activity
   ON workbench_sessions(scope_kind, scope_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS workbench_sessions_archive_activity
+  ON workbench_sessions(archived_at, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS session_context_sources (
   session_id TEXT NOT NULL REFERENCES workbench_sessions(session_id) ON DELETE CASCADE,
@@ -391,6 +394,12 @@ CREATE INDEX message_context_refs_source
   ON message_context_refs(source_kind, source_id);
 `;
 
+const V7_TO_V8_MIGRATION_SQL = `
+ALTER TABLE workbench_sessions ADD COLUMN archived_at TEXT;
+CREATE INDEX workbench_sessions_archive_activity
+  ON workbench_sessions(archived_at, updated_at DESC);
+`;
+
 /**
  * Apply one schema migration atomically.
  *
@@ -436,26 +445,34 @@ function migrate(db) {
       db.exec(V4_TO_V5_MIGRATION_SQL);
       db.exec(V5_TO_V6_MIGRATION_SQL);
       db.exec(V6_TO_V7_MIGRATION_SQL);
+      db.exec(V7_TO_V8_MIGRATION_SQL);
     } else if (current === 2) {
       db.exec(V2_TO_V3_MIGRATION_SQL);
       db.exec(V3_TO_V4_MIGRATION_SQL);
       db.exec(V4_TO_V5_MIGRATION_SQL);
       db.exec(V5_TO_V6_MIGRATION_SQL);
       db.exec(V6_TO_V7_MIGRATION_SQL);
+      db.exec(V7_TO_V8_MIGRATION_SQL);
     } else if (current === 3) {
       db.exec(V3_TO_V4_MIGRATION_SQL);
       db.exec(V4_TO_V5_MIGRATION_SQL);
       db.exec(V5_TO_V6_MIGRATION_SQL);
       db.exec(V6_TO_V7_MIGRATION_SQL);
+      db.exec(V7_TO_V8_MIGRATION_SQL);
     } else if (current === 4) {
       db.exec(V4_TO_V5_MIGRATION_SQL);
       db.exec(V5_TO_V6_MIGRATION_SQL);
       db.exec(V6_TO_V7_MIGRATION_SQL);
+      db.exec(V7_TO_V8_MIGRATION_SQL);
     } else if (current === 5) {
       db.exec(V5_TO_V6_MIGRATION_SQL);
       db.exec(V6_TO_V7_MIGRATION_SQL);
+      db.exec(V7_TO_V8_MIGRATION_SQL);
     } else if (current === 6) {
       db.exec(V6_TO_V7_MIGRATION_SQL);
+      db.exec(V7_TO_V8_MIGRATION_SQL);
+    } else if (current === 7) {
+      db.exec(V7_TO_V8_MIGRATION_SQL);
     } else {
       db.exec(SCHEMA_SQL);
     }

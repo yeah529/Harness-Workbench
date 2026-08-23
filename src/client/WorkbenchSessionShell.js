@@ -1,5 +1,5 @@
 import React from "react";
-import { Books, CalendarCheck, ClockCountdown, File, FolderOpen, MagnifyingGlass, Note, Paperclip, Robot, TreeStructure } from "@phosphor-icons/react";
+import { Archive, ArrowCounterClockwise, Books, CalendarCheck, ClockCountdown, File, FolderOpen, MagnifyingGlass, Note, Paperclip, Robot, TreeStructure } from "@phosphor-icons/react";
 import { getWorkbenchSession } from "./workbenchSessions.js";
 import { useHomeOpen } from "./ProjectHome.js";
 import { Todos } from "./Todos.js";
@@ -361,6 +361,15 @@ export function WorkbenchSessionShell(props) {
       React.createElement("strong", null, contextName)),
     React.createElement("div", { className: "cpwb-session-context-meta" },
       React.createElement("small", null, contextDetail),
+      React.createElement("button", {
+        type: "button",
+        className: "cpwb-session-archive-trigger",
+        onClick: () => (entry?.archivedAt ? props.onRestore?.() : props.onArchive?.())?.catch?.(function () {}),
+        "aria-label": entry?.archivedAt ? "恢复当前会话" : "归档当前会话",
+        title: entry?.archivedAt ? "恢复当前会话" : "归档当前会话",
+      }, entry?.archivedAt
+        ? React.createElement(ArrowCounterClockwise, { size: 16, weight: "regular", "aria-hidden": true })
+        : React.createElement(Archive, { size: 16, weight: "regular", "aria-hidden": true })),
       React.createElement("button", {
         type: "button",
         className: "cpwb-session-subagent-trigger",

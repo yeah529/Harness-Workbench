@@ -381,6 +381,27 @@ test("unified session rename, move, and delete keep native state authoritative",
   }
 });
 
+test("archiving releases the live handle while preserving and restoring the durable session", async () => {
+  const s = await makeService({ sessionWorkspace: async () => ({ id: "ws-independent", path: "/tmp/independent" }) });
+  try {
+    s.workspaces.set("ws-independent", { id: "ws-independent", path: "/tmp/independent", attachSession: async () => {} });
+    const active = await s.service.activateDraft({ scope: { kind: "independent" }, question: "稍后继续" });
+    assert.equal(s.service.has(active.sessionId), true);
+
+    const archived = await s.service.archiveSession(active.sessionId);
+    assert.ok(archived.archivedAt);
+    assert.equal(s.service.has(active.sessionId), false);
+    assert.ok(s.repos.workbenchSessions.get(active.sessionId), "archive keeps the Workbench projection");
+    assert.equal(s.live.get(active.sessionId).disposed(), 1, "archive releases the owned live handle");
+
+    const restored = await s.service.restoreSession(active.sessionId);
+    assert.equal(restored.archivedAt, null);
+    assert.ok(s.repos.workbenchSessions.get(active.sessionId), "restore keeps the same durable session id");
+  } finally {
+    await s.cleanup();
+  }
+});
+
 const SAMPLE = (over = {}) => ({ sourceId: "1", originalName: "note.md", locator: "lines:1-1", text: "hello", ...over });
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));

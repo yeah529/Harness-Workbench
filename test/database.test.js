@@ -1098,3 +1098,64 @@ test("v6 databases preserve valid sessions while removing the knowledge chat ide
   assert.equal(migrated.lifecycleStatus, "active");
   assert.equal(repos.projectKnowledgeBases.listByProject(1)[0].id, 2);
 });
+
+test("session archive is reversible and excluded from active session queries", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+
+  const project = repos.projects.create({ name: "Archive Lab" });
+  repos.workbenchSessions.create({
+    sessionId: "session-cpwb-archive",
+    scope: { kind: "project", id: project.id },
+    title: "待归档会话",
+  });
+
+  const archived = repos.workbenchSessions.archive("session-cpwb-archive", new Date("2026-08-23T09:30:00.000Z"));
+  assert.equal(archived.archivedAt, "2026-08-23T09:30:00.000Z");
+  assert.deepEqual(repos.workbenchSessions.listAll({ archived: false }).map((row) => row.sessionId), []);
+  assert.deepEqual(repos.workbenchSessions.listAll({ archived: true }).map((row) => row.sessionId), ["session-cpwb-archive"]);
+  assert.deepEqual(repos.workbenchSessions.list({ scopeKind: "project", scopeId: project.id, archived: false }), []);
+  assert.equal(repos.workbenchSessions.latest({ scopeKind: "project", scopeId: project.id }), null);
+
+  const restored = repos.workbenchSessions.restore("session-cpwb-archive", new Date("2026-08-23T10:00:00.000Z"));
+  assert.equal(restored.archivedAt, null);
+  assert.deepEqual(repos.workbenchSessions.listAll({ archived: false }).map((row) => row.sessionId), ["session-cpwb-archive"]);
+  assert.equal(repos.workbenchSessions.countAll({ archived: true }), 0);
+});
+
+test("v7 databases gain archive metadata without losing sessions", async (t) => {
+  const dataDir = await createTempDir();
+  const legacy = new DatabaseSync(join(dataDir, "workbench.sqlite"));
+  legacy.exec(`
+    CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE knowledge_bases (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE workbench_sessions (
+      session_id TEXT PRIMARY KEY,
+      scope_kind TEXT NOT NULL,
+      scope_id INTEGER,
+      provider TEXT,
+      model TEXT,
+      reasoning_effort TEXT,
+      title TEXT,
+      title_locked INTEGER NOT NULL DEFAULT 0,
+      lifecycle_status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO workbench_sessions VALUES (
+      'session-cpwb-v7', 'independent', NULL, NULL, NULL, NULL, '旧会话', 0, 'active',
+      '2026-08-20T00:00:00.000Z', '2026-08-20T01:00:00.000Z'
+    );
+    PRAGMA user_version = 7;
+  `);
+  legacy.close();
+
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
+  assert.equal(repos.workbenchSessions.get("session-cpwb-v7").archivedAt, null);
+  assert.equal(db.prepare("PRAGMA table_info(workbench_sessions)").all().some((column) => column.name === "archived_at"), true);
+});

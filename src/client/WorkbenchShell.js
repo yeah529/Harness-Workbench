@@ -25,6 +25,7 @@ export function WorkbenchShell(props) {
     if (page === "home") navigation.openHome();
     else if (page === "knowledge") navigation.openKnowledge();
     else if (page === "sessions") navigation.openSessions();
+    else if (page === "archive") navigation.openArchive();
     if (layoutMode === "mobile") setDrawerOwner(null);
   };
   const openDrawer = function (owner) { setDrawerOwner((current) => nextDrawerOwner(current, owner)); };
@@ -78,6 +79,13 @@ export function WorkbenchShell(props) {
       projectDrawerOpen: drawerOwner === "project",
       onProjectDrawerOpen: () => openDrawer("project"),
       onProjectDrawerClose: closeDrawer,
+      onArchive: async () => {
+        await props.store.actions.archiveSession(view.sessionId);
+        navigation.openArchive();
+      },
+      onRestore: async () => {
+        await props.store.actions.restoreSession(view.sessionId);
+      },
     });
   } else if (view.page === "draft") {
     center = React.createElement(DraftConversation, {
@@ -98,6 +106,8 @@ export function WorkbenchShell(props) {
     });
   } else if (view.page === "sessions") {
     center = React.createElement(SessionListPage, { store: props.store, onOpenSession: openSession });
+  } else if (view.page === "archive") {
+    center = React.createElement(SessionListPage, { archived: true, store: props.store, onOpenSession: openSession });
   } else {
     center = React.createElement(ProjectHome, { ...props, open: true });
   }

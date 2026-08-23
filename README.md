@@ -23,6 +23,7 @@ Harness Workbench adds a Cyberpunk-inspired project layer around the native DSH 
 - Knowledge-base tools: documents, vector index status, linked projects, and global schedules.
 - Standalone tools: context sources, Files API guidance, subagent activity, and global schedules.
 - Recent sessions are grouped by the current container before unrelated history.
+- Sessions support reversible archiving: archived records leave recents, remain searchable and openable in Archive, and can be restored without deleting native DSH history.
 - Local RAG with Ollama or an OpenAI-compatible embedding endpoint.
 - Project automation uses one configurable IANA timezone, defaulting to `Asia/Shanghai`.
 - Responsive layouts and an approved Harness Workbench SVG identity.

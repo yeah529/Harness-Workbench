@@ -142,7 +142,7 @@ function makeFakeIndexer(repos) {
 
 /** A fake unified session service that records calls and returns canned results. */
 function makeFakeSessionService({ activateResult, activateError, retryResult, retryError } = {}) {
-  const calls = { activate: [], retry: [], open: [], rename: [], move: [], delete: [], contextGet: [], contextSet: [], contextRemove: [] };
+  const calls = { activate: [], retry: [], open: [], rename: [], move: [], archive: [], restore: [], delete: [], contextGet: [], contextSet: [], contextRemove: [] };
   return {
     calls,
     async activateDraft(input) {
@@ -158,6 +158,8 @@ function makeFakeSessionService({ activateResult, activateError, retryResult, re
     async openSession(input) { calls.open.push(input); return { sessionId: input.sessionId, reused: true }; },
     async renameSession(input) { calls.rename.push(input); return { sessionId: input.sessionId, title: input.title, titleLocked: true }; },
     async moveSession(input) { calls.move.push(input); return { sessionId: input.sessionId, scope: input.scope }; },
+    async archiveSession(sessionId) { calls.archive.push(sessionId); return { sessionId, archivedAt: "2026-08-23T09:30:00.000Z" }; },
+    async restoreSession(sessionId) { calls.restore.push(sessionId); return { sessionId, archivedAt: null }; },
     async deleteSession(sessionId) { calls.delete.push(sessionId); return true; },
     getContext(sessionId) { calls.contextGet.push(sessionId); return [{ kind: "knowledge_base", id: "2", state: "inherited", available: true }]; },
     setContext(input) { calls.contextSet.push(input); return { ...input.source, state: input.mode }; },
@@ -1367,16 +1369,34 @@ test("GET /chat/sessions lists active sessions across all containers", async (t)
   });
 });
 
-test("PATCH /chat/sessions/:id dispatches rename, move, and failed-draft retry", async (t) => {
+test("GET /chat/sessions separates archived records from active recents", async (t) => {
+  const { base, repos } = await startApi(t, { sessions: makeFakeSessionService() });
+  repos.workbenchSessions.create({ sessionId: "session-active", scope: { kind: "independent" } });
+  repos.workbenchSessions.create({ sessionId: "session-archived", scope: { kind: "independent" } });
+  repos.workbenchSessions.archive("session-archived", new Date("2026-08-23T09:30:00.000Z"));
+
+  let res = await fetch(base + "/chat/sessions");
+  assert.deepEqual((await res.json()).items.map((row) => row.sessionId), ["session-active"]);
+  res = await fetch(base + "/chat/sessions?archived=true");
+  const archived = await res.json();
+  assert.deepEqual(archived.items.map((row) => row.sessionId), ["session-archived"]);
+  assert.equal(archived.items[0].archivedAt, "2026-08-23T09:30:00.000Z");
+});
+
+test("PATCH /chat/sessions/:id dispatches rename, move, archive, restore, and failed-draft retry", async (t) => {
   const fake = makeFakeSessionService();
   const { base } = await startApi(t, { sessions: fake });
   const patch = (body) => fetch(base + "/chat/sessions/session-1", { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify(body) });
 
   assert.equal((await patch({ operation: "rename", title: "新标题" })).status, 200);
   assert.equal((await patch({ operation: "move", scope: { kind: "independent" } })).status, 200);
+  assert.equal((await patch({ operation: "archive" })).status, 200);
+  assert.equal((await patch({ operation: "restore" })).status, 200);
   assert.equal((await patch({ operation: "retryDraft", question: "再次发送" })).status, 200);
   assert.deepEqual(fake.calls.rename, [{ sessionId: "session-1", title: "新标题" }]);
   assert.deepEqual(fake.calls.move, [{ sessionId: "session-1", scope: { kind: "independent", id: null } }]);
+  assert.deepEqual(fake.calls.archive, ["session-1"]);
+  assert.deepEqual(fake.calls.restore, ["session-1"]);
   assert.deepEqual(fake.calls.retry, [{ sessionId: "session-1", question: "再次发送", oneShotSources: [] }]);
 });
 

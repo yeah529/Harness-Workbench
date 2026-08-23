@@ -108,29 +108,33 @@ test("api: chat.sessions mutation and context routes use the session id", async 
     if (call === 1) assert.deepEqual(JSON.parse(init.body), { operation: "retryDraft", question: "重试", oneShotSources: [] });
     if (call === 2) assert.deepEqual(JSON.parse(init.body), { operation: "rename", title: "新标题" });
     if (call === 3) assert.deepEqual(JSON.parse(init.body), { operation: "move", scope: { kind: "independent", id: null } });
-    if (call <= 3) assert.equal(parsed.pathname, "/api/cpwb/chat/sessions/s-old");
-    if (call === 4) {
+    if (call === 4) assert.deepEqual(JSON.parse(init.body), { operation: "archive" });
+    if (call === 5) assert.deepEqual(JSON.parse(init.body), { operation: "restore" });
+    if (call <= 5) assert.equal(parsed.pathname, "/api/cpwb/chat/sessions/s-old");
+    if (call === 6) {
       assert.equal(parsed.pathname, "/api/cpwb/chat/sessions/s-old/context");
       assert.deepEqual(JSON.parse(init.body), { source: { kind: "knowledge_base", id: "2" }, mode: "pinned" });
     }
-    if (call === 5) {
+    if (call === 7) {
       assert.equal(parsed.pathname, "/api/cpwb/chat/sessions/s-old/context");
       assert.equal(parsed.searchParams.get("sourceKind"), "knowledge_base");
       assert.equal(parsed.searchParams.get("sourceId"), "2");
     }
-    if (call === 6) assert.equal(parsed.pathname, "/api/cpwb/chat/sessions/s-old");
+    if (call === 8) assert.equal(parsed.pathname, "/api/cpwb/chat/sessions/s-old");
     return jsonResponse(200, { sessionId: "s-old", scope: { kind: "independent", id: null } });
   });
   const api = createCpwbApi({ fetchImpl });
   await api.chat.sessions.retry({ sessionId: "s-old", question: "重试" });
   await api.chat.sessions.rename({ sessionId: "s-old", title: "新标题" });
   await api.chat.sessions.move({ sessionId: "s-old", scope: { kind: "independent", id: null } });
+  await api.chat.sessions.archive("s-old");
+  await api.chat.sessions.restore("s-old");
   await api.chat.sessions.context.set({ sessionId: "s-old", source: { kind: "knowledge_base", id: "2" }, mode: "pinned" });
   await api.chat.sessions.context.remove({ sessionId: "s-old", source: { kind: "knowledge_base", id: "2" } });
   await api.chat.sessions.remove("s-old");
 });
 
-test("api: chat.sessions.list supports scoped and global paged queries", async () => {
+test("api: chat.sessions.list supports scoped, archived, and global paged queries", async () => {
   const calls = [];
   const fetchImpl = makeFetch(({ url, init }) => {
     calls.push(url);
@@ -139,7 +143,7 @@ test("api: chat.sessions.list supports scoped and global paged queries", async (
     return jsonResponse(200, { items: [{ sessionId: "session-cpwb-1", scopeKind: "project", scopeId: 9 }], total: 1, limit: 8, offset: 0 });
   });
   const api = createCpwbApi({ fetchImpl });
-  const page = await api.chat.sessions.list({ scopeKind: "project", scopeId: 9, limit: 8, offset: 0, query: "研究" });
+  const page = await api.chat.sessions.list({ scopeKind: "project", scopeId: 9, archived: true, limit: 8, offset: 0, query: "研究" });
   assert.equal(page.items[0].sessionId, "session-cpwb-1");
   const global = parse(calls[0]).searchParams;
   assert.equal(global.get("limit"), "8");
@@ -147,6 +151,7 @@ test("api: chat.sessions.list supports scoped and global paged queries", async (
   assert.equal(global.get("query"), "研究");
   assert.equal(global.get("scopeKind"), "project");
   assert.equal(global.get("scopeId"), "9");
+  assert.equal(global.get("archived"), "true");
 });
 
 test("navigation store keeps Workbench pages mutually exclusive", () => {
@@ -332,6 +337,37 @@ test("store: openSession restores its canonical scope", async () => {
   const out = await store.actions.openSession("s2");
   assert.deepEqual(out.scope, { kind: "knowledge_base", id: 2 });
   assert.ok(store.getSnapshot().workbenchSessions.s2);
+});
+
+test("store: archive removes a session from recents and restore brings it back", async () => {
+  let archivedAt = null;
+  const row = () => ({
+    sessionId: "session-cpwb-soft-archive",
+    scope: { kind: "independent", id: null },
+    title: "可恢复会话",
+    archivedAt,
+  });
+  const api = {
+    health: async () => ({ ok: true }),
+    chat: { sessions: {
+      async list({ archived = false } = {}) {
+        const visible = archived ? archivedAt != null : archivedAt == null;
+        return { items: visible ? [row()] : [], total: visible ? 1 : 0, limit: 8, offset: 0 };
+      },
+      async archive() { archivedAt = "2026-08-23T09:30:00.000Z"; return row(); },
+      async restore() { archivedAt = null; return row(); },
+    } },
+  };
+  const store = createWorkbenchStore(api);
+  await store.actions.loadRecentSessions({ limit: 8 });
+  assert.deepEqual(store.getSnapshot().recentSessions.map((item) => item.sessionId), ["session-cpwb-soft-archive"]);
+
+  await store.actions.archiveSession("session-cpwb-soft-archive");
+  assert.deepEqual(store.getSnapshot().recentSessions, []);
+  assert.equal(store.getSnapshot().workbenchSessions["session-cpwb-soft-archive"].archivedAt, "2026-08-23T09:30:00.000Z");
+
+  await store.actions.restoreSession("session-cpwb-soft-archive");
+  assert.deepEqual(store.getSnapshot().recentSessions.map((item) => item.sessionId), ["session-cpwb-soft-archive"]);
 });
 
 // ---------------------------------------------------------------- rail

@@ -1,6 +1,7 @@
 import React from "react";
 import {
   Books,
+  Archive,
   ChatsCircle,
   GearSix,
   House,
@@ -74,6 +75,7 @@ export function WorkbenchSidebar({
   const nav = [
     ["home", "首页", House],
     ["sessions", "全部会话", ListBullets],
+    ["archive", "归档会话", Archive],
     ["knowledge", "知识库", Books],
   ];
   const containerKind = currentScope?.kind === "project" ? "当前项目" : currentScope?.kind === "knowledge_base" ? "当前知识库" : "当前会话";

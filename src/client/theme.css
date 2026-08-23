@@ -141,7 +141,7 @@ body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"]:has(nav button[aria
 }
 
 body:has(.cpwb-app-shell) :where(button, a, input, select, textarea):focus-visible,
-:where(.cpwb-btn, .cpwb-tab, .cpwb-toggle, .cpwb-close, .cpwb-x, .cpwb-kb-name, .cpwb-folder-add, .cpwb-section-action, .cpwb-card-new, .cpwb-kcard-new, .cpwb-sidebar-new, .cpwb-sidebar-nav-item, .cpwb-sidebar-recent, .cpwb-sidebar-all):focus-visible {
+:where(.cpwb-btn, .cpwb-tab, .cpwb-toggle, .cpwb-close, .cpwb-x, .cpwb-kb-name, .cpwb-folder-add, .cpwb-section-action, .cpwb-card-new, .cpwb-kcard-new, .cpwb-sidebar-new, .cpwb-sidebar-nav-item, .cpwb-sidebar-recent, .cpwb-sidebar-all, .cpwb-session-list-open, .cpwb-session-list-action, .cpwb-session-archive-trigger):focus-visible {
   outline: 2px solid var(--cpwb-cyan);
   outline-offset: 3px;
 }

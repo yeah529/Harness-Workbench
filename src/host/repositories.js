@@ -141,6 +141,7 @@ function mapWorkbenchSession(row) {
     title: row.title ?? null,
     titleLocked: row.title_locked !== 0,
     lifecycleStatus: row.lifecycle_status,
+    archivedAt: row.archived_at ?? null,
     selection: {
       provider: row.provider ?? null,
       model: row.model ?? null,
@@ -338,22 +339,25 @@ export function createRepositories(db) {
       return row ? mapWorkbenchSession(row) : null;
     },
 
-    list({ scopeKind, scopeId, lifecycleStatus = null, limit = 100, offset = 0 }) {
+    list({ scopeKind, scopeId, lifecycleStatus = null, archived = null, limit = 100, offset = 0 }) {
       const normalizedScope = normalizeSessionScope({ kind: scopeKind, id: scopeId });
       if (lifecycleStatus != null && !SESSION_LIFECYCLE_STATUSES.has(lifecycleStatus)) throw new TypeError("invalid session lifecycle status");
       const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
       const safeOffset = Math.max(0, Number(offset) || 0);
       const lifecycleFilter = lifecycleStatus == null ? "" : "AND ws.lifecycle_status = ? ";
+      const archiveFilter = archived === true
+        ? "AND ws.archived_at IS NOT NULL "
+        : archived === false ? "AND ws.archived_at IS NULL " : "";
       const params = [normalizedScope.kind, normalizedScope.id];
       if (lifecycleStatus != null) params.push(lifecycleStatus);
       return db.prepare(
         WORKBENCH_SESSION_SELECT +
-        "WHERE ws.scope_kind = ? AND ws.scope_id IS ? " + lifecycleFilter +
+        "WHERE ws.scope_kind = ? AND ws.scope_id IS ? " + lifecycleFilter + archiveFilter +
         "ORDER BY ws.updated_at DESC, ws.rowid DESC LIMIT ? OFFSET ?",
       ).all(...params, safeLimit, safeOffset).map(mapWorkbenchSession);
     },
 
-    listAll({ scopeKind = null, query = "", lifecycleStatus = null, limit = 100, offset = 0 } = {}) {
+    listAll({ scopeKind = null, query = "", lifecycleStatus = null, archived = null, limit = 100, offset = 0 } = {}) {
       const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
       const safeOffset = Math.max(0, Number(offset) || 0);
       const filters = [];
@@ -368,6 +372,8 @@ export function createRepositories(db) {
         filters.push("ws.lifecycle_status = ?");
         params.push(lifecycleStatus);
       }
+      if (archived === true) filters.push("ws.archived_at IS NOT NULL");
+      else if (archived === false) filters.push("ws.archived_at IS NULL");
       const normalizedQuery = String(query ?? "").trim().toLowerCase();
       if (normalizedQuery) {
         filters.push("(LOWER(ws.session_id) LIKE ? OR LOWER(COALESCE(ws.title, p.name, kb.name, '独立')) LIKE ?)");
@@ -381,7 +387,7 @@ export function createRepositories(db) {
       ).all(...params, safeLimit, safeOffset).map(mapWorkbenchSession);
     },
 
-    countAll({ scopeKind = null, query = "", lifecycleStatus = null } = {}) {
+    countAll({ scopeKind = null, query = "", lifecycleStatus = null, archived = null } = {}) {
       const filters = [];
       const params = [];
       if (scopeKind) {
@@ -394,6 +400,8 @@ export function createRepositories(db) {
         filters.push("ws.lifecycle_status = ?");
         params.push(lifecycleStatus);
       }
+      if (archived === true) filters.push("ws.archived_at IS NOT NULL");
+      else if (archived === false) filters.push("ws.archived_at IS NULL");
       const normalizedQuery = String(query ?? "").trim().toLowerCase();
       if (normalizedQuery) {
         filters.push("(LOWER(ws.session_id) LIKE ? OR LOWER(COALESCE(ws.title, p.name, kb.name, '独立')) LIKE ?)");
@@ -413,10 +421,26 @@ export function createRepositories(db) {
       return Number(db.prepare("DELETE FROM workbench_sessions WHERE session_id = ?").run(sessionId).changes) > 0;
     },
 
+    archive(sessionId, now = new Date()) {
+      const iso = nowIso(now);
+      const info = db.prepare(
+        "UPDATE workbench_sessions SET archived_at = COALESCE(archived_at, ?), updated_at = ? WHERE session_id = ?",
+      ).run(iso, iso, sessionId);
+      return Number(info.changes) === 0 ? null : this.get(sessionId);
+    },
+
+    restore(sessionId, now = new Date()) {
+      const iso = nowIso(now);
+      const info = db.prepare(
+        "UPDATE workbench_sessions SET archived_at = NULL, updated_at = ? WHERE session_id = ?",
+      ).run(iso, sessionId);
+      return Number(info.changes) === 0 ? null : this.get(sessionId);
+    },
+
     latest({ scopeKind, scopeId }) {
       const row = db.prepare(
         WORKBENCH_SESSION_SELECT +
-        "WHERE ws.scope_kind = ? AND ws.scope_id IS ? AND ws.lifecycle_status = 'active' ORDER BY ws.updated_at DESC, ws.rowid DESC LIMIT 1",
+        "WHERE ws.scope_kind = ? AND ws.scope_id IS ? AND ws.lifecycle_status = 'active' AND ws.archived_at IS NULL ORDER BY ws.updated_at DESC, ws.rowid DESC LIMIT 1",
       ).get(scopeKind, scopeId);
       return row ? mapWorkbenchSession(row) : null;
     },
