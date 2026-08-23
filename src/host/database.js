@@ -181,24 +181,16 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
   UNIQUE (schedule_id, scheduled_at)
 );
 
-CREATE TABLE IF NOT EXISTS knowledge_chats (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  knowledge_base_id INTEGER NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
-  title TEXT,
-  dsh_session_id TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS workbench_sessions (
   session_id TEXT PRIMARY KEY,
   scope_kind TEXT NOT NULL CHECK (scope_kind IN ('project', 'knowledge_base', 'independent')),
   scope_id INTEGER,
-  chat_id INTEGER,
-  provider TEXT NOT NULL,
-  model TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
   reasoning_effort TEXT,
   title TEXT,
+  title_locked INTEGER NOT NULL DEFAULT 0 CHECK (title_locked IN (0, 1)),
+  lifecycle_status TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle_status IN ('draft_failed', 'active')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   CHECK (
@@ -209,6 +201,31 @@ CREATE TABLE IF NOT EXISTS workbench_sessions (
 
 CREATE INDEX IF NOT EXISTS workbench_sessions_scope_activity
   ON workbench_sessions(scope_kind, scope_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS session_context_sources (
+  session_id TEXT NOT NULL REFERENCES workbench_sessions(session_id) ON DELETE CASCADE,
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('knowledge_base', 'workspace_file', 'uploaded_file', 'session')),
+  source_id TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('pinned', 'disabled')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (session_id, source_kind, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS session_context_sources_source
+  ON session_context_sources(source_kind, source_id);
+
+CREATE TABLE IF NOT EXISTS message_context_refs (
+  session_id TEXT NOT NULL REFERENCES workbench_sessions(session_id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL,
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('knowledge_base', 'workspace_file', 'uploaded_file', 'session')),
+  source_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, message_id, source_kind, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS message_context_refs_source
+  ON message_context_refs(source_kind, source_id);
 
 CREATE TABLE IF NOT EXISTS project_automation (
   project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
@@ -317,6 +334,63 @@ ALTER TABLE schedules ADD COLUMN starts_at TEXT;
 ALTER TABLE workbench_sessions ADD COLUMN title TEXT;
 `;
 
+const V6_TO_V7_MIGRATION_SQL = `
+DROP INDEX IF EXISTS workbench_sessions_scope_activity;
+ALTER TABLE workbench_sessions RENAME TO workbench_sessions_v6;
+CREATE TABLE workbench_sessions (
+  session_id TEXT PRIMARY KEY,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('project', 'knowledge_base', 'independent')),
+  scope_id INTEGER,
+  provider TEXT,
+  model TEXT,
+  reasoning_effort TEXT,
+  title TEXT,
+  title_locked INTEGER NOT NULL DEFAULT 0 CHECK (title_locked IN (0, 1)),
+  lifecycle_status TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle_status IN ('draft_failed', 'active')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    (scope_kind = 'independent' AND scope_id IS NULL) OR
+    (scope_kind IN ('project', 'knowledge_base') AND scope_id IS NOT NULL)
+  )
+);
+INSERT INTO workbench_sessions (
+  session_id, scope_kind, scope_id, provider, model, reasoning_effort, title,
+  title_locked, lifecycle_status, created_at, updated_at
+)
+SELECT session_id, scope_kind, scope_id, provider, model, reasoning_effort, title,
+  0, 'active', created_at, updated_at
+FROM workbench_sessions_v6
+WHERE scope_kind IN ('project', 'knowledge_base', 'independent')
+  AND ((scope_kind = 'independent' AND scope_id IS NULL)
+    OR (scope_kind IN ('project', 'knowledge_base') AND scope_id IS NOT NULL));
+DROP TABLE workbench_sessions_v6;
+CREATE INDEX workbench_sessions_scope_activity
+  ON workbench_sessions(scope_kind, scope_id, updated_at DESC);
+DROP TABLE IF EXISTS knowledge_chats;
+CREATE TABLE session_context_sources (
+  session_id TEXT NOT NULL REFERENCES workbench_sessions(session_id) ON DELETE CASCADE,
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('knowledge_base', 'workspace_file', 'uploaded_file', 'session')),
+  source_id TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('pinned', 'disabled')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (session_id, source_kind, source_id)
+);
+CREATE INDEX session_context_sources_source
+  ON session_context_sources(source_kind, source_id);
+CREATE TABLE message_context_refs (
+  session_id TEXT NOT NULL REFERENCES workbench_sessions(session_id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL,
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('knowledge_base', 'workspace_file', 'uploaded_file', 'session')),
+  source_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, message_id, source_kind, source_id)
+);
+CREATE INDEX message_context_refs_source
+  ON message_context_refs(source_kind, source_id);
+`;
+
 /**
  * Apply one schema migration atomically.
  *
@@ -361,20 +435,27 @@ function migrate(db) {
       db.exec(V3_TO_V4_MIGRATION_SQL);
       db.exec(V4_TO_V5_MIGRATION_SQL);
       db.exec(V5_TO_V6_MIGRATION_SQL);
+      db.exec(V6_TO_V7_MIGRATION_SQL);
     } else if (current === 2) {
       db.exec(V2_TO_V3_MIGRATION_SQL);
       db.exec(V3_TO_V4_MIGRATION_SQL);
       db.exec(V4_TO_V5_MIGRATION_SQL);
       db.exec(V5_TO_V6_MIGRATION_SQL);
+      db.exec(V6_TO_V7_MIGRATION_SQL);
     } else if (current === 3) {
       db.exec(V3_TO_V4_MIGRATION_SQL);
       db.exec(V4_TO_V5_MIGRATION_SQL);
       db.exec(V5_TO_V6_MIGRATION_SQL);
+      db.exec(V6_TO_V7_MIGRATION_SQL);
     } else if (current === 4) {
       db.exec(V4_TO_V5_MIGRATION_SQL);
       db.exec(V5_TO_V6_MIGRATION_SQL);
+      db.exec(V6_TO_V7_MIGRATION_SQL);
     } else if (current === 5) {
       db.exec(V5_TO_V6_MIGRATION_SQL);
+      db.exec(V6_TO_V7_MIGRATION_SQL);
+    } else if (current === 6) {
+      db.exec(V6_TO_V7_MIGRATION_SQL);
     } else {
       db.exec(SCHEMA_SQL);
     }

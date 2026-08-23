@@ -79,7 +79,7 @@ test("projects rename in place and delete only Workbench-owned project data", as
   repos.schedules.create({ projectId: project.id, name: "Daily", rule: "daily 21:00" });
   repos.summaries.upsert({ projectId: project.id, summaryDate: "2026-08-21", content: "Summary", status: "ready" });
   repos.automation.update({ projectId: project.id, summaryEnabled: false });
-  repos.workbenchSessions.upsert({ sessionId: "session-cpwb-project-delete", scopeKind: "project", scopeId: project.id, provider: "deepseek-official", model: "deepseek-v4-flash" });
+  repos.workbenchSessions.create({ sessionId: "session-cpwb-project-delete", scope: { kind: "project", id: project.id }, provider: "deepseek-official", model: "deepseek-v4-flash" });
 
   const renamed = repos.projects.update({ id: project.id, name: "After", now: "2026-08-21T02:00:00.000Z" });
   assert.equal(renamed.name, "After");
@@ -382,12 +382,14 @@ test("openDatabase records the current schema version and all core tables", asyn
   const tables = db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
   ).all().map((r) => r.name);
-  for (const expected of ["chunks", "documents", "knowledge_bases", "knowledge_chats", "project_automation", "projects", "schedules", "schedule_runs", "summaries", "todos", "workbench_sessions", "workbench_settings"]) {
+  for (const expected of ["chunks", "documents", "knowledge_bases", "message_context_refs", "project_automation", "projects", "schedules", "schedule_runs", "session_context_sources", "summaries", "todos", "workbench_sessions", "workbench_settings"]) {
     assert.ok(tables.includes(expected), "missing table: " + expected);
   }
+  assert.equal(tables.includes("knowledge_chats"), false);
+  assert.equal(db.prepare("PRAGMA table_info(workbench_sessions)").all().some((column) => column.name === "chat_id"), false);
 });
 
-test("workbench sessions persist scope and activity without becoming a model store", async (t) => {
+test("workbench sessions persist one scope, lifecycle, title lock, and activity", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
@@ -397,39 +399,48 @@ test("workbench sessions persist scope and activity without becoming a model sto
   });
 
   const project = repos.projects.create({ name: "Workbench" });
-  const created = repos.workbenchSessions.upsert({
+  const created = repos.workbenchSessions.create({
     sessionId: "session-cpwb-project",
-    scopeKind: "project",
-    scopeId: project.id,
+    scope: { kind: "project", id: project.id },
     provider: "deepseek-official",
     model: "deepseek-v4-flash",
+    lifecycleStatus: "draft_failed",
     now: new Date("2026-08-20T08:00:00.000Z"),
   });
-  assert.equal(created.scopeKind, "project");
+  assert.deepEqual(created.scope, { kind: "project", id: project.id });
+  assert.equal(created.lifecycleStatus, "draft_failed");
+  assert.equal(created.titleLocked, false);
+  assert.equal(repos.workbenchSessions.latest({ scopeKind: "project", scopeId: project.id }), null, "failed drafts stay out of normal recent sessions");
+
+  const active = repos.workbenchSessions.updateLifecycle({ sessionId: created.sessionId, lifecycleStatus: "active" });
+  assert.equal(active.lifecycleStatus, "active");
   assert.equal(repos.workbenchSessions.latest({ scopeKind: "project", scopeId: project.id }).sessionId, created.sessionId);
+
+  const renamed = repos.workbenchSessions.rename({ sessionId: created.sessionId, title: "接口验收" });
+  assert.equal(renamed.title, "接口验收");
+  assert.equal(renamed.titleLocked, true);
+  assert.equal(repos.workbenchSessions.setTitleIfEmpty(created.sessionId, "不得覆盖").title, "接口验收");
 
   const touched = repos.workbenchSessions.touch(created.sessionId, new Date("2026-08-20T09:00:00.000Z"));
   assert.equal(touched.selection.provider, "deepseek-official");
   assert.equal(touched.selection.model, "deepseek-v4-flash");
 
   const kb = repos.knowledgeBases.create({ name: "Manual" });
-  repos.workbenchSessions.upsert({
+  repos.workbenchSessions.create({
     sessionId: "session-cpwb-kb",
-    scopeKind: "knowledge_base",
-    scopeId: kb.id,
+    scope: { kind: "knowledge_base", id: kb.id },
     provider: "deepseek-official",
     model: "deepseek-v4-flash",
     now: new Date("2026-08-20T10:00:00.000Z"),
   });
-  const independent = repos.workbenchSessions.upsert({
+  const independent = repos.workbenchSessions.create({
     sessionId: "session-cpwb-independent",
-    scopeKind: "independent",
-    scopeId: null,
+    scope: { kind: "independent" },
     provider: "deepseek-official",
     model: "deepseek-v4-flash",
     now: new Date("2026-08-20T11:00:00.000Z"),
   });
-  assert.equal(independent.scopeId, null);
+  assert.deepEqual(independent.scope, { kind: "independent", id: null });
   assert.equal(repos.workbenchSessions.setTitleIfEmpty(independent.sessionId, "检查登录流程").title, "检查登录流程");
   assert.equal(repos.workbenchSessions.setTitleIfEmpty(independent.sessionId, "不应覆盖").title, "检查登录流程");
   assert.equal(repos.workbenchSessions.listAll({ query: "登录" })[0].sessionId, independent.sessionId);
@@ -440,6 +451,13 @@ test("workbench sessions persist scope and activity without becoming a model sto
       ["session-cpwb-kb", "Manual"],
       ["session-cpwb-project", "Workbench"],
     ],
+  );
+
+  const moved = repos.workbenchSessions.updateScope({ sessionId: independent.sessionId, scope: { kind: "project", id: project.id } });
+  assert.deepEqual(moved.scope, { kind: "project", id: project.id });
+  assert.throws(
+    () => repos.workbenchSessions.create({ sessionId: "bad-independent", scope: { kind: "independent", id: project.id } }),
+    /scope/i,
   );
 });
 
@@ -729,32 +747,7 @@ test("chunks_fts uses the trigram tokenizer: unspaced CJK MATCH, bm25, and exter
   );
 });
 
-test("knowledge chats create and list by knowledge base", async (t) => {
-  const dataDir = await createTempDir();
-  const db = openDatabase({ dataDir });
-  const repos = createRepositories(db);
-  t.after(async () => {
-    closeDatabase(db);
-    await removeTempDir(dataDir);
-  });
-
-  const kb = repos.knowledgeBases.create({ name: "Manual" });
-  const chat = repos.knowledgeChats.create({
-    knowledgeBaseId: kb.id,
-    title: "How do I X?",
-    dshSessionId: "sess-1",
-  });
-
-  assert.equal(chat.knowledgeBaseId, kb.id);
-  assert.equal(chat.dshSessionId, "sess-1");
-  assert.equal(chat.title, "How do I X?");
-
-  const listed = repos.knowledgeChats.listByKnowledgeBase(kb.id);
-  assert.equal(listed.length, 1);
-  assert.equal(listed[0].id, chat.id);
-});
-
-test("knowledge chat activity lists DSH sessions visible through a project", async (t) => {
+test("session context overrides replace mode for one source and reject self references", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
@@ -764,13 +757,70 @@ test("knowledge chat activity lists DSH sessions visible through a project", asy
   });
 
   const project = repos.projects.create({ name: "Project" });
-  const linkedKb = repos.knowledgeBases.create({ name: "Linked" });
-  const otherKb = repos.knowledgeBases.create({ name: "Other" });
-  repos.projectKnowledgeBases.link({ projectId: project.id, knowledgeBaseId: linkedKb.id });
-  repos.knowledgeChats.create({ knowledgeBaseId: linkedKb.id, dshSessionId: "session-linked" });
-  repos.knowledgeChats.create({ knowledgeBaseId: otherKb.id, dshSessionId: "session-hidden" });
+  const kb = repos.knowledgeBases.create({ name: "Manual" });
+  const session = repos.workbenchSessions.create({
+    sessionId: "session-cpwb-context",
+    scope: { kind: "project", id: project.id },
+    provider: "deepseek-official",
+    model: "deepseek-v4-flash",
+  });
 
-  assert.deepEqual(repos.knowledgeChats.listActivityByProject(project.id).map((activity) => activity.dshSessionId), ["session-linked"]);
+  repos.sessionContextSources.set({
+    sessionId: session.sessionId,
+    sourceKind: "knowledge_base",
+    sourceId: String(kb.id),
+    mode: "pinned",
+  });
+  repos.sessionContextSources.set({
+    sessionId: session.sessionId,
+    sourceKind: "knowledge_base",
+    sourceId: String(kb.id),
+    mode: "disabled",
+  });
+  assert.deepEqual(repos.sessionContextSources.list(session.sessionId).map((row) => row.mode), ["disabled"]);
+  assert.equal(repos.sessionContextSources.remove({ sessionId: session.sessionId, sourceKind: "knowledge_base", sourceId: String(kb.id) }), true);
+  assert.deepEqual(repos.sessionContextSources.list(session.sessionId), []);
+  assert.throws(() => repos.sessionContextSources.set({
+    sessionId: session.sessionId,
+    sourceKind: "session",
+    sourceId: session.sessionId,
+    mode: "pinned",
+  }), /itself|self/i);
+  assert.throws(() => repos.sessionContextSources.set({
+    sessionId: session.sessionId,
+    sourceKind: "unknown",
+    sourceId: "1",
+    mode: "pinned",
+  }), /source/i);
+});
+
+test("message context references are idempotent and cascade with their session", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+
+  const session = repos.workbenchSessions.create({
+    sessionId: "session-cpwb-message-context",
+    scope: { kind: "independent" },
+    provider: "deepseek-official",
+    model: "deepseek-v4-flash",
+  });
+  repos.messageContextRefs.addMany({
+    sessionId: session.sessionId,
+    messageId: "message-1",
+    sources: [
+      { kind: "knowledge_base", id: "7" },
+      { kind: "knowledge_base", id: "7" },
+      { kind: "workspace_file", id: "src/host/api.js" },
+    ],
+  });
+  assert.deepEqual(repos.messageContextRefs.list({ sessionId: session.sessionId, messageId: "message-1" }).map((row) => [row.sourceKind, row.sourceId]), [
+    ["knowledge_base", "7"],
+    ["workspace_file", "src/host/api.js"],
+  ]);
+  repos.workbenchSessions.remove(session.sessionId);
+  assert.deepEqual(repos.messageContextRefs.list({ sessionId: session.sessionId, messageId: "message-1" }), []);
 });
 
 test("todos update title, dueAt, done, and completed_at", async (t) => {
@@ -994,21 +1044,46 @@ test("todos schema constrains source and done values", async (t) => {
   assert.throws(() => insert.run(projectId, "bad done", 2, "manual", "2026-08-20T10:00:00.000Z", "2026-08-20T00:00:00.000Z"), /CHECK constraint/i);
 });
 
-test("knowledge chat binds a DSH session id after creation", async (t) => {
+test("v6 databases preserve valid sessions while removing the knowledge chat identity", async (t) => {
   const dataDir = await createTempDir();
+  const file = join(dataDir, "workbench.sqlite");
+  const legacy = new DatabaseSync(file);
+  legacy.exec(`
+    CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE knowledge_bases (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE project_knowledge_bases (project_id INTEGER NOT NULL, knowledge_base_id INTEGER NOT NULL, PRIMARY KEY(project_id, knowledge_base_id));
+    CREATE TABLE knowledge_chats (id INTEGER PRIMARY KEY, knowledge_base_id INTEGER NOT NULL, title TEXT, dsh_session_id TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE workbench_sessions (
+      session_id TEXT PRIMARY KEY,
+      scope_kind TEXT NOT NULL,
+      scope_id INTEGER,
+      chat_id INTEGER,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      reasoning_effort TEXT,
+      title TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO projects VALUES (1, 'P', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    INSERT INTO knowledge_bases VALUES (2, 'K', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    INSERT INTO project_knowledge_bases VALUES (1, 2);
+    INSERT INTO knowledge_chats VALUES (3, 2, 'old', 'session-cpwb-kb', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    INSERT INTO workbench_sessions VALUES ('session-cpwb-kb', 'knowledge_base', 2, 3, 'deepseek-official', 'deepseek-v4-flash', 'high', '保留标题', '2026-08-20T00:00:00.000Z', '2026-08-20T01:00:00.000Z');
+    PRAGMA user_version = 6;
+  `);
+  legacy.close();
+
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
-  t.after(async () => {
-    closeDatabase(db);
-    await removeTempDir(dataDir);
-  });
-
-  const kb = repos.knowledgeBases.create({ name: "K" });
-  const chat = repos.knowledgeChats.create({ knowledgeBaseId: kb.id, title: "chat" });
-  assert.equal(chat.dshSessionId, null, "created without a session id");
-
-  const bound = repos.knowledgeChats.bindSession({ id: chat.id, dshSessionId: "session-abc" });
-  assert.equal(bound.dshSessionId, "session-abc");
-  assert.equal(repos.knowledgeChats.get(chat.id).dshSessionId, "session-abc");
-  assert.equal(repos.knowledgeChats.bindSession({ id: 999999, dshSessionId: "x" }), null, "unknown chat binds to null");
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
+  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_chats'").get(), undefined);
+  assert.equal(db.prepare("PRAGMA table_info(workbench_sessions)").all().some((column) => column.name === "chat_id"), false);
+  const migrated = repos.workbenchSessions.get("session-cpwb-kb");
+  assert.deepEqual(migrated.scope, { kind: "knowledge_base", id: 2 });
+  assert.equal(migrated.title, "保留标题");
+  assert.equal(migrated.titleLocked, false);
+  assert.equal(migrated.lifecycleStatus, "active");
+  assert.equal(repos.projectKnowledgeBases.listByProject(1)[0].id, 2);
 });
