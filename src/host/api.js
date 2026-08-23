@@ -1012,6 +1012,12 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, { removed });
   }
 
+  async function handleKnowledgeBaseProjects(req, res, { params }) {
+    const knowledgeBaseId = parseId(params.id);
+    if (!repos.knowledgeBases.get(knowledgeBaseId)) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + knowledgeBaseId);
+    ok(res, repos.projectKnowledgeBases.listByKnowledgeBase(knowledgeBaseId));
+  }
+
   async function handleHealth(req, res) {
     const report = await ollama.health();
     ok(res, { ok: true, ...report });
@@ -1173,6 +1179,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     { pattern: "/projects/:projectId/automation", methods: { GET: handleAutomationGet, PATCH: handleAutomationPatch } },
     { pattern: "/projects/:projectId/knowledge-bases", methods: { GET: handleProjectKbs } },
     { pattern: "/projects/:projectId/knowledge-bases/:knowledgeBaseId", methods: { POST: handleProjectKbLink, DELETE: handleProjectKbUnlink } },
+    { pattern: "/knowledge-bases/:id/projects", methods: { GET: handleKnowledgeBaseProjects } },
     { pattern: "/settings/embedding", methods: { GET: handleEmbeddingSettings, PATCH: handleEmbeddingPatch } },
     { pattern: "/settings/embedding/test", methods: { POST: handleEmbeddingTest } },
     { pattern: "/settings/index", methods: { GET: handleIndexStatus } },

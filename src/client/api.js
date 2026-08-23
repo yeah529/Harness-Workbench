@@ -116,6 +116,12 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       },
     },
 
+    knowledgeBaseProjects: {
+      list(knowledgeBaseId, { signal } = {}) {
+        return request({ path: "/knowledge-bases/" + knowledgeBaseId + "/projects", signal });
+      },
+    },
+
     documents: {
       list({ scope, scopeId, signal } = {}) {
         return request({ path: "/documents", query: { scope, scopeId }, signal });

@@ -1229,6 +1229,10 @@ test("project knowledge-base links are idempotent and list/unlink", async (t) =>
   const kbs = await res.json();
   assert.deepEqual(kbs.map((k) => k.id).sort((a, b) => a - b), [kb1.id, kb2.id]);
 
+  res = await fetch(base + `/knowledge-bases/${kb1.id}/projects`);
+  assert.equal(res.status, 200);
+  assert.deepEqual((await res.json()).map((project) => project.id), [p.id]);
+
   res = await fetch(base + `/projects/${p.id}/knowledge-bases/${kb1.id}`, { method: "DELETE" });
   assert.equal(res.status, 200);
   assert.equal((await res.json()).removed, 1);
@@ -1248,6 +1252,8 @@ test("project knowledge-base routes validate both ends exist", async (t) => {
   assert.equal(res.status, 404);
   res = await fetch(base + `/projects/${p.id}/knowledge-bases/abc`, { method: "POST" });
   assert.equal(res.status, 422);
+  res = await fetch(base + "/knowledge-bases/999999/projects");
+  assert.equal(res.status, 404);
 });
 
 // ------------------------------------------------------ internal error logging

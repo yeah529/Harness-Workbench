@@ -272,6 +272,10 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
   overflow: hidden;
   border-top: 1px solid rgba(77,232,244,.14);
 }
+.cpwb-sidebar-current { flex: 0 0 auto; margin-top: 16px; padding-bottom: 10px; overflow: hidden; border-top: 1px solid rgba(77,232,244,.18); border-bottom: 1px solid rgba(77,232,244,.12); background: linear-gradient(110deg, rgba(77,232,244,.045), transparent 72%); }
+.cpwb-sidebar-container-name { margin: 0 8px 7px; overflow: hidden; color: #f0eee8; font-size: 12px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+.cpwb-sidebar-current-list { display: grid; gap: 1px; }
+.cpwb-sidebar-current .cpwb-sidebar-all { margin: 7px 8px 0; width: calc(100% - 16px); }
 .cpwb-sidebar-section-label { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; padding: 14px 8px 9px; color: #69778a; font: 650 8px/1 var(--cpwb-code); letter-spacing: .18em; text-transform: uppercase; }
 .cpwb-sidebar-section-label b { color: var(--cpwb-cyan); font-size: 9px; }
 .cpwb-sidebar-recent-scroll { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(77,232,244,.3) transparent; }
@@ -348,7 +352,7 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
 .cpwb-app-shell[data-page="conversation"] .cpwb-workbench-stage { overflow: visible; }
 .cpwb-session-chrome { position: absolute; inset: 0; pointer-events: none; }
 .cpwb-session-context-bar { position: absolute; z-index: 44; top: 12px; left: 14px; right: 14px; display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 39px; padding: 0 13px; color: var(--cpwb-text-secondary); border: 1px solid rgba(77,232,244,.2); background: linear-gradient(90deg, rgba(10,14,20,.88), rgba(10,13,18,.64)); box-shadow: inset 2px 0 var(--cpwb-cyan), 0 9px 28px rgba(0,0,0,.2); backdrop-filter: blur(16px) saturate(120%); clip-path: var(--cpwb-cut-sm); }
-.cpwb-project-context .cpwb-session-context-bar { right: calc(var(--cpwb-rail-width, 320px) + 14px); }
+.cpwb-has-context-rail .cpwb-session-context-bar { right: calc(var(--cpwb-rail-width, 320px) + 14px); }
 .cpwb-session-context-kind { color: var(--cpwb-cyan); font: 650 7px/1 var(--cpwb-code); letter-spacing: .16em; white-space: nowrap; }
 .cpwb-session-context-identity, .cpwb-session-context-meta { display: flex; align-items: baseline; min-width: 0; gap: 10px; }.cpwb-session-context-identity { flex: 1; }.cpwb-session-context-meta { flex: 0 0 auto; }
 .cpwb-session-context-bar strong { min-width: 0; overflow: hidden; color: var(--cpwb-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -373,6 +377,13 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
 .cpwb-project-tool-tabs button.cpwb-active { color: var(--cpwb-amber); background: linear-gradient(to top, rgba(255,181,27,.07), transparent); }
 .cpwb-project-tool-tabs button.cpwb-active::after { transform: scaleX(1); box-shadow: 0 0 10px rgba(255,181,27,.35); }
 .cpwb-project-tool-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 15px; scrollbar-width: thin; scrollbar-color: rgba(77,232,244,.28) transparent; }
+.cpwb-context-list { display: grid; align-content: start; gap: 9px; }
+.cpwb-context-card { display: grid; gap: 6px; padding: 11px 12px; border: 1px solid rgba(77,232,244,.14); border-left: 2px solid rgba(77,232,244,.45); background: rgba(255,255,255,.018); clip-path: var(--cpwb-cut-sm); }
+.cpwb-context-card-primary { border-left-color: var(--cpwb-amber); background: linear-gradient(110deg, rgba(255,181,27,.065), rgba(77,232,244,.02)); }
+.cpwb-context-card > span { color: var(--cpwb-cyan); font: 650 7px/1 var(--cpwb-code); letter-spacing: .16em; }
+.cpwb-context-card > strong { overflow-wrap: anywhere; color: var(--cpwb-text); font-size: 11px; }
+.cpwb-context-card > small { color: var(--cpwb-text-muted); font-size: 9px; line-height: 1.45; }
+.cpwb-context-empty { padding: 28px 12px; color: var(--cpwb-text-muted); border: 1px dashed rgba(77,232,244,.2); text-align: center; font-size: 10px; }
 
 /* Right workbench inspector */
 .cpwb-rail-host { color: var(--cpwb-text); }
@@ -793,7 +804,7 @@ body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"] nav button[aria-cur
   .cpwb-sidebar-wordmark svg { width: 154px; }
   .cpwb-workbench-page { padding: 30px 26px; }
   .cpwb-knowledge-center-body > div { grid-template-columns: minmax(220px, .8fr) minmax(0, 1.2fr); }
-  .cpwb-project-context .cpwb-session-context-bar { right: 130px; }
+  .cpwb-has-context-rail .cpwb-session-context-bar { right: 130px; }
 }
 
 @media (max-width: 899px) {
@@ -809,7 +820,7 @@ body:has(.cpwb-app-shell) [role="dialog"][aria-modal="true"] nav button[aria-cur
   .cpwb-session-list-row time { display: none; }
   .cpwb-responsive-drawer .cpwb-global-sidebar { padding: 16px 14px 12px; }
   .cpwb-session-context-bar { top: 58px; left: 12px; right: 12px; }
-  .cpwb-project-context .cpwb-session-context-bar { right: 12px; }
+  .cpwb-has-context-rail .cpwb-session-context-bar { right: 12px; }
   .cpwb-session-context-bar small,
   .cpwb-session-context-bar em { display: none; }
   .cpwb-session-context-meta { display: flex; }

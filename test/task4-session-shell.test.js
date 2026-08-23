@@ -276,7 +276,7 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
   }
 });
 
-test("knowledge-base and independent conversations never render project-owned tools", () => {
+test("knowledge-base and independent conversations render scoped tools without project-owned actions", () => {
   for (const kind of ["knowledge_base", "independent"]) {
     const sessionId = "session-cpwb-" + kind;
     const store = {
@@ -289,7 +289,8 @@ test("knowledge-base and independent conversations never render project-owned to
       actions: {},
     };
     const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, { sessionId, open: true, store }));
-    assert.doesNotMatch(html, /cpwb-project-rail/);
+    assert.match(html, /cpwb-project-rail/);
+    assert.doesNotMatch(html, />待办<|>每日总结</);
     assert.match(html, /cpwb-session-context-bar/);
     if (kind === "knowledge_base") {
       assert.match(html, /知识库会话/);

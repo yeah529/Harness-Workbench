@@ -5,6 +5,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { createWorkbenchStore } from "../src/client/store.js";
 import { NewSessionDialog } from "../src/client/NewSessionDialog.js";
+import { WorkbenchSidebar, partitionSidebarSessions } from "../src/client/WorkbenchSidebar.js";
+import {
+  WorkbenchSessionShell,
+  PROJECT_TOOL_TABS,
+  KNOWLEDGE_TOOL_TABS,
+  INDEPENDENT_TOOL_TABS,
+} from "../src/client/WorkbenchSessionShell.js";
 
 function sessionApi({ activateError } = {}) {
   const calls = [];
@@ -108,4 +115,57 @@ test("new-session dialog exposes one owner choice and inherited-context preview"
   assert.match(html, /独立会话/);
   assert.match(html, /默认上下文/);
   assert.doesNotMatch(html, /会话标题/);
+});
+
+test("sidebar partitions the current container before unrelated recents", () => {
+  const sessions = [
+    { sessionId: "p-1", title: "项目一", scope: { kind: "project", id: 7 }, contextName: "Research" },
+    { sessionId: "p-2", title: "项目二", scope: { kind: "project", id: 7 }, contextName: "Research" },
+    { sessionId: "p-3", title: "项目三", scope: { kind: "project", id: 7 }, contextName: "Research" },
+    { sessionId: "p-4", title: "项目四", scope: { kind: "project", id: 7 }, contextName: "Research" },
+    { sessionId: "kb-1", title: "知识会话", scope: { kind: "knowledge_base", id: 2 }, contextName: "架构库" },
+    { sessionId: "i-1", title: "独立会话", scope: { kind: "independent", id: null }, contextName: "独立" },
+  ];
+  const partition = partitionSidebarSessions(sessions, { kind: "project", id: 7 }, "p-2");
+  assert.deepEqual(partition.current.map((item) => item.sessionId), ["p-1", "p-2", "p-3"]);
+  assert.deepEqual(partition.recent.map((item) => item.sessionId), ["kb-1", "i-1"]);
+
+  const html = renderToStaticMarkup(React.createElement(WorkbenchSidebar, {
+    page: "conversation",
+    activeSessionId: "p-2",
+    recentSessions: sessions,
+    currentScope: { kind: "project", id: 7 },
+    currentContainerName: "Research",
+    currentContainerTotal: 4,
+  }));
+  assert.match(html, /全部会话/);
+  assert.match(html, /当前项目/);
+  assert.match(html, /Research/);
+  assert.match(html, /查看全部 4 个会话/);
+  assert.match(html, /其他最近会话/);
+  assert.equal((html.match(/项目[一二三]/g) || []).length, 3);
+  assert.doesNotMatch(html, /项目四/);
+});
+
+test("right rail follows the project, knowledge-base, and independent tool matrix", () => {
+  assert.deepEqual(PROJECT_TOOL_TABS.map((item) => item[1]), ["待办", "定时任务", "关联知识库", "每日总结"]);
+  assert.deepEqual(KNOWLEDGE_TOOL_TABS.map((item) => item[1]), ["文档", "索引", "关联项目", "全局定时"]);
+  assert.deepEqual(INDEPENDENT_TOOL_TABS.map((item) => item[1]), ["上下文", "文件", "Subagent", "全局定时"]);
+
+  for (const [kind, id, labels] of [
+    ["project", 7, PROJECT_TOOL_TABS],
+    ["knowledge_base", 2, KNOWLEDGE_TOOL_TABS],
+    ["independent", null, INDEPENDENT_TOOL_TABS],
+  ]) {
+    const sessionId = "session-cpwb-" + kind;
+    const state = {
+      projects: [{ id: 7, name: "Research" }],
+      knowledgeBases: [{ id: 2, name: "架构库" }],
+      workbenchSessions: { [sessionId]: { sessionId, scope: { kind, id }, title: "会话" } },
+      linkedKnowledgeBases: [], documents: [], schedules: [], globalSchedules: [], contextBySession: {},
+    };
+    const store = { getSnapshot: () => state, subscribe: () => () => {}, actions: {} };
+    const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, { sessionId, open: true, store, layoutMode: "desktop" }));
+    for (const [, label] of labels) assert.match(html, new RegExp(label));
+  }
 });

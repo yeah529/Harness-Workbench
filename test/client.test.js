@@ -177,6 +177,15 @@ test("api: project knowledge-base link/unlink use exact nested paths", async () 
   await api.projectKnowledgeBases.unlink(7, 9);
 });
 
+test("api: knowledge-base projects use the inverse relationship route", async () => {
+  const fetchImpl = makeFetch(({ url }) => {
+    assert.equal(parse(url).pathname, "/api/cpwb/knowledge-bases/2/projects");
+    return jsonResponse(200, [project]);
+  });
+  const api = createCpwbApi({ fetchImpl });
+  assert.deepEqual(await api.knowledgeBaseProjects.list(2), [project]);
+});
+
 test("api: documents list encodes scope/scopeId query", async () => {
   const fetchImpl = makeFetch(({ url }) => {
     const { pathname, searchParams } = parse(url);

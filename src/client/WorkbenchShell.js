@@ -45,6 +45,21 @@ export function WorkbenchShell(props) {
     }, 0);
   };
 
+  const activeEntry = state.workbenchSessions?.[view.sessionId]
+    || state.recentSessions?.find?.((item) => item.sessionId === view.sessionId)
+    || null;
+  const currentScope = state.draft?.scope ?? activeEntry?.scope ?? null;
+  const currentContainerName = currentScope?.kind === "project"
+    ? state.projects?.find?.((item) => item.id === currentScope.id)?.name
+    : currentScope?.kind === "knowledge_base"
+      ? state.knowledgeBases?.find?.((item) => item.id === currentScope.id)?.name
+      : activeEntry?.title || activeEntry?.displayTitle || "当前独立会话";
+
+  React.useEffect(function () {
+    if (!currentScope || (view.page !== "conversation" && view.page !== "draft")) return;
+    props.store.actions.loadScopeSessions?.(currentScope).catch(function () {});
+  }, [currentScope?.kind, currentScope?.id, props.store, view.page, view.sessionId]);
+
   React.useEffect(function () {
     if (view.page !== "conversation" && drawerOwner === "project") closeDrawer();
     if (layoutMode !== "mobile" && drawerOwner === "navigation") closeDrawer();
@@ -87,10 +102,15 @@ export function WorkbenchShell(props) {
     center = React.createElement(ProjectHome, { ...props, open: true });
   }
 
+  const sidebarSessions = [...(state.scopeSessionPage?.items || []), ...(state.recentSessions || [])]
+    .filter((item, index, list) => list.findIndex((candidate) => candidate.sessionId === item.sessionId) === index);
   const sidebar = React.createElement(WorkbenchSidebar, {
       page: view.page,
       activeSessionId: view.sessionId,
-      recentSessions: state.recentSessions,
+      recentSessions: sidebarSessions,
+      currentScope: view.page === "conversation" || view.page === "draft" ? currentScope : null,
+      currentContainerName,
+      currentContainerTotal: currentScope?.kind === "independent" ? (view.sessionId ? 1 : 0) : state.scopeSessionPage?.total || 0,
       onNavigate: navigate,
       onNewSession: createSession,
       onOpenSession: openSession,
@@ -98,9 +118,7 @@ export function WorkbenchShell(props) {
       settingsTrigger: openNativeSettings,
     });
 
-  const currentScope = state.draft?.scope
-    ?? state.workbenchSessions?.[view.sessionId]?.scope
-    ?? { kind: "independent", id: null };
+  const dialogScope = currentScope ?? { kind: "independent", id: null };
 
   return React.createElement("div", {
     className: "cpwb-app-shell cpwb-layout-" + layoutMode,
@@ -129,7 +147,7 @@ export function WorkbenchShell(props) {
     React.createElement(NewSessionDialog, {
       open: newSessionOpen,
       store: props.store,
-      initialScope: currentScope,
+      initialScope: dialogScope,
       onClose: () => setNewSessionOpen(false),
       onStart(input) {
         props.store.actions.startDraft(input);

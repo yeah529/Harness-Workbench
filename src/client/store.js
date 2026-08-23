@@ -13,7 +13,7 @@
  *   { phase, projects, knowledgeBases, documents, health, error,
  *     activeProjectId, activeKnowledgeBaseId, linkedKnowledgeBases,
  *     todos, schedules, summaries, citations, action,
- *     draft, workbenchSessions, contextBySession }
+ *     draft, workbenchSessions, scopeSessionPage, contextBySession }
  *
  * refresh() aborts any prior refresh and fetches health / projects /
  * knowledgeBases / documents in parallel. refreshProject(projectId, today)
@@ -121,6 +121,9 @@ export function createWorkbenchStore(api) {
     workbenchSessions: {},
     citationsBySession: {},
     contextBySession: {},
+    scopeSessionPage: { items: [], total: 0, limit: 3, offset: 0 },
+    globalSchedules: [],
+    linkedProjects: [],
   };
 
   const listeners = new Set();
@@ -440,6 +443,36 @@ export function createWorkbenchStore(api) {
 
     loadAllSessions: async function loadAllSessions({ query = "", scopeKind = null, scopeId = null, offset = 0, limit = 20 } = {}) {
       return loadSessionPage.run({ query, scopeKind, scopeId, offset, limit });
+    },
+
+    loadScopeSessions: async function loadScopeSessions(scope) {
+      const normalized = normalizeSessionScope(scope);
+      if (normalized.kind === "independent") {
+        const page = { items: [], total: 0, limit: 3, offset: 0 };
+        setState({ scopeSessionPage: page });
+        return page;
+      }
+      const page = await fetchSessionPage({ scopeKind: normalized.kind, scopeId: normalized.id, limit: 3, offset: 0 });
+      setState({ scopeSessionPage: page });
+      return page;
+    },
+
+    loadGlobalSchedules: async function loadGlobalSchedules() {
+      const schedules = await runAction("loadGlobalSchedules", () => api.schedules.list({}));
+      setState({ globalSchedules: Array.isArray(schedules) ? schedules : [] });
+      return schedules;
+    },
+
+    loadKnowledgeBaseProjects: async function loadKnowledgeBaseProjects(knowledgeBaseId) {
+      const projects = await runAction("loadKnowledgeBaseProjects", () => api.knowledgeBaseProjects.list(knowledgeBaseId));
+      setState({ linkedProjects: Array.isArray(projects) ? projects : [] });
+      return projects;
+    },
+
+    reindexKnowledgeBase: async function reindexKnowledgeBase(knowledgeBaseId) {
+      const result = await runAction("reindexKnowledgeBase", () => api.knowledgeBaseIndex.reindex(knowledgeBaseId));
+      await actions.refreshDocuments();
+      return result;
     },
 
     startDraft: function startDraft({ scope, pinnedSources = [] }) {
