@@ -13,7 +13,7 @@
 </p>
 
 > [!IMPORTANT]
-> 当前版本面向 **DeepSeek Harness 0.1.0-rc.8**。DSH 仍处于候选版本阶段，升级 DSH 前请先验证接口兼容性。
+> 当前版本面向 **DeepSeek Harness 0.1.1-rc.2**。DSH 仍处于候选版本阶段，升级 DSH 前请先验证接口兼容性。
 
 Harness Workbench 在 DSH Web 客户端上增加项目卡片、原生会话、本地知识库、待办、定时任务和每日项目自动化。它保留 DSH 会话引擎作为唯一真相源，在其外层提供面向项目的工作空间。
 
@@ -44,7 +44,7 @@ Workbench 不替换 DSH 的会话运行时。
 
 - macOS 或 Linux
 - Node.js `>=22.5.0`
-- DeepSeek Harness `0.1.0-rc.8`
+- DeepSeek Harness `0.1.1-rc.2`
 - 默认本地向量化方案需要 Ollama
 - 已在 DSH 中配置可用的生成模型 Provider
 
@@ -52,11 +52,26 @@ Workbench 不替换 DSH 的会话运行时。
 
 ## 快速开始
 
+推荐安装方式：
+
+```bash
+npm install -g dsh-cyberpunk-workbench
+dsh-workbench
+```
+
+第一次运行 `dsh-workbench` 时，启动器会自动注册 DSH Web Profile 并加载包内 patch。以后启动仍然只需要 `dsh-workbench`；设置页保存的 Proxy 会在下一次启动时自动生效。裸命令等价于 `dsh-workbench web`。
+
+普通启动不会读取 `~/.codex/auth.json`。首次使用 Codex 时，请在 **DSH 设置 → Workbench → Codex** 点击 **扫描并接入 Codex**，或显式使用 `--codex-auth=auto`。
+
+从源码开发时：
+
 ```bash
 git clone https://github.com/yeah529/Harness-Workbench.git
 cd Harness-Workbench
 npm ci
 npm run build
+./scripts/install.sh
+node ./bin/dsh-workbench.js
 ```
 
 准备默认本地向量模型：
@@ -66,26 +81,7 @@ ollama serve
 ollama pull qwen3-embedding:0.6b
 ```
 
-安装到 DSH Web Profile：
-
-```bash
-./scripts/install.sh
-dsh web
-```
-
-安装脚本会把当前目录链接到 DSH Web Profile，并确保只有一条 `dsh-cyberpunk-workbench` 插件注册。发现无关的同名路径或重复注册时会停止，不会静默覆盖。
-
-也可以使用项目自带启动器：
-
-```bash
-node ./bin/dsh-workbench.js web
-```
-
-如果已通过 npm 安装，则可使用：
-
-```bash
-dsh-workbench web
-```
+源码安装脚本会把当前目录链接到 DSH Web Profile，并确保只有一条 `dsh-cyberpunk-workbench` 插件注册。npm 启动器执行同样的幂等检查：已有有效开发链接会保留，失效链接会修复；无关的同名目录或重复注册会明确报错，不会静默覆盖。
 
 ## 知识库
 
@@ -123,13 +119,13 @@ Proxy 作为“下次启动”配置保存，由 Workbench 启动器应用。设
 示例：
 
 ```bash
-dsh-workbench web --proxy-mode=custom \
-  --http-proxy=http://127.0.0.1:7890 \
-  --https-proxy=http://127.0.0.1:7890
+dsh-workbench --proxy-mode=custom \
+  --proxy-url=http://127.0.0.1:7890 \
+  --no-proxy=localhost,127.0.0.1
 ```
 
 ```bash
-NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:7890 dsh-workbench web
+NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:7890 dsh-workbench
 ```
 
 保存 Proxy 不代表当前进程已经切换网络。修改后请通过 Workbench 启动器重启 DSH。
@@ -141,13 +137,13 @@ Codex 桥接默认关闭。普通启动不会扫描 `~/.codex/auth.json`。
 首次接入时，可以打开 **DSH 设置 → Workbench → Codex**，点击 **扫描并接入 Codex**。只有点击后才会读取 `${CODEX_HOME}/auth.json`。也可以在启动器中显式开启：
 
 ```bash
-dsh-workbench web --codex-auth=auto
+dsh-workbench --codex-auth=auto
 ```
 
 或只为子进程显式传入 Access Token：
 
 ```bash
-CODEX_ACCESS_TOKEN="..." dsh-workbench web
+CODEX_ACCESS_TOKEN="..." dsh-workbench
 ```
 
 安全边界：
@@ -192,7 +188,7 @@ test/                单元、集成、契约与界面测试
 
 ## 兼容性与限制
 
-- 当前版本绑定 DSH `0.1.0-rc.8` 的 Slot 和 Session 契约。
+- 当前版本绑定 DSH `0.1.1-rc.2` 的 Slot 和 Session 契约。
 - Codex 本地缓存扫描为显式可选能力；缓存格式变化后可能需要更新。
 - 定时任务仅在 DSH host 运行时执行，本项目不会安装操作系统级服务。
 - 生成 Provider 的可用性与网络健康状态仍由 DSH 负责。

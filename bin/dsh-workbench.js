@@ -2,15 +2,12 @@
 import { fileURLToPath } from "node:url";
 import { launchDsh } from "../src/launcher/process.js";
 import { parseWorkbenchArgs } from "../src/launcher/cli.js";
-
-function codexRouteRequested(options, env) {
-  return options.codexAuth === "auto"
-    || Object.prototype.hasOwnProperty.call(env, "CODEX_ACCESS_TOKEN")
-    || (typeof env.OPENAI_CODEX_ACCESS_TOKEN === "string" && env.OPENAI_CODEX_ACCESS_TOKEN.trim() !== "");
-}
+import { ensureWorkbenchProfile } from "../src/launcher/profile.js";
 
 try {
   const options = parseWorkbenchArgs(process.argv.slice(2));
+  const packageRoot = fileURLToPath(new URL("../", import.meta.url));
+  await ensureWorkbenchProfile({ packageRoot, env: process.env });
   const result = await launchDsh({
     args: options.args,
     codexAuth: options.codexAuth,
@@ -20,9 +17,7 @@ try {
     proxyFields: options.proxyFields,
     dataDir: options.dataDir,
     dshBin: process.env.DSH_BIN || undefined,
-    patchPath: codexRouteRequested(options, process.env)
-      ? fileURLToPath(new URL("../dsh-codex.patch.yml", import.meta.url))
-      : undefined
+    patchPath: fileURLToPath(new URL("../dsh-codex.patch.yml", import.meta.url)),
   });
   if (result.signal) {
     // launchDsh already disposed its handlers before resolving. Re-deliver the

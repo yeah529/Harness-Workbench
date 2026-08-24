@@ -527,6 +527,59 @@ test("knowledge-bases CRUD", async (t) => {
   assert.equal(kbs.length, 1);
 });
 
+test("knowledge-base list exposes real chip metrics and reverse project links", async (t) => {
+  const { base, repos } = await startApi(t);
+  const project = repos.projects.create({ name: "Harness Workbench" });
+  const kb = repos.knowledgeBases.create({ name: "Architecture", description: "RC.2 docs" });
+  const ready = repos.documents.upsertBySha256({
+    sha256: "a".repeat(64), originalName: "ready.md", size: 12,
+  });
+  repos.documents.link({ documentId: ready.id, scope: "knowledgeBase", scopeId: kb.id });
+  repos.documents.updateIndexState(ready.id, {
+    status: "ready", error: null, indexedAt: "2026-08-24T08:00:00.000Z",
+  });
+  repos.chunks.replaceForDocument({
+    documentId: ready.id,
+    chunks: [
+      { ordinal: 0, text: "one", locator: "line:1", heading: null, originalName: "ready.md", contentHash: "h1" },
+      { ordinal: 1, text: "two", locator: "line:2", heading: null, originalName: "ready.md", contentHash: "h2" },
+    ],
+  });
+  const pending = repos.documents.upsertBySha256({
+    sha256: "b".repeat(64), originalName: "pending.md", size: 8,
+  });
+  repos.documents.link({ documentId: pending.id, scope: "knowledgeBase", scopeId: kb.id });
+  repos.projectKnowledgeBases.link({ projectId: project.id, knowledgeBaseId: kb.id });
+  repos.workbenchSessions.upsert({
+    sessionId: "session-cpwb-kb-overview", scopeKind: "knowledge_base", scopeId: kb.id,
+    provider: "deepseek-official", model: "deepseek-v4-flash",
+  });
+  repos.workbenchSessions.upsert({
+    sessionId: "session-cpwb-project-overview", scopeKind: "project", scopeId: project.id,
+    provider: "deepseek-official", model: "deepseek-v4-flash",
+  });
+
+  const response = await fetch(base + "/knowledge-bases");
+  assert.equal(response.status, 200);
+  const [listed] = await response.json();
+  assert.equal(listed.name, "Architecture");
+  assert.deepEqual(listed.overview, {
+    fileCount: 2,
+    readyFileCount: 1,
+    chunkCount: 2,
+    linkedProjectCount: 1,
+    sessionCount: 1,
+    indexPercent: 50,
+    state: "indexing",
+    latestIndexedAt: "2026-08-24T08:00:00.000Z",
+  });
+  assert.equal(listed.linkedProjects.length, 1);
+  assert.equal(listed.linkedProjects[0].name, "Harness Workbench");
+  assert.equal(listed.linkedProjects[0].sessionCount, 1);
+  assert.equal(listed.recentDocuments.length, 2);
+  assert.equal("sha256" in listed.recentDocuments[0], false, "overview never exposes storage identities");
+});
+
 // --------------------------------------------------------------- documents
 
 test("raw upload persists file + document + link, then indexes to ready", async (t) => {
@@ -553,6 +606,32 @@ test("raw upload persists file + document + link, then indexes to ready", async 
   assert.equal(fakeIndexer.state.calls.length, 1);
   assert.deepEqual(fakeIndexer.state.calls[0].projectIds, [p.id]);
   assert.deepEqual(fakeIndexer.state.calls[0].knowledgeBaseIds, []);
+});
+
+test("document content opens or downloads the original bytes without exposing a local path", async (t) => {
+  const { base, repos, queue, dataDir } = await startApi(t);
+  const kb = repos.knowledgeBases.create({ name: "K" });
+  const uploaded = await fetch(base + "/documents", uploadBody("中文 笔记.md", "knowledgeBase", kb.id, "# 原始内容"));
+  const { document } = await uploaded.json();
+  await queue.idle();
+
+  let response = await fetch(base + `/documents/${document.id}/content`);
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "# 原始内容");
+  assert.match(response.headers.get("content-type"), /^text\/markdown/);
+  assert.match(response.headers.get("content-disposition"), /^inline;/);
+  assert.match(response.headers.get("content-security-policy"), /sandbox/);
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.doesNotMatch(response.headers.get("content-disposition"), new RegExp(dataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  response = await fetch(base + `/documents/${document.id}/content?download=1`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-disposition"), /^attachment;/);
+  assert.match(response.headers.get("content-disposition"), /UTF-8''/);
+
+  response = await fetch(base + "/documents/999999/content");
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error.code, "NOT_FOUND");
 });
 
 test("duplicate ready upload only adds association, does not reindex", async (t) => {

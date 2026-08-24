@@ -11,6 +11,7 @@
     "bin",
     "lib",
     "src/host",
+    "src/launcher",
     "scripts/build.mjs",
     "scripts/install.sh",
     "scripts/reset-demo.mjs",

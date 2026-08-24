@@ -116,6 +116,10 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
     },
 
     documents: {
+      contentUrl(id, { download = false } = {}) {
+        if (!Number.isSafeInteger(id) || id < 1) throw new TypeError("document id must be a positive integer");
+        return basePath + "/documents/" + id + "/content" + (download ? "?download=1" : "");
+      },
       list({ scope, scopeId, signal } = {}) {
         return request({ path: "/documents", query: { scope, scopeId }, signal });
       },

@@ -22,6 +22,7 @@
  */
 
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 
 import { saveFile, FileStorageError, FILE_ERROR_CODES } from "./files.js";
 import { RetrievalError } from "./retrieval.js";
@@ -97,6 +98,18 @@ function sendJson(res, status, payload) {
 
 function ok(res, payload, status = 200) {
   sendJson(res, status, payload);
+}
+
+function originalFileHeaders(document, download) {
+  const encodedName = encodeURIComponent(document.originalName).replace(/'/g, "%27");
+  const fallbackName = document.originalName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return {
+    "content-type": document.mimeType || "application/octet-stream",
+    "content-disposition": `${download ? "attachment" : "inline"}; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`,
+    "content-security-policy": "sandbox; default-src 'none'",
+    "x-content-type-options": "nosniff",
+    "cache-control": "private, no-store",
+  };
 }
 
 function fail(res, status, code, message) {
@@ -449,6 +462,23 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, repos.documents.list());
   }
 
+  async function handleDocumentContent(req, res, { params, url }) {
+    const id = parseId(params.id);
+    const document = repos.documents.get(id);
+    if (!document) throw new ApiError(404, "NOT_FOUND", "document not found: " + id);
+    let bytes;
+    try {
+      bytes = await readFile(join(dataDir, "files", document.sha256));
+    } catch {
+      throw new ApiError(404, "FILE_NOT_FOUND", "original file is unavailable");
+    }
+    res.writeHead(200, {
+      ...originalFileHeaders(document, url.searchParams.get("download") === "1"),
+      "content-length": bytes.byteLength,
+    });
+    res.end(bytes);
+  }
+
   async function handleDocumentGet(req, res, { params }) {
     const id = parseId(params.id);
     const doc = repos.documents.get(id);
@@ -592,8 +622,48 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
 
   async function handleKnowledgeBasesList(req, res) {
     ok(res, repos.knowledgeBases.list().map((knowledgeBase) => {
+      const documents = repos.documents.listByKnowledgeBase(knowledgeBase.id);
+      const linkedProjects = repos.projectKnowledgeBases.listByKnowledgeBase(knowledgeBase.id).map((project) => ({
+        ...project,
+        sessionCount: repos.workbenchSessions.list({ scopeKind: "project", scopeId: project.id, limit: 500 }).length,
+      }));
+      const readyFileCount = documents.filter((document) => document.status === "ready").length;
+      const hasAttention = documents.some((document) => document.status === "failed" || document.status === "stale");
+      const chunkCount = documents.reduce((total, document) => total + repos.chunks.listByDocument(document.id).length, 0);
+      const latestIndexedAt = documents.reduce((latest, document) => {
+        if (!document.indexedAt) return latest;
+        return !latest || document.indexedAt > latest ? document.indexedAt : latest;
+      }, null);
       const recentSession = repos.workbenchSessions.latest({ scopeKind: "knowledge_base", scopeId: knowledgeBase.id });
-      return recentSession ? { ...knowledgeBase, recentSession } : knowledgeBase;
+      const overview = {
+        fileCount: documents.length,
+        readyFileCount,
+        chunkCount,
+        linkedProjectCount: linkedProjects.length,
+        sessionCount: repos.workbenchSessions.list({ scopeKind: "knowledge_base", scopeId: knowledgeBase.id, limit: 500 }).length,
+        indexPercent: documents.length === 0 ? 0 : Math.round((readyFileCount / documents.length) * 100),
+        state: documents.length === 0
+          ? "empty"
+          : hasAttention
+            ? "attention"
+            : readyFileCount === documents.length
+              ? "ready"
+              : "indexing",
+        latestIndexedAt,
+      };
+      const recentDocuments = [...documents]
+        .sort((a, b) => String(b.indexedAt || b.createdAt).localeCompare(String(a.indexedAt || a.createdAt)))
+        .slice(0, 3)
+        .map(({ id, originalName, mimeType, size, status, createdAt, indexedAt, error }) => ({
+          id, originalName, mimeType, size, status, createdAt, indexedAt, error,
+        }));
+      return {
+        ...knowledgeBase,
+        ...(recentSession ? { recentSession } : {}),
+        overview,
+        linkedProjects,
+        recentDocuments,
+      };
     }));
   }
 
@@ -1067,6 +1137,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     { pattern: "/knowledge-bases", methods: { GET: handleKnowledgeBasesList, POST: handleKnowledgeBaseCreate } },
     { pattern: "/knowledge-bases/:id", methods: { DELETE: handleKnowledgeBaseDelete } },
     { pattern: "/documents", methods: { GET: handleDocumentsList, POST: handleUpload } },
+    { pattern: "/documents/:id/content", methods: { GET: handleDocumentContent } },
     { pattern: "/documents/:id/reindex", methods: { POST: handleReindex } },
     { pattern: "/knowledge-bases/:id/reindex", methods: { POST: handleKnowledgeBaseReindex } },
     { pattern: "/documents/:id/links/:scope/:scopeId", methods: { DELETE: handleUnlink } },

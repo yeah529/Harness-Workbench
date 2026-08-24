@@ -3,7 +3,7 @@ import { List } from "@phosphor-icons/react";
 import { ProjectHome } from "./ProjectHome.js";
 import { WorkbenchSessionShell } from "./WorkbenchSessionShell.js";
 import { WorkbenchSidebar } from "./WorkbenchSidebar.js";
-import { KnowledgeCenterPage } from "./KnowledgeBase.js";
+import { KnowledgeCenterPage } from "./KnowledgeCenterPage.js";
 import { SessionListPage } from "./SessionListPage.js";
 import { DrawerDialog, nextDrawerOwner, useWorkbenchLayoutMode } from "./responsive.js";
 

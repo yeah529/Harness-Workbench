@@ -189,6 +189,13 @@ test("api: documents list encodes scope/scopeId query", async () => {
   await api.documents.list({ scope: "knowledgeBase", scopeId: 2 });
 });
 
+test("api: document contentUrl builds safe inline and download URLs", () => {
+  const api = createCpwbApi({ fetchImpl: async () => jsonResponse(200, {}) });
+  assert.equal(api.documents.contentUrl(3), "/api/cpwb/documents/3/content");
+  assert.equal(api.documents.contentUrl(3, { download: true }), "/api/cpwb/documents/3/content?download=1");
+  assert.throws(() => api.documents.contentUrl(0), /positive integer/);
+});
+
 test("api: documents upload sends raw body + encoded filename + scope headers", async () => {
   const file = { name: "中文 笔记.md", size: 5 };
   const fetchImpl = makeFetch(({ url, init }) => {

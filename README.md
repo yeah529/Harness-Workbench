@@ -56,23 +56,29 @@ ollama serve
 ollama pull qwen3-embedding:0.6b
 ```
 
-在本目录执行安装脚本：
+推荐直接安装 npm 包：
+
+```bash
+npm install -g dsh-cyberpunk-workbench
+dsh-workbench
+```
+
+第一次运行 `dsh-workbench` 时，启动器会自动把当前安装注册到 DSH Web Profile，并加载包内的 `dsh-codex.patch.yml`。之后仍然只需运行同一个短命令；Workbench 设置页保存的 Proxy 会在下一次启动时自动生效。裸命令等价于 `dsh-workbench web`。
+
+首次启动不会自动读取 `~/.codex/auth.json`。需要 Codex 时，在 **设置 → Workbench → Codex** 点击“扫描并接入 Codex”，或显式使用 `--codex-auth=auto`。
+
+从源码开发时可执行：
 
 ```bash
 ./scripts/install.sh
+node ./bin/dsh-workbench.js
 ```
 
 脚本会把当前插件目录以 symlink 写入 `$DSH_HOME/profiles/web/node_modules/`，并在 `cordis.patch.yml` 中确保只有一条 `dsh-cyberpunk-workbench` 注册项。默认 `DSH_HOME` 为 `~/.dsh`，可用 `DSH_HOME=/path/to/.dsh` 或 `DSH_WEB_PROFILE=/path/to/profile` 覆盖。已有同名非本插件路径或重复注册项会拒绝覆盖，避免静默破坏部署。
 
-安装后手动重启 Web：
-
-```bash
-dsh web
-```
-
 ### Workbench 启动器、Codex 与代理
 
-安装本包后也可以使用 `dsh-workbench web`，或在源码目录执行 `node ./bin/dsh-workbench.js web`。启动器只负责将认证和代理配置安全地注入即将启动的 DSH 子进程；普通启动不会读取 `CODEX_HOME` 或 `~/.codex/auth.json`。
+安装本包后使用 `dsh-workbench`，或在源码目录执行 `node ./bin/dsh-workbench.js`。启动器会幂等注册 Web Profile、加载包内 patch，并将认证和代理配置安全地注入即将启动的 DSH 子进程；普通启动不会读取 `CODEX_HOME` 或 `~/.codex/auth.json`。如果 Profile 中已经有有效的 Workbench 开发链接，启动器会保留它；只有失效链接会自动修复。
 
 启动器解析 DSH 的顺序是：显式 `DSH_BIN`；当前安装能够解析到的 `@deepseek-ai/dsh/lib/bin.js`（用当前 Node 直接运行）；最后使用 `npx --yes @deepseek-ai/dsh@0.1.1-rc.2 web`。因此不要求用户把名为 `dsh` 的全局可执行文件放进 PATH。`DSH_BIN` 仍可用于测试或自定义发行版。
 
@@ -84,10 +90,10 @@ Codex 缓存桥接必须显式开启，且只读取 `${CODEX_HOME}/auth.json` �
 
 ```bash
 # 显式环境变量优先于缓存，token 不会进入 argv 或持久化设置
-CODEX_ACCESS_TOKEN="..." dsh-workbench web
+CODEX_ACCESS_TOKEN="..." dsh-workbench
 
 # 仅此模式允许读取 CODEX_HOME/auth.json
-CODEX_HOME="$HOME/.codex" dsh-workbench web --codex-auth=auto
+CODEX_HOME="$HOME/.codex" dsh-workbench --codex-auth=auto
 ```
 
 启动器会把结果只映射为子进程环境变量 `OPENAI_CODEX_ACCESS_TOKEN`；设置按钮则把同一凭据引用交给 DSH credentials 持久化。两条路径都通过 `dsh-codex.patch.yml` 使用可选的 `openai-codex` 路由，不覆盖 DSH 默认的 `deepseek-official/deepseek-v4-flash`。认证缓存缺失、权限错误、非法 JSON、字段缺失或空值都会返回明确错误，不会伪装成远端认证成功。
@@ -95,8 +101,8 @@ CODEX_HOME="$HOME/.codex" dsh-workbench web --codex-auth=auto
 代理参数也只作用于下次启动的子进程：
 
 ```bash
-dsh-workbench web --proxy-mode=direct
-dsh-workbench web --proxy-mode=custom --proxy-url=https://proxy.example:8443 --no-proxy=localhost,127.0.0.1
+dsh-workbench --proxy-mode=direct
+dsh-workbench --proxy-mode=custom --proxy-url=https://proxy.example:8443 --no-proxy=localhost,127.0.0.1
 ```
 
 代理 URL 必须是没有 userinfo 的 `http`/`https` URL；启动器设置 `NODE_USE_ENV_PROXY=1`，并透传 DSH 的其余参数、退出码和终止信号。Workbench 设置页中的“当前生效”仍表示当前 DSH 进程环境，“下次启动”表示上述启动器下一次 spawn 使用的配置。
@@ -177,7 +183,7 @@ npm run reset:demo -- --dev \
 
 - `DSH must be stopped`：确认 Web 端口或显式 PID 对应的 DSH 已退出；reset 不会尝试结束它。
 - `workspace path does not resolve...`：传入 DSH profile 的 workspace 真实绝对路径，而不是显示名称；脚本只匹配 `workspace.json` 中唯一同路径 workspace。
-- 代理保存后仍显示旧环境：设置页的 current effective 表示当前进程；custom/direct 只进入 next launch，需用 `dsh-workbench web` 重启。
+- 代理保存后仍显示旧环境：设置页的 current effective 表示当前进程；custom/direct 只进入 next launch，需退出当前进程后重新运行 `dsh-workbench`。
 - embedding 失败：先确认 Ollama 服务和 `qwen3-embedding:0.6b`，再检查 endpoint/model/dimensions 与 credentials 引用。
 - Codex token 只在用户点击“扫描并接入 Codex”、显式 `--codex-auth=auto` 或显式环境变量时读取；前者写入 DSH credentials，后两者只桥接到子进程的 `OPENAI_CODEX_ACCESS_TOKEN`。token 不会写入 argv、日志、Workbench SQLite、API 响应、浏览器状态、fixture 或导出。
 - 代理只允许没有 userinfo 的 `http`/`https` URL；当前进程环境与下次启动配置分离，`NO_PROXY/no_proxy` 会同步处理。

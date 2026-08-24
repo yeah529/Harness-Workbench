@@ -375,14 +375,3 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
           React.createElement("button", { type: "button", className: "cpwb-btn", onClick: () => setDeleteTarget(null) }, "取消"),
           React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-danger cpwb-button-content", disabled: deletingKb, onClick: () => store.actions.deleteKnowledgeBase(deleteTarget.id).then(() => setDeleteTarget(null)).catch(() => {}) }, React.createElement(Trash, { size: 14 }), React.createElement("span", null, deletingKb ? "删除中…" : "永久删除"))))) : null);
 }
-
-export function KnowledgeCenterPage(props) {
-  return React.createElement("main", { className: "cpwb-knowledge-center cpwb-workbench-page", "data-page": "knowledge" },
-    React.createElement("header", { className: "cpwb-page-header" },
-      React.createElement("div", null,
-        React.createElement("span", null, "02 / KNOWLEDGE NODES"),
-        React.createElement("h1", null, "知识库中心"),
-        React.createElement("p", null, "上传、向量化、检索，并从任意知识库发起独立会话。"))),
-    React.createElement("section", { className: "cpwb-knowledge-center-body" },
-      React.createElement(KnowledgeBase, { ...props, view: "all" })));
-}

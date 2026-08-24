@@ -127,3 +127,22 @@ test("modal width includes padding so project dialogs fit narrow viewports", () 
   assert.match(source, /\.cpwb-modal\s*\{[^}]*box-sizing:\s*border-box[^}]*\}/);
   assert.match(source, /\.cpwb-modal\s*\{[^}]*width:\s*min\(100%,\s*480px\)[^}]*\}/);
 });
+
+test("knowledge backplane preserves the approved layering and responsive connector contract", () => {
+  const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
+  const source = fs.readFileSync(path.resolve(filename), "utf8");
+  const board = source.match(/\.cpwb-knowledge-board\s*\{([^}]*)\}/)?.[1] ?? "";
+  const chips = source.match(/\.cpwb-knowledge-chip-area\s*\{([^}]*)\}/)?.[1] ?? "";
+  const link = source.match(/\.cpwb-knowledge-link\s*\{([^}]*)\}/)?.[1] ?? "";
+  const panel = source.match(/\.cpwb-knowledge-core\s*\{([^}]*)\}/)?.[1] ?? "";
+  assert.match(board, /position:\s*relative/);
+  assert.match(board, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+318px/);
+  assert.match(chips, /z-index:\s*2/);
+  assert.match(link, /z-index:\s*3/);
+  assert.match(link, /pointer-events:\s*none/);
+  assert.match(panel, /z-index:\s*4/);
+  assert.match(source, /@keyframes\s+cpwb-knowledge-flow/);
+  assert.match(source, /@media\s*\(max-width:\s*1180px\)[\s\S]*?\.cpwb-knowledge-chip-area\s*\{\s*grid-template-columns:\s*1fr/);
+  assert.match(source, /@media\s*\(max-width:\s*820px\)[\s\S]*?\.cpwb-knowledge-link\s*\{\s*display:\s*none/);
+  assert.match(source, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.cpwb-knowledge-link-path/);
+});

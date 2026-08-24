@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { loadCodexAccessToken, buildChildEnv } from "../src/launcher/auth.js";
 import { launchDsh, forwardChildSignals, resolveDshCommand } from "../src/launcher/process.js";
@@ -253,6 +253,75 @@ test("default DSH resolution runs through npx when no global dsh is available", 
   assert.deepEqual(record.argv, ["--yes", "@deepseek-ai/dsh@0.1.1-rc.2", "web", output]);
 });
 
+test("bare dsh-workbench auto-registers the web profile and always applies its packaged patch", async (t) => {
+  const dir = await tempDir();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const child = await executableRecorder(dir);
+  const output = join(dir, "result.json");
+  const bin = fileURLToPath(new URL("../bin/dsh-workbench.js", import.meta.url));
+  const packageRoot = resolve(fileURLToPath(new URL("../", import.meta.url)));
+  const launched = spawn(process.execPath, [bin, "--", output], {
+    env: {
+      PATH: "/usr/bin:/bin",
+      DSH_BIN: child,
+      DSH_HOME: dir,
+      DSH_CYBERPUNK_WORKBENCH_DATA_DIR: dir,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  launched.stderr.on("data", (chunk) => { stderr += chunk; });
+  const result = await new Promise((resolve, reject) => {
+    launched.once("error", reject);
+    launched.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  assert.deepEqual(result, { code: 7, signal: null }, stderr);
+  assert.equal(
+    await readFile(join(dir, "profiles/web/cordis.patch.yml"), "utf8"),
+    "- insert:\n    - id: cyberpunk-workbench\n      name: dsh-cyberpunk-workbench\n",
+  );
+  assert.equal(
+    await readlink(join(dir, "profiles/web/node_modules/dsh-cyberpunk-workbench")),
+    packageRoot,
+  );
+  const record = JSON.parse(await readFile(output, "utf8"));
+  assert.deepEqual(record.argv, [
+    "web",
+    "--patch",
+    join(packageRoot, "dsh-codex.patch.yml"),
+    output,
+  ]);
+});
+
+test("auto-registration preserves an existing valid Workbench development link", async (t) => {
+  const dir = await tempDir();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const override = join(dir, "development-worktree");
+  const profileModules = join(dir, "profiles/web/node_modules");
+  await mkdir(override);
+  await mkdir(profileModules, { recursive: true });
+  await symlink(override, join(profileModules, "dsh-cyberpunk-workbench"));
+  const child = await executableRecorder(dir);
+  const output = join(dir, "result.json");
+  const bin = fileURLToPath(new URL("../bin/dsh-workbench.js", import.meta.url));
+  const launched = spawn(process.execPath, [bin, "--", output], {
+    env: {
+      PATH: "/usr/bin:/bin",
+      DSH_BIN: child,
+      DSH_HOME: dir,
+      DSH_CYBERPUNK_WORKBENCH_DATA_DIR: dir,
+    },
+    stdio: "ignore",
+  });
+  await new Promise((resolve, reject) => {
+    launched.once("error", reject);
+    launched.once("exit", resolve);
+  });
+  assert.equal(await readlink(join(profileModules, "dsh-cyberpunk-workbench")), override);
+  const patch = await readFile(join(dir, "profiles/web/cordis.patch.yml"), "utf8");
+  assert.equal((patch.match(/name: dsh-cyberpunk-workbench/g) || []).length, 1);
+});
+
 test("launcher and host resolve the same configurable DSH_HOME data root", () => {
   assert.equal(resolveDataRoot({ env: { DSH_HOME: "/tmp/example-dsh-home" } }), "/tmp/example-dsh-home/cyberpunk-workbench");
 });
@@ -268,7 +337,7 @@ setInterval(() => {}, 1000);
   await chmod(child, 0o755);
   for (const signal of ["SIGTERM", "SIGINT"]) {
     const launched = spawn(process.execPath, [fileURLToPath(new URL("../bin/dsh-workbench.js", import.meta.url)), "web"], {
-      env: { PATH: "/usr/bin:/bin", DSH_BIN: child, DSH_CYBERPUNK_WORKBENCH_DATA_DIR: dir },
+      env: { PATH: "/usr/bin:/bin", DSH_BIN: child, DSH_HOME: dir, DSH_CYBERPUNK_WORKBENCH_DATA_DIR: dir },
       stdio: ["ignore", "ignore", "pipe"]
     });
     let stderr = "";
