@@ -472,6 +472,25 @@ test("workbench sessions persist one scope, lifecycle, title lock, and activity"
   );
 });
 
+test("workbench session search composes scope and keyword filters", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+
+  const project = repos.projects.create({ name: "Research" });
+  const other = repos.projects.create({ name: "Other" });
+  repos.workbenchSessions.create({ sessionId: "session-hit", scope: { kind: "project", id: project.id }, title: "修复定时任务" });
+  repos.workbenchSessions.create({ sessionId: "session-title-miss", scope: { kind: "project", id: project.id }, title: "知识库索引" });
+  repos.workbenchSessions.create({ sessionId: "session-scope-miss", scope: { kind: "project", id: other.id }, title: "修复定时任务" });
+
+  assert.deepEqual(
+    repos.workbenchSessions.listAll({ scopeKind: "project", scopeId: project.id, query: "定时" }).map((row) => row.sessionId),
+    ["session-hit"],
+  );
+  assert.equal(repos.workbenchSessions.countAll({ scopeKind: "project", scopeId: project.id, query: "定时" }), 1);
+});
+
 test("summaries are unique per project and date and upsert is idempotent", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });

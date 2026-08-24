@@ -24,7 +24,7 @@ import { WorkbenchShell } from "../src/client/WorkbenchShell.js";
 import { layoutModeForWidth, nextDrawerOwner } from "../src/client/responsive.js";
 import { clearWorkbenchSessions, registerWorkbenchSession } from "../src/client/workbenchSessions.js";
 
-function shellStore() {
+function shellStore(overrides = {}) {
   const state = {
     phase: "ready",
     projects: [],
@@ -35,6 +35,7 @@ function shellStore() {
     workbenchSessions: {
       "session-cpwb-i": { scope: { kind: "independent", id: null } },
     },
+    ...overrides,
   };
   return {
     getSnapshot: () => state,
@@ -42,6 +43,36 @@ function shellStore() {
     actions: { loadAllSessions: async () => {}, refreshProject: async () => {} },
   };
 }
+
+test("shell sidebar reads only the fixed recent list, never the active scope page", () => {
+  const recentSessions = Array.from({ length: 20 }, (_, index) => ({
+    sessionId: "session-cpwb-recent-" + index,
+    title: "最近会话 " + index,
+    scope: { kind: index % 2 === 0 ? "project" : "independent", id: index % 2 === 0 ? 7 : null },
+  }));
+  const navigation = createNavigationStore();
+  navigation.openConversation("session-cpwb-recent-0");
+  const store = shellStore({
+    recentSessions,
+    scopeSessionPage: {
+      items: [{ sessionId: "session-cpwb-scope-only", title: "不应进入侧栏", scope: { kind: "project", id: 7 } }],
+      total: 99,
+      limit: 3,
+      offset: 0,
+      scopeKey: "project:7",
+    },
+    workbenchSessions: Object.fromEntries(recentSessions.map((session) => [session.sessionId, session])),
+  });
+  const html = renderToStaticMarkup(React.createElement(WorkbenchShell, {
+    navigation,
+    store,
+    sessions: { list: { getSnapshot: () => ({ ids: [], byId: {}, current: undefined }), subscribe: () => () => {} } },
+  }));
+
+  assert.equal((html.match(/class="cpwb-sidebar-recent"/g) || []).length, 20);
+  assert.match(html, /最近会话/);
+  assert.doesNotMatch(html, /其他最近会话|不应进入侧栏|99 个会话/);
+});
 
 test("home metrics fall back to loaded Workbench projects and use the paged session total", () => {
   assert.deepEqual(resolveHomeMetrics({
@@ -228,7 +259,7 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
   const store = {
     getSnapshot: () => ({
       projects: [{ id: 7, name: "Research" }],
-      workbenchSessions: { "session-cpwb-project-7": {
+      workbenchSessions: { "session-cpwb-1234567890abcdef1234567890abcdef": {
         scope: { kind: "project", id: 7 },
         selection: { model: "deepseek-v4-flash", reasoningEffort: "high" },
       } },
@@ -241,13 +272,13 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
   };
   clearWorkbenchSessions();
   registerWorkbenchSession({
-    sessionId: "session-cpwb-project-7",
+    sessionId: "session-cpwb-1234567890abcdef1234567890abcdef",
     scope: { kind: "project", id: 7 },
   });
   setProjectHomeOpen(false);
   try {
     const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, {
-      sessionId: "session-cpwb-project-7",
+      sessionId: "session-cpwb-1234567890abcdef1234567890abcdef",
       store,
       renderSlot: (name, props, options) => {
         calls.push({ name, props, options });
@@ -267,8 +298,10 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
     assert.match(html, /项目会话/);
     assert.match(html, /Research/);
     assert.match(html, /1 个关联知识库/);
-    assert.match(html, /deepseek-v4-flash/);
-    assert.match(html, /high/);
+    assert.match(html, /session-cpwb-1…90abcdef/);
+    assert.match(html, /aria-label="复制 Session ID"/);
+    assert.doesNotMatch(html, /deepseek-v4-flash|>high</i);
+    assert.doesNotMatch(html, /cpwb-session-archive-trigger/);
     assert.doesNotMatch(html, /cpwb-global-sidebar|cpwb-sidebar-brand-footer/);
   } finally {
     clearWorkbenchSessions();

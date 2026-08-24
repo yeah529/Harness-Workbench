@@ -1,7 +1,8 @@
 import React from "react";
-import { ArrowRight, Books, FolderOpen, PaperPlaneTilt, Sparkle, UserCircle } from "@phosphor-icons/react";
+import { ArrowRight, Books, CaretDown, FolderOpen, Image, PaperPlaneTilt, Sparkle, UserCircle, X } from "@phosphor-icons/react";
 
 import { GlobalModal } from "./globalModal.js";
+import { loadPendingModelCatalog, submitPendingDraft } from "./pendingSession.js";
 
 const OWNER_TYPES = [
   ["project", "项目", FolderOpen],
@@ -23,7 +24,7 @@ function sourcePreview(scope, state) {
     const kb = state.knowledgeBases?.find((item) => item.id === scope.id);
     return ["知识库文档 · " + (kb?.name || "当前知识库")];
   }
-  return ["默认不继承上下文，可在会话中使用 @ 添加"];
+  return ["默认不继承上下文；首次发送后可使用 @ 添加"];
 }
 
 export function NewSessionDialog({ open, store, initialScope, onClose, onStart }) {
@@ -90,40 +91,143 @@ export function NewSessionDialog({ open, store, initialScope, onClose, onStart }
           "进入新会话", React.createElement(ArrowRight, { size: 17, "aria-hidden": true })))));
 }
 
-export function DraftConversation({ store, onActivated, onCancel }) {
+function modelOption(groups, selection) {
+  for (const group of groups) {
+    const model = group.models?.find((item) => item.id === selection?.model);
+    if (model && group.id === selection?.provider) return { group, model };
+  }
+  return null;
+}
+
+function pendingScopeName(draft, state) {
+  if (draft.scope.kind === "project") return state.projects?.find((item) => item.id === draft.scope.id)?.name || "项目工作台";
+  if (draft.scope.kind === "knowledge_base") return state.knowledgeBases?.find((item) => item.id === draft.scope.id)?.name || "知识库";
+  return "独立会话";
+}
+
+export function DraftConversation({ store, sessions, workspaces, connection, conversation, onActivated, onCancel }) {
   const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const draft = state.draft;
   const [text, setText] = React.useState(draft?.text || "");
+  const [catalog, setCatalog] = React.useState({ groups: [], failures: [] });
+  const [selection, setSelection] = React.useState(null);
+  const [modelOpen, setModelOpen] = React.useState(false);
+  const [attachments, setAttachments] = React.useState([]);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [localError, setLocalError] = React.useState(null);
+  const fileInput = React.useRef(null);
 
   React.useEffect(function () { setText(draft?.text || ""); }, [draft?.sessionId, draft?.status]);
+  React.useEffect(function () {
+    let active = true;
+    loadPendingModelCatalog(connection).then((value) => { if (active) setCatalog(value); }).catch((error) => { if (active) setLocalError(error.message); });
+    return function () { active = false; };
+  }, [connection]);
   if (!draft) return null;
-  const busy = draft.status === "activating";
-  const submit = function (event) {
+  const busy = submitting || draft.status === "materializing";
+  const chosen = modelOption(catalog.groups || [], selection);
+  const modelLabel = chosen
+    ? chosen.model.name + (selection.reasoningEffort ? " · " + (chosen.model.reasoning?.efforts?.find((item) => item.id === selection.reasoningEffort)?.name || selection.reasoningEffort) : "")
+    : "DSH 默认 · 自动";
+  const submit = async function (event) {
     event.preventDefault();
-    const action = draft.status === "draft_failed" ? store.actions.retryDraft : store.actions.activateDraft;
-    action({ text }).then(onActivated).catch(function () {});
+    if (!text.trim() || busy) return;
+    setSubmitting(true);
+    setLocalError(null);
+    try {
+      const result = await submitPendingDraft({
+        store,
+        sessions,
+        workspaces,
+        connection,
+        conversation,
+        text,
+        imageIds: attachments.map((item) => item.id),
+        modelSelection: selection,
+      });
+      await onActivated?.(result);
+    } catch (error) {
+      setLocalError(error.message || "首条消息发送失败");
+    } finally {
+      setSubmitting(false);
+    }
   };
   const scopeLabel = draft.scope.kind === "project" ? "项目会话" : draft.scope.kind === "knowledge_base" ? "知识库会话" : "独立会话";
+  const scopeName = pendingScopeName(draft, state);
+  const chooseFiles = function (event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return;
+    try {
+      const created = conversation?.createDraftImages?.(files) || [];
+      setAttachments((current) => [...current, ...created]);
+      setLocalError(null);
+    } catch (error) {
+      setLocalError(error.message || "图片读取失败");
+    }
+  };
+  const removeAttachment = function (id) {
+    conversation?.releaseDraftImage?.(id);
+    setAttachments((current) => current.filter((item) => item.id !== id));
+  };
+  const cancel = function () {
+    for (const attachment of attachments) conversation?.releaseDraftImage?.(attachment.id);
+    onCancel?.();
+  };
 
-  return React.createElement("main", { className: "cpwb-draft-conversation", "data-status": draft.status },
+  return React.createElement("main", { className: "cpwb-draft-conversation cpwb-pending-session", "data-status": draft.status },
     React.createElement("header", null,
-      React.createElement("span", null, scopeLabel),
-      React.createElement("strong", null, "新会话"),
-      React.createElement("button", { type: "button", onClick: onCancel }, "退出草稿")),
-    React.createElement("section", { className: "cpwb-draft-empty" },
-      React.createElement(Sparkle, { size: 26, weight: "duotone", "aria-hidden": true }),
-      React.createElement("h2", null, draft.status === "draft_failed" ? "首次响应失败，可原地重试" : "从第一条消息开始"),
-      React.createElement("p", null, "发送后才会创建原生 DSH Session，并继续使用完整的模型、推理、文件、工具与 Subagent 能力。")),
-    React.createElement("form", { className: "cpwb-draft-composer", onSubmit: submit },
-      React.createElement("textarea", {
-        value: text,
-        disabled: busy,
-        onChange: (event) => setText(event.target.value),
-        placeholder: "描述你想要构建的内容…",
-        "aria-label": "首条消息",
-      }),
-      draft.error ? React.createElement("p", { className: "cpwb-draft-error", role: "alert" }, draft.error.message) : null,
-      React.createElement("button", { type: "submit", disabled: busy || !text.trim() },
-        React.createElement(PaperPlaneTilt, { size: 18, weight: "fill", "aria-hidden": true }),
-        busy ? "正在连接" : draft.status === "draft_failed" ? "重试" : "发送")));
+      React.createElement("div", { className: "cpwb-pending-identity" },
+        React.createElement("span", null, scopeLabel),
+        React.createElement("strong", null, "新会话"),
+        React.createElement("small", null, "Session ID 将在首次发送时生成")),
+      React.createElement("button", { type: "button", onClick: cancel }, "退出草稿")),
+    React.createElement("section", { className: "cpwb-pending-main" },
+      React.createElement("section", { className: "cpwb-draft-empty" },
+        React.createElement(Sparkle, { size: 26, weight: "duotone", "aria-hidden": true }),
+        React.createElement("h2", null, draft.status === "admitted" ? "消息已发送，正在确认会话" : "从第一条消息开始"),
+        React.createElement("p", null, "发送前不创建 Session。发送后原地进入完整 DSH 会话，模型响应会立即开始流式显示。")),
+      React.createElement("form", { className: "cpwb-draft-composer", onSubmit: submit },
+        attachments.length ? React.createElement("div", { className: "cpwb-pending-attachments", "aria-label": "待发送图片" }, attachments.map((attachment) => React.createElement("figure", { key: attachment.id },
+          React.createElement("img", { src: attachment.previewUrl, alt: attachment.file?.name || "待发送图片" }),
+          React.createElement("button", { type: "button", onClick: () => removeAttachment(attachment.id), "aria-label": "移除 " + (attachment.file?.name || "图片") }, React.createElement(X, { size: 13, "aria-hidden": true }))))) : null,
+        React.createElement("textarea", {
+          value: text,
+          disabled: busy,
+          onChange: (event) => setText(event.target.value),
+          placeholder: "描述你想要构建的内容…",
+          "aria-label": "首条消息",
+        }),
+        React.createElement("div", { className: "cpwb-pending-composer-tools" },
+          React.createElement("input", { ref: fileInput, type: "file", accept: "image/*", multiple: true, hidden: true, onChange: chooseFiles }),
+          React.createElement("button", { type: "button", className: "cpwb-pending-tool", onClick: () => fileInput.current?.click(), "aria-label": "添加图片", title: "添加图片" }, React.createElement(Image, { size: 20, "aria-hidden": true })),
+          React.createElement("div", { className: "cpwb-pending-model" },
+            React.createElement("button", { type: "button", className: "cpwb-pending-model-trigger", onClick: () => setModelOpen((value) => !value), "aria-expanded": modelOpen, "aria-label": "选择模型与推理强度" },
+              React.createElement("span", null, modelLabel), React.createElement(CaretDown, { size: 15, "aria-hidden": true })),
+            modelOpen ? React.createElement("div", { className: "cpwb-pending-model-menu", role: "dialog", "aria-label": "模型与推理强度" },
+              React.createElement("div", { className: "cpwb-pending-model-menu-head" }, React.createElement("span", null, "MODEL ROUTING"), React.createElement("button", { type: "button", onClick: () => { setSelection(null); setModelOpen(false); } }, "使用默认")),
+              (catalog.groups || []).map((group) => React.createElement("section", { key: group.id },
+                React.createElement("h3", null, group.name),
+                group.models?.map((model) => React.createElement("button", {
+                  type: "button",
+                  key: model.id,
+                  className: selection?.provider === group.id && selection?.model === model.id ? "cpwb-active" : "",
+                  onClick: () => setSelection({ provider: group.id, model: model.id, reasoningEffort: model.reasoning?.defaultEffort }),
+                }, React.createElement("strong", null, model.name), model.description ? React.createElement("small", null, model.description) : null)))),
+              chosen?.model?.reasoning?.efforts?.length ? React.createElement("div", { className: "cpwb-pending-reasoning" },
+                React.createElement("span", null, "REASONING EFFORT"),
+                React.createElement("div", null, chosen.model.reasoning.efforts.map((effort) => React.createElement("button", {
+                  type: "button", key: effort.id, className: selection?.reasoningEffort === effort.id ? "cpwb-active" : "",
+                  onClick: () => setSelection({ ...selection, reasoningEffort: effort.id }),
+                }, effort.name)))) : null) : null),
+          React.createElement("button", { className: "cpwb-pending-send", type: "submit", disabled: busy || !text.trim() },
+            React.createElement(PaperPlaneTilt, { size: 18, weight: "fill", "aria-hidden": true }),
+            busy ? "正在连接" : draft.status === "admitted" ? "完成连接" : "发送")),
+        draft.error || localError ? React.createElement("p", { className: "cpwb-draft-error", role: "alert" }, localError || draft.error?.message) : null)),
+    React.createElement("aside", { className: "cpwb-pending-context", "aria-label": "新会话上下文" },
+      React.createElement("span", null, draft.scope.kind === "project" ? "PROJECT SYSTEM" : draft.scope.kind === "knowledge_base" ? "KNOWLEDGE SYSTEM" : "SESSION SYSTEM"),
+      React.createElement("h2", null, scopeName),
+      React.createElement("small", null, "首条消息发送后激活完整工具栏"),
+      React.createElement("div", null,
+        sourcePreview(draft.scope, state).map((label) => React.createElement("article", { key: label }, React.createElement(Sparkle, { size: 14, "aria-hidden": true }), React.createElement("span", null, label))))));
 }

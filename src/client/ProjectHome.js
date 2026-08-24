@@ -58,7 +58,7 @@ export function resolveHomeMetrics({
   };
 }
 
-function ProjectCard({ project, index, enterProject, busyId, setBusyId, setError, onRename, onDelete }) {
+function ProjectCard({ project, index, enterProject, busyId, setBusyId, setError, onRename, onDelete, onViewSessions }) {
   const recent = project.recentSession || null;
   const mountedRef = React.useRef(true);
   React.useEffect(function () {
@@ -120,6 +120,15 @@ function ProjectCard({ project, index, enterProject, busyId, setBusyId, setError
     React.createElement("span", null, formatRecent(recent && recent.updatedAt))),
   React.createElement("div", { className: "cpwb-card-actions" },
     React.createElement("span", { className: "cpwb-card-enter" }, busy ? "连接中…" : (recent ? "继续会话" : "进入项目"), React.createElement(ArrowUpRight, { size: 14, weight: "regular", "aria-hidden": true })),
+    React.createElement("button", {
+      type: "button",
+      className: "cpwb-card-sessions",
+      onClick: function (event) { event.stopPropagation(); onViewSessions?.(project); },
+      onKeyDown: function (event) { event.stopPropagation(); },
+      disabled: busyId != null,
+      "aria-label": "查看项目 " + project.name + " 的全部会话",
+      title: "查看全部会话",
+    }, "全部会话"),
     React.createElement("button", {
       type: "button",
       className: "cpwb-card-new",
@@ -221,6 +230,7 @@ export function ProjectHome(props) {
                   setError: setEnterError,
                   onRename: beginRename,
                   onDelete: setDeleteTarget,
+                  onViewSessions: props.openProjectSessions,
                 });
               }))),
           React.createElement("section", { className: "cpwb-home-section cpwb-knowledge-entry" },

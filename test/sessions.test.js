@@ -239,11 +239,12 @@ test("native pre-step resolves dynamic context sources for every prompt", async 
 });
 
 /** Boot the real SQLite + repositories + session service over a mock ctx. */
-async function makeService({ presets, retriever, resumeError, sessionPersistence, sessionQuery, sessionWorkspace, renameNativeSession, deleteNativeSession, sessionIndex } = {}) {
+async function makeService({ presets, retriever, resumeError, sessionPersistence, sessionQuery, sessionWorkspace, renameNativeSession, deleteNativeSession, sessionIndex, subagents } = {}) {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
   const { ctx, live, workspaces, records, seedLiveAgent } = makeMockCtx({ presets, resumeError, sessionPersistence, sessionQuery });
+  if (subagents) ctx.subagents = subagents;
   const service = createSessionService({
     ctx,
     repos,
@@ -283,6 +284,34 @@ test("unified draft activation creates one scoped DSH session on first prompt", 
     assert.equal(persisted.title, "完成接口验收");
     assert.equal(s.live.get(result.sessionId).calls.followup.length, 1);
     assert.equal(s.live.get(result.sessionId).calls.followup[0].content[0].text, "完成接口验收。继续补齐前端。");
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("pending draft materializes without prompting and becomes visible only after admission confirmation", async () => {
+  const s = await makeService();
+  try {
+    const project = s.repos.projects.create({ name: "Project", workspaceId: "ws-project" });
+    s.workspaces.set("ws-project", { id: "ws-project", path: "/tmp/project", attachSession: async () => {} });
+
+    const pending = await s.service.materializeDraft({
+      scope: { kind: "project", id: project.id },
+      title: "首次消息。后面的内容不属于标题",
+    });
+
+    assert.equal(s.records.create.length, 1);
+    assert.equal(pending.lifecycleStatus, "draft_failed");
+    assert.equal(pending.title, "首次消息");
+    assert.equal(s.live.get(pending.sessionId).calls.followup.length, 0);
+    assert.equal(s.repos.workbenchSessions.latest({ scopeKind: "project", scopeId: project.id }), null);
+
+    const active = await s.service.confirmDraft({ sessionId: pending.sessionId });
+    assert.equal(active.lifecycleStatus, "active");
+    assert.equal(s.repos.workbenchSessions.latest({ scopeKind: "project", scopeId: project.id }).sessionId, pending.sessionId);
+
+    const repeated = await s.service.confirmDraft({ sessionId: pending.sessionId });
+    assert.equal(repeated.lifecycleStatus, "active");
   } finally {
     await s.cleanup();
   }
@@ -928,6 +957,45 @@ test("scheduled sessions remain outside the interactive Workbench projection", a
     assert.equal(s.repos.workbenchSessions.get(created.sessionId), null);
     assert.equal(await s.service.release(created.sessionId), true);
     assert.equal(s.live.get(created.sessionId).disposed(), 1);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test("scheduled subagent execution creates a visible project parent with a durable restricted child", async () => {
+  const starts = [];
+  const disposals = [];
+  const subagents = {
+    list: () => ["acp", "spawn"],
+    getProvider(name) { return { name, capabilities: { toolFilter: name === "spawn" } }; },
+    async start(name, request) {
+      starts.push({ name, request });
+      return {
+        id: "session-subagent-schedule-1",
+        localAgent: {},
+        result: Promise.resolve({ output: [{ type: "text", text: "定时任务已完成" }], stopReason: "completed" }),
+        async dispose() { disposals.push("session-subagent-schedule-1"); },
+      };
+    },
+  };
+  const s = await makeService({ subagents });
+  try {
+    const project = s.repos.projects.create({ name: "Project", workspaceId: "ws-project" });
+    s.workspaces.set("ws-project", { id: "ws-project", path: "/tmp/project", attachSession: async () => {} });
+
+    const result = await s.service.runScheduledSubagent({ projectId: project.id, title: "夜间接口审计", prompt: "检查接口并汇报" });
+
+    assert.equal(result.childSessionId, "session-subagent-schedule-1");
+    assert.equal(result.text, "定时任务已完成");
+    const persisted = s.repos.workbenchSessions.get(result.sessionId);
+    assert.deepEqual(persisted.scope, { kind: "project", id: project.id });
+    assert.equal(persisted.title, "夜间接口审计");
+    assert.equal(persisted.lifecycleStatus, "active");
+    assert.equal(starts[0].name, "spawn");
+    assert.equal(starts[0].request.parent, s.ctx.agents.get(result.sessionId));
+    assert.deepEqual(starts[0].request.toolFilter, { allow: [] });
+    assert.deepEqual(starts[0].request.prompt, [{ type: "text", text: "检查接口并汇报" }]);
+    assert.deepEqual(disposals, ["session-subagent-schedule-1"]);
   } finally {
     await s.cleanup();
   }

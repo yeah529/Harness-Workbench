@@ -357,7 +357,7 @@ export function createRepositories(db) {
       ).all(...params, safeLimit, safeOffset).map(mapWorkbenchSession);
     },
 
-    listAll({ scopeKind = null, query = "", lifecycleStatus = null, archived = null, limit = 100, offset = 0 } = {}) {
+    listAll({ scopeKind = null, scopeId = null, query = "", lifecycleStatus = null, archived = null, limit = 100, offset = 0 } = {}) {
       const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
       const safeOffset = Math.max(0, Number(offset) || 0);
       const filters = [];
@@ -366,6 +366,11 @@ export function createRepositories(db) {
         if (!SESSION_SCOPE_KINDS.has(scopeKind)) throw new TypeError("invalid session scope kind");
         filters.push("ws.scope_kind = ?");
         params.push(scopeKind);
+      }
+      if (scopeId != null) {
+        if (!scopeKind || scopeKind === "independent") throw new TypeError("scopeId requires a project or knowledge-base scope");
+        filters.push("ws.scope_id IS ?");
+        params.push(Number(scopeId));
       }
       if (lifecycleStatus != null) {
         if (!SESSION_LIFECYCLE_STATUSES.has(lifecycleStatus)) throw new TypeError("invalid session lifecycle status");
@@ -387,13 +392,18 @@ export function createRepositories(db) {
       ).all(...params, safeLimit, safeOffset).map(mapWorkbenchSession);
     },
 
-    countAll({ scopeKind = null, query = "", lifecycleStatus = null, archived = null } = {}) {
+    countAll({ scopeKind = null, scopeId = null, query = "", lifecycleStatus = null, archived = null } = {}) {
       const filters = [];
       const params = [];
       if (scopeKind) {
         if (!SESSION_SCOPE_KINDS.has(scopeKind)) throw new TypeError("invalid session scope kind");
         filters.push("ws.scope_kind = ?");
         params.push(scopeKind);
+      }
+      if (scopeId != null) {
+        if (!scopeKind || scopeKind === "independent") throw new TypeError("scopeId requires a project or knowledge-base scope");
+        filters.push("ws.scope_id IS ?");
+        params.push(Number(scopeId));
       }
       if (lifecycleStatus != null) {
         if (!SESSION_LIFECYCLE_STATUSES.has(lifecycleStatus)) throw new TypeError("invalid session lifecycle status");

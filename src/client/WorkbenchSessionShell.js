@@ -1,10 +1,10 @@
 import React from "react";
-import { Archive, ArrowCounterClockwise, Books, CalendarCheck, ClockCountdown, File, FolderOpen, MagnifyingGlass, Note, Paperclip, Robot, TreeStructure } from "@phosphor-icons/react";
+import { Books, CalendarCheck, Check, ClockCountdown, Copy, File, FolderOpen, MagnifyingGlass, Note, Paperclip, Plus, Robot, TreeStructure } from "@phosphor-icons/react";
 import { getWorkbenchSession } from "./workbenchSessions.js";
 import { useHomeOpen } from "./ProjectHome.js";
 import { Todos } from "./Todos.js";
 import { KnowledgeBase } from "./KnowledgeBase.js";
-import { Automation } from "./Automation.js";
+import { Automation, filterSchedules, ScheduleDialog } from "./Automation.js";
 import {
   RAIL_STYLE_PROPS,
   RAIL_WIDTH_DEFAULT,
@@ -16,11 +16,49 @@ import {
   restoreInlineStyle,
 } from "./rail.js";
 import { DrawerDialog, useWorkbenchLayoutMode } from "./responsive.js";
-import { useNativeModelSelectionLabel } from "./ModelIndicator.js";
 import { SubagentDrawer } from "./SubagentDrawer.js";
 import { DEFAULT_TIME_ZONE, localDateTimeParts } from "./timezone.js";
 
 export { parseNativeModelSelectionLabel } from "./ModelIndicator.js";
+
+export function compactSessionId(sessionId) {
+  const value = String(sessionId || "");
+  return value.length > 26 ? value.slice(0, 14) + "…" + value.slice(-8) : value;
+}
+
+function SessionIdCopy({ sessionId }) {
+  const [copied, setCopied] = React.useState(false);
+  const resetTimer = React.useRef(null);
+
+  React.useEffect(function () {
+    return function () { if (resetTimer.current) clearTimeout(resetTimer.current); };
+  }, []);
+
+  const copy = async function () {
+    const writeText = globalThis.navigator?.clipboard?.writeText;
+    if (typeof writeText !== "function") return;
+    try {
+      await writeText.call(globalThis.navigator.clipboard, sessionId);
+      setCopied(true);
+      if (resetTimer.current) clearTimeout(resetTimer.current);
+      resetTimer.current = setTimeout(() => setCopied(false), 1400);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return React.createElement("span", { className: "cpwb-session-id", title: sessionId },
+    React.createElement("code", null, compactSessionId(sessionId)),
+    React.createElement("button", {
+      type: "button",
+      className: "cpwb-session-id-copy",
+      onClick: copy,
+      "aria-label": "复制 Session ID",
+      title: copied ? "已复制" : "复制完整 Session ID",
+    }, copied
+      ? React.createElement(Check, { size: 14, weight: "bold", "aria-hidden": true })
+      : React.createElement(Copy, { size: 14, weight: "regular", "aria-hidden": true })));
+}
 
 export const PROJECT_TOOL_TABS = Object.freeze([
   ["todos", "待办", CalendarCheck],
@@ -150,21 +188,31 @@ function instantDateKey(value, timeZone) {
   } catch { return ""; }
 }
 
-export function GlobalSchedulesPanel({ state, store }) {
+export function GlobalSchedulesPanel({ state, store, initialDialog = false }) {
   React.useEffect(function () { store.actions.loadGlobalSchedules?.().catch(function () {}); }, [store]);
   const rows = Array.isArray(state.globalSchedules) ? state.globalSchedules : [];
+  const [dialogOpen, setDialogOpen] = React.useState(initialDialog);
+  const [query, setQuery] = React.useState("");
   const [projectFilter, setProjectFilter] = React.useState("all");
   const [statusFilter, setStatusFilter] = React.useState("all");
   const [dateFilter, setDateFilter] = React.useState("");
   const timeZone = state.settings?.timezone || DEFAULT_TIME_ZONE;
-  const visibleRows = rows.filter((schedule) => {
+  const visibleRows = filterSchedules(rows, query).filter((schedule) => {
     if (projectFilter !== "all" && String(schedule.projectId) !== projectFilter) return false;
     if (statusFilter === "enabled" && schedule.enabled === false) return false;
     if (statusFilter === "paused" && schedule.enabled !== false) return false;
     if (dateFilter && instantDateKey(schedule.nextRunAt || schedule.startsAt, timeZone) !== dateFilter) return false;
     return true;
   });
+  const action = state.action;
+  const save = (payload) => store.actions.createGlobalSchedule(payload).then(() => setDialogOpen(false));
   return React.createElement("div", { className: "cpwb-global-schedules" },
+    React.createElement("div", { className: "cpwb-tool-head cpwb-global-schedule-head" },
+      React.createElement("span", null, "GLOBAL SCHEDULES"),
+      React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-primary cpwb-button-content", onClick: () => setDialogOpen(true) }, React.createElement(Plus, { size: 14, weight: "bold", "aria-hidden": true }), React.createElement("span", null, "新增定时"))),
+    React.createElement("label", { className: "cpwb-tool-search" },
+      React.createElement(MagnifyingGlass, { size: 15, "aria-hidden": true }),
+      React.createElement("input", { type: "search", value: query, onChange: (event) => setQuery(event.target.value), placeholder: "搜索任务名称或提示词", "aria-label": "搜索全局定时任务" })),
     React.createElement("div", { className: "cpwb-context-filters", "aria-label": "筛选全局定时任务" },
       React.createElement("label", null, "项目", React.createElement("select", { value: projectFilter, onChange: (event) => setProjectFilter(event.target.value) },
         React.createElement("option", { value: "all" }, "全部项目"),
@@ -182,7 +230,15 @@ export function GlobalSchedulesPanel({ state, store }) {
       React.createElement("span", null, project?.name || "项目 #" + schedule.projectId),
       React.createElement("strong", null, schedule.name),
       React.createElement("small", null, (schedule.enabled ? "已启用" : "已暂停") + " · " + (schedule.nextRunAt || schedule.startsAt || "待计算")));
-    })));
+    })),
+    dialogOpen ? React.createElement(ScheduleDialog, {
+      projects: state.projects || [],
+      timeZone,
+      busy: action?.type === "createGlobalSchedule" && action.status === "running",
+      error: action?.type === "createGlobalSchedule" && action.status === "error" ? action.error : null,
+      onSave: save,
+      onClose: () => setDialogOpen(false),
+    }) : null);
 }
 
 function SessionContextPanel({ sessionId, scope, state, store }) {
@@ -250,7 +306,6 @@ export function WorkbenchSessionShell(props) {
   useSessionHeaderSeat(visible && Boolean(sessionId?.startsWith?.("session-cpwb-")));
   const layoutMode = useWorkbenchLayoutMode(props.layoutMode);
   const projectTriggerRef = React.useRef(null);
-  const nativeSelectionLabel = useNativeModelSelectionLabel(sessionId);
   const [subagentOpen, setSubagentOpen] = React.useState(false);
   const subagentCatalog = sessionSnapshot?.subagentsByParent?.[sessionId];
   const subagentCount = Array.isArray(subagentCatalog?.entries)
@@ -275,7 +330,7 @@ export function WorkbenchSessionShell(props) {
     let timer = null;
     const refresh = async function () {
       attempts += 1;
-      await props.store.actions.loadRecentSessions({ limit: 8 }).catch(function () {});
+      await props.store.actions.loadRecentSessions().catch(function () {});
       if (!stopped && attempts < 12) timer = setTimeout(refresh, 1500);
     };
     void refresh();
@@ -344,11 +399,6 @@ export function WorkbenchSessionShell(props) {
     : knowledgeBaseId != null
       ? "向量检索已启用"
       : "未关联项目 · 未启用知识库";
-  const selection = entry?.selection || {};
-  const selectionLabel = nativeSelectionLabel
-    || [selection.model, selection.reasoningEffort].filter(Boolean).join(" · ")
-    || "模型由会话选择器控制";
-
   return React.createElement("div", {
     className: "cpwb-session-chrome cpwb-workbench-overlay cpwb-has-context-rail " + (projectId != null ? "cpwb-project-context" : "cpwb-standalone-context"),
     "data-session-context": scope?.kind || "unknown",
@@ -358,26 +408,17 @@ export function WorkbenchSessionShell(props) {
   React.createElement("header", { className: "cpwb-session-context-bar", "aria-label": "会话上下文" },
     React.createElement("div", { className: "cpwb-session-context-identity" },
       React.createElement("span", { className: "cpwb-session-context-kind" }, contextType),
-      React.createElement("strong", null, contextName)),
+      React.createElement("strong", null, contextName),
+      React.createElement(SessionIdCopy, { sessionId })),
     React.createElement("div", { className: "cpwb-session-context-meta" },
       React.createElement("small", null, contextDetail),
       React.createElement("button", {
         type: "button",
-        className: "cpwb-session-archive-trigger",
-        onClick: () => (entry?.archivedAt ? props.onRestore?.() : props.onArchive?.())?.catch?.(function () {}),
-        "aria-label": entry?.archivedAt ? "恢复当前会话" : "归档当前会话",
-        title: entry?.archivedAt ? "恢复当前会话" : "归档当前会话",
-      }, entry?.archivedAt
-        ? React.createElement(ArrowCounterClockwise, { size: 16, weight: "regular", "aria-hidden": true })
-        : React.createElement(Archive, { size: 16, weight: "regular", "aria-hidden": true })),
-       React.createElement("button", {
-         type: "button",
         className: "cpwb-session-subagent-trigger",
         onClick: () => setSubagentOpen(true),
         "aria-label": "打开子智能体活动，共 " + subagentCount + " 个",
         "aria-expanded": subagentOpen,
-      }, React.createElement(Robot, { size: 16, weight: "duotone", "aria-hidden": true }), React.createElement("span", null, "SUBAGENT"), React.createElement("b", null, String(subagentCount).padStart(2, "0"))),
-      React.createElement("em", null, selectionLabel))),
+      }, React.createElement(Robot, { size: 16, weight: "duotone", "aria-hidden": true }), React.createElement("span", null, "SUBAGENT"), React.createElement("b", null, String(subagentCount).padStart(2, "0"))))),
   dockedContextRail ? contextRail(false) : null,
   drawerContextRail ? React.createElement("button", {
     ref: projectTriggerRef,

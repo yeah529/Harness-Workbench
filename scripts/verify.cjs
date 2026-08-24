@@ -45,7 +45,8 @@ function verifySources() {
 
   for (const token of ["新建会话", "首页", "知识库", "最近会话", "查看全部会话", "SidebarBrand"]) requireText(sidebar, token, "WorkbenchSidebar.js");
   requireText(sidebar, "@phosphor-icons/react", "WorkbenchSidebar.js");
-  for (const token of ['viewBox="0 0 190 74"', "Harness Workbench", "HARNESS", "WORKBENCH"]) requireText(logo, token, "logo SVG");
+  for (const token of ['viewBox="0 0 306 72"', 'viewBox="0 0 64 64"', 'viewBox="0 0 236 66"', "Harness Workbench", "#4de8f4", "#ffb51b"]) requireText(logo, token, "logo SVG");
+  forbid(logo, /<text|font-family|font-weight/, "logo SVG");
 
   requireText(settingsSlot, 'ctx.slots.inject("settings.section"', "settingsSlot.js");
   forbid(settingsSlot, /children\s*:/, "settingsSlot.js");
@@ -92,8 +93,12 @@ async function verifyBundle() {
       const scope = body.scope;
       sessionState = { ids: [sessionId], byId: { [sessionId]: { sessionId, cwd: "/tmp/workbench", blank: true } }, current: sessionId, bindingId: sessionId, phase: "ready" };
       workspaceState = { items: [{ workspaceId: "ws-test", path: "/tmp/workbench", sessionIds: [sessionId] }], phase: "ready" };
-      const value = { sessionId, scope, lifecycleStatus: "active", citations: [] };
+      const value = { sessionId, scope, title: body.title, lifecycleStatus: "draft_failed" };
       return { ok: true, status: 201, json: async () => value, text: async () => JSON.stringify(value) };
+    }
+    if (pathname.endsWith("/chat/sessions/session-cpwb-project") && init.method === "PATCH") {
+      const value = { sessionId: "session-cpwb-project", scope: { kind: "project", id: 1 }, title: "verify unified session", lifecycleStatus: "active" };
+      return { ok: true, status: 200, json: async () => value, text: async () => JSON.stringify(value) };
     }
     const value = pathname.endsWith("/health")
       ? { ok: true, reachable: true }
@@ -127,6 +132,7 @@ async function verifyBundle() {
     },
     layout: {},
     connection: {},
+    conversation: {},
     inputTriggers: { registerSource() { return () => {}; } },
     workspaces: {
       pickDirectory: async () => null,
@@ -167,11 +173,13 @@ async function verifyBundle() {
   const store = exports.getStore();
   store.actions.startDraft({ scope: { kind: "project", id: 1 } });
   if (sessionCreates.length !== 0) throw new Error("local draft must not create a DSH session");
-  await store.actions.activateDraft({ text: "verify unified session" });
+  await store.actions.materializeDraft({ text: "verify unified session" });
   const created = sessionCreates.at(-1);
-  if (created.scope?.kind !== "project" || created.scope?.id !== 1 || created.question !== "verify unified session") {
-    throw new Error("first prompt must activate exactly one canonical project session");
+  if (created.scope?.kind !== "project" || created.scope?.id !== 1 || created.title !== "verify unified session") {
+    throw new Error("first send must materialize exactly one canonical project session");
   }
+  store.actions.markDraftAdmitted();
+  await store.actions.confirmDraft();
   for (const dispose of disposers.reverse()) await dispose();
   console.log("bundle exports, CSS injection, and Slot composition: OK");
 }

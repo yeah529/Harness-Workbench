@@ -3,14 +3,17 @@ import {
   Books,
   Archive,
   ChatsCircle,
+  FolderOpen,
   GearSix,
   House,
   ListBullets,
   Plus,
 } from "@phosphor-icons/react";
-import { SidebarBrand } from "./SidebarBrand.js";
+import { HarnessWordmark, SidebarBrand, WorkbenchNodeMark } from "./SidebarBrand.js";
+import { DEFAULT_TIME_ZONE, localDateTimeParts } from "./timezone.js";
 
 const ICON_WEIGHT = "regular";
+const RECENT_SESSION_LIMIT = 20;
 
 function NavIcon({ component: Component }) {
   return React.createElement(Component, { size: 19, weight: ICON_WEIGHT, "aria-hidden": true });
@@ -28,62 +31,113 @@ function sessionScope(session) {
   return { kind: session?.scopeKind, id: session?.scopeId ?? null };
 }
 
-function sameScope(left, right) {
-  return left?.kind === right?.kind && String(left?.id ?? "") === String(right?.id ?? "");
+function sessionType(session) {
+  const scope = sessionScope(session);
+  if (scope.kind === "project") return { Icon: FolderOpen, label: "项目会话", kind: "project" };
+  if (scope.kind === "knowledge_base") return { Icon: Books, label: "知识库会话", kind: "knowledge-base" };
+  return { Icon: ChatsCircle, label: "独立会话", kind: "independent" };
 }
 
-export function partitionSidebarSessions(sessions, currentScope, activeSessionId) {
-  const list = Array.isArray(sessions) ? sessions : [];
-  if (!currentScope) return { current: [], recent: list.slice(0, 8) };
-  const inCurrent = currentScope.kind === "independent"
-    ? list.filter((item) => item.sessionId === activeSessionId)
-    : list.filter((item) => sameScope(sessionScope(item), currentScope));
-  const excluded = new Set(inCurrent.map((item) => item.sessionId));
-  if (currentScope.kind === "independent" && activeSessionId) excluded.add(activeSessionId);
-  return {
-    current: inCurrent.slice(0, 3),
-    recent: list.filter((item) => !excluded.has(item.sessionId) && !sameScope(sessionScope(item), currentScope)).slice(0, 8),
-  };
+function calendarDay(parts) {
+  return Date.UTC(parts.year, parts.month - 1, parts.day) / 86_400_000;
 }
 
-function sessionButton(session, activeSessionId, onOpenSession) {
-  return React.createElement("button", {
-    type: "button",
+function activityGroupLabel(session, now, timeZone) {
+  const value = session?.updatedAt || session?.createdAt;
+  if (!value) return "更早";
+  try {
+    const activity = new Date(value);
+    const activityParts = localDateTimeParts(activity, timeZone);
+    const nowParts = localDateTimeParts(now, timeZone);
+    const daysAgo = calendarDay(nowParts) - calendarDay(activityParts);
+    if (daysAgo === 0) return "今天";
+    if (daysAgo === 1) return "昨天";
+    if (daysAgo >= 2 && daysAgo <= 6) {
+      return new Intl.DateTimeFormat("zh-CN", { timeZone, weekday: "long" }).format(activity);
+    }
+    if (activityParts.year === nowParts.year) return `${activityParts.month}月${activityParts.day}日`;
+    return `${activityParts.year}年${activityParts.month}月${activityParts.day}日`;
+  } catch {
+    return "更早";
+  }
+}
+
+export function groupSidebarSessionsByDate(sessions, {
+  now = new Date(),
+  timeZone = DEFAULT_TIME_ZONE,
+} = {}) {
+  const groups = [];
+  const byLabel = new Map();
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const label = activityGroupLabel(session, now, timeZone);
+    let group = byLabel.get(label);
+    if (!group) {
+      group = { label, sessions: [] };
+      byLabel.set(label, group);
+      groups.push(group);
+    }
+    group.sessions.push(session);
+  }
+  return groups;
+}
+
+function sessionButton(session, activeSessionId, onOpenSession, onArchiveSession) {
+  const title = session.title || session.displayTitle || session.contextName || "未命名会话";
+  const active = session.sessionId === activeSessionId;
+  const type = sessionType(session);
+  return React.createElement("div", {
     key: session.sessionId,
-    className: "cpwb-sidebar-recent" + (session.sessionId === activeSessionId ? " cpwb-active" : ""),
-    onClick: () => onOpenSession?.(session.sessionId),
-  },
-  React.createElement(NavIcon, { component: ChatsCircle }),
-  React.createElement("span", null,
-    React.createElement("strong", null, session.title || session.displayTitle || session.contextName || "未命名会话"),
-    React.createElement("small", null, contextLabel(session))));
+    className: "cpwb-sidebar-session-row" + (active ? " cpwb-active" : ""),
+    "data-session-kind": type.kind,
+  }, React.createElement("button", {
+      type: "button",
+      className: "cpwb-sidebar-recent",
+      onClick: () => onOpenSession?.(session.sessionId),
+      "aria-current": active ? "page" : undefined,
+    },
+    React.createElement("span", { className: "cpwb-sidebar-session-content" },
+      React.createElement("strong", null, title),
+      React.createElement("small", null,
+        React.createElement(type.Icon, {
+          size: 12,
+          weight: ICON_WEIGHT,
+          role: "img",
+          "aria-label": type.label,
+        }),
+        React.createElement("span", null, contextLabel(session))))),
+  React.createElement("button", {
+    type: "button",
+    className: "cpwb-sidebar-session-action",
+    onClick: () => onArchiveSession?.(session.sessionId),
+    "aria-label": "归档会话 " + title,
+    title: "归档会话",
+  }, React.createElement(Archive, { size: 15, weight: "regular", "aria-hidden": true })));
 }
 
 export function WorkbenchSidebar({
   page,
   activeSessionId,
   recentSessions = [],
-  currentScope = null,
-  currentContainerName = null,
-  currentContainerTotal = 0,
   onNavigate,
   onNewSession,
   onOpenSession,
+  onArchiveSession,
   settingsTrigger,
+  timeZone = DEFAULT_TIME_ZONE,
 }) {
-  const groups = partitionSidebarSessions(recentSessions, currentScope, activeSessionId);
+  const recents = (Array.isArray(recentSessions) ? recentSessions : []).slice(0, RECENT_SESSION_LIMIT);
   const nav = [
     ["home", "首页", House],
     ["sessions", "全部会话", ListBullets],
     ["archive", "归档会话", Archive],
     ["knowledge", "知识库", Books],
   ];
-  const containerKind = currentScope?.kind === "project" ? "当前项目" : currentScope?.kind === "knowledge_base" ? "当前知识库" : "当前会话";
   return React.createElement("aside", { className: "cpwb-global-sidebar", "aria-label": "Workbench 全局导航" },
     React.createElement("div", { className: "cpwb-sidebar-primary" },
       React.createElement("div", { className: "cpwb-sidebar-product" },
-        React.createElement("span", null, "DEEPSEEK"),
-        React.createElement("small", null, "HARNESS WORKBENCH")),
+        React.createElement("div", { className: "cpwb-sidebar-product-mark" }, React.createElement(WorkbenchNodeMark)),
+        React.createElement("div", { className: "cpwb-sidebar-product-copy" },
+          React.createElement(HarnessWordmark, { className: "cpwb-sidebar-product-wordmark" }))),
       React.createElement("button", { type: "button", className: "cpwb-sidebar-new", onClick: onNewSession },
         React.createElement(NavIcon, { component: Plus }), React.createElement("span", null, "新建会话")),
       React.createElement("nav", { className: "cpwb-sidebar-global-nav", "aria-label": "主导航" },
@@ -94,19 +148,18 @@ export function WorkbenchSidebar({
           "aria-current": page === id ? "page" : undefined,
           onClick: () => onNavigate?.(id),
         }, React.createElement(NavIcon, { component: IconComponent }), React.createElement("span", null, label))))),
-    currentScope ? React.createElement("section", { className: "cpwb-sidebar-current", "aria-label": containerKind },
-      React.createElement("div", { className: "cpwb-sidebar-section-label" }, containerKind, React.createElement("b", null, String(currentContainerTotal || groups.current.length).padStart(2, "0"))),
-      React.createElement("div", { className: "cpwb-sidebar-container-name" }, currentContainerName || "当前上下文"),
-      React.createElement("div", { className: "cpwb-sidebar-current-list" },
-        groups.current.length ? groups.current.map((session) => sessionButton(session, activeSessionId, onOpenSession)) : React.createElement("p", { className: "cpwb-sidebar-empty" }, "暂无已保存会话")),
-      React.createElement("button", { type: "button", className: "cpwb-sidebar-all", onClick: () => onNavigate?.("sessions") },
-        "查看全部 " + (currentContainerTotal || groups.current.length) + " 个会话")) : null,
-    React.createElement("section", { className: "cpwb-sidebar-recents", "aria-label": "其他最近会话" },
-      React.createElement("div", { className: "cpwb-sidebar-section-label" }, currentScope ? "其他最近会话" : "最近会话", React.createElement("b", null, String(groups.recent.length).padStart(2, "0"))),
+    React.createElement("section", { className: "cpwb-sidebar-recents", "aria-label": "最近会话" },
+      React.createElement("div", { className: "cpwb-sidebar-section-label" }, "最近会话", React.createElement("b", null, String(recents.length).padStart(2, "0"))),
       React.createElement("div", { className: "cpwb-sidebar-recent-scroll" },
-        groups.recent.length === 0
+        recents.length === 0
           ? React.createElement("p", { className: "cpwb-sidebar-empty" }, "暂无会话")
-          : groups.recent.map((session) => sessionButton(session, activeSessionId, onOpenSession)),
+          : groupSidebarSessionsByDate(recents, { timeZone }).map((group) => React.createElement("section", {
+            key: group.label,
+            className: "cpwb-sidebar-date-group",
+            "aria-label": group.label,
+          },
+          React.createElement("h3", { className: "cpwb-sidebar-date-label" }, group.label),
+          group.sessions.map((session) => sessionButton(session, activeSessionId, onOpenSession, onArchiveSession)))),
         React.createElement("button", { type: "button", className: "cpwb-sidebar-all", onClick: () => onNavigate?.("sessions") },
           "查看全部会话"))),
     React.createElement("div", { className: "cpwb-sidebar-fixed-footer" },

@@ -187,13 +187,14 @@ Workbench 可以重写 CSS 和外层组合，但不得声明第二个 `conversat
 2. 创建 DSH Session。
 3. 写入 Workbench 归属投影。
 4. 安装 Context Resolver。
-5. 将原始消息提交给 DSH。
-6. 首次响应成功后把会话标记为 `active`。
-7. 使用第一句有效用户正文生成标题并加入最近会话。
+5. 应用草稿页选择的模型、推理强度、图片和 `@` 来源。
+6. 将原始消息交给 DSH 原生 Prompt admission；Host 接受后立即返回，不等待 Assistant 完整响应。
+7. Prompt 被接受后把会话标记为 `active`，在当前页面原地绑定原生 ConversationRoot，并加入最近会话。
+8. 使用第一句有效用户正文生成标题；后续流式响应、队列、审批、工具、轨迹和 Subagent 活动全部由 DSH 原生会话继续承载。
 
 用户在发送前退出草稿页时直接丢弃本地草稿，不弹出删除确认，也不产生空会话。
 
-如果 DSH Session 已创建但首次提交或响应失败，Workbench 保存 `draft_failed` 状态和重试入口，不把它加入普通最近会话。重试成功后转为 `active`。用户输入必须保留。
+如果 DSH Session 创建或首次 Prompt admission 失败，Workbench 保存 `draft_failed` 状态和重试入口，不把它加入普通最近会话。重试成功后转为 `active`。用户输入、附件、模型和上下文选择必须保留。Prompt 已被接受后的模型生成错误属于正常 DSH 会话错误状态，不再回退为本地草稿。
 
 ## 10. 上下文来源
 
@@ -255,6 +256,9 @@ Workbench 持久化固定来源和停用覆盖；继承来源由 Context Resolve
 - 支持单次、Daily、Weekly 和 Monthly。
 - 创建与编辑统一使用日期加时间弹窗。
 - 所有触发与界面显示使用 Workbench 全局时区。
+- 项目和全局聚合列表都支持关键字搜索；全局入口可新增任务，但必须先选择所属项目。
+- 到期执行时创建一个可见的项目会话，并从该会话启动 DSH Subagent 执行任务；会话进入项目最近会话和全部会话，执行状态与结果可从会话及 Subagent 活动查看。
+- 定时 Subagent 默认继承现有定时任务安全工具策略，不因为自动执行而扩大文件写入、Shell 或网络权限。
 
 ### 11.3 每日总结
 
@@ -373,14 +377,14 @@ UI 不得直接操作数据库或 DSH 内部对象。服务通过稳定 ID、结
 现有 `/api/cpwb/chat/sessions` 继续作为统一会话入口，但契约改为统一 scope：
 
 - `GET /chat/sessions`：按 `scopeKind`、`scopeId`、搜索、时间和分页查询。
-- `POST /chat/sessions`：首条消息发送时接收 `{ scope: { kind, id? }, pinnedSources }`，创建 DSH Session 并保存 scope；独立会话的 `id` 必须为空。
-- `PATCH /chat/sessions/:id`：接收 `{ title }`、`{ scope }` 或 `{ retryDraft: true }` 中的一种操作，用于重命名、移动归属或恢复失败草稿。
+- `POST /chat/sessions`：接收 `{ scope: { kind, id? }, title, pinnedSources }`，只物化并绑定 DSH Session，不提交首条消息；独立会话的 `id` 必须为空。
+- `PATCH /chat/sessions/:id`：接收 `{ title }`、`{ scope }`、`{ archive: true }`、`{ restore: true }` 或 `{ confirmDraft: true }` 中的一种操作，用于重命名、移动归属、归档、恢复或在原生 Prompt admission 成功后发布草稿。
 - `DELETE /chat/sessions/:id`：永久删除单条会话。
 - `GET/PUT/DELETE /chat/sessions/:id/context`：管理固定来源和停用覆盖。
 - `POST /chat/sessions/:id/context/promote`：把消息级单次引用提升为固定来源。
 - `GET/POST/DELETE /projects/:id/knowledge-bases`：维护项目知识库关系。
 
-具体 Prompt 正文仍走 DSH 原生会话路径，不复制进 Workbench API。WorkbenchSessionAdapter 在首次提交前创建 Session，随后把用户原始输入交给原生 Prompt；失败时返回稳定的 `DRAFT_ACTIVATION_FAILED`、`CONTEXT_SOURCE_UNAVAILABLE` 或 DSH 原生错误。
+具体 Prompt 正文、模型选择、图片与消息级来源仍走 DSH RC.2 原生会话路径，不复制进 Workbench API。客户端在首次提交前物化 Session，把用户原始输入交给原生 Prompt admission，并在 admission 成功后调用 `confirmDraft`；失败时保留可重试草稿并返回稳定错误。
 
 ## 17. 错误处理
 

@@ -48,7 +48,7 @@ function parse(url) {
 }
 
 test("sidebar renders the approved hierarchy with one Workbench-styled settings action", () => {
-  const recentSessions = Array.from({ length: 10 }, (_, index) => ({
+  const recentSessions = Array.from({ length: 25 }, (_, index) => ({
     sessionId: "session-cpwb-" + index,
     title: "会话 " + index,
     scope: { kind: "independent", scopeId: null },
@@ -61,10 +61,14 @@ test("sidebar renders the approved hierarchy with one Workbench-styled settings 
   assert.match(html, /<button[^>]+cpwb-sidebar-settings/);
   assert.match(html, />设置</);
   assert.doesNotMatch(html, /cpwb-sidebar-settings-seat/);
-  assert.equal((html.match(/class="cpwb-sidebar-recent"/g) || []).length, 8);
-  assert.match(html, /viewBox="0 0 190 74"/);
-  assert.match(html, /HARNESS/);
-  assert.match(html, /WORKBENCH/);
+  assert.equal((html.match(/class="cpwb-sidebar-recent"/g) || []).length, 20);
+  assert.match(html, /最近会话/);
+  assert.doesNotMatch(html, /其他最近会话|当前项目|当前知识库|当前会话/);
+  assert.equal((html.match(/data-logo-part="approved-node-artwork"/g) || []).length, 1);
+  assert.match(html, /class="cpwb-sidebar-footer-wordmark"/);
+  assert.doesNotMatch(html, /data-logo-part="harness-core"/);
+  assert.equal((html.match(/data-logo-part="wordmark-main"/g) || []).length, 2);
+  assert.doesNotMatch(html, /<text/);
 });
 
 const ISO = "2026-08-17T00:00:00.000Z";
@@ -142,6 +146,7 @@ test("project card exposes rename and delete controls without replacing its open
   assert.match(html, /aria-label="重命名项目 P"/);
   assert.match(html, /aria-label="删除项目 P"/);
   assert.match(html, /aria-label="打开项目 P"/);
+  assert.match(html, /aria-label="查看项目 P 的全部会话"/);
 });
 
 test("api: knowledge-bases create drops undefined description", async () => {
@@ -521,7 +526,8 @@ function scenarioFetch(overrides = {}) {
 }
 
 test("store: refresh pulls health/projects/knowledgeBases/documents and reaches ready", async () => {
-  const api = createCpwbApi({ fetchImpl: scenarioFetch() });
+  const fetchImpl = scenarioFetch();
+  const api = createCpwbApi({ fetchImpl });
   const store = createWorkbenchStore(api);
   await store.actions.refresh();
   const s = store.getSnapshot();
@@ -532,6 +538,8 @@ test("store: refresh pulls health/projects/knowledgeBases/documents and reaches 
   assert.equal(s.health.reachable, true);
   assert.equal(s.error, null);
   assert.equal(s.citations.length, 0);
+  const recentRequest = fetchImpl.calls.find(({ url }) => parse(url).pathname === "/api/cpwb/chat/sessions");
+  assert.equal(parse(recentRequest.url).searchParams.get("limit"), "20");
 });
 
 test("store: automation prompt settings load and update the visible snapshot", async () => {

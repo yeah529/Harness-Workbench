@@ -443,8 +443,8 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
 
   const hasRunSchedule = typeof services.runSchedule === "function";
   const hasRunSummary = typeof services.runSummary === "function";
-  const hasSessions = typeof sessions?.activateDraft === "function"
-    && typeof sessions?.retryDraft === "function"
+  const hasSessions = typeof sessions?.materializeDraft === "function"
+    && typeof sessions?.confirmDraft === "function"
     && typeof sessions?.renameSession === "function"
     && typeof sessions?.moveSession === "function"
     && typeof sessions?.deleteSession === "function";
@@ -1167,16 +1167,15 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       throw new ApiError(501, "NOT_IMPLEMENTED", "session service is not available");
     }
     const body = await readJsonBody(req);
-    const allowedFields = new Set(["scope", "question", "pinnedSources", "oneShotSources"]);
+    const allowedFields = new Set(["scope", "title", "pinnedSources"]);
     const unknownField = Object.keys(body).find((field) => !allowedFields.has(field));
     if (unknownField) throw new ApiError(422, "INVALID_FIELD", "unknown field: " + unknownField);
     const input = {
       scope: normalizeSessionScope(body.scope),
-      question: requireString(body, "question"),
+      title: requireString(body, "title"),
       pinnedSources: optionalSourceList(body, "pinnedSources"),
-      oneShotSources: optionalSourceList(body, "oneShotSources"),
     };
-    const result = await sessions.activateDraft(input);
+    const result = await sessions.materializeDraft(input);
     ok(res, result, 201);
   }
 
@@ -1198,8 +1197,8 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       const scopeId = queryPositiveInt(scopeIdRaw, "scopeId");
       if (scopeId === undefined) throw new ApiError(422, "INVALID_SCOPE", "scopeId is required for this scopeKind");
       ok(res, {
-        items: repos.workbenchSessions.list({ scopeKind, scopeId, lifecycleStatus: "active", archived, limit, offset }),
-        total: repos.workbenchSessions.list({ scopeKind, scopeId, lifecycleStatus: "active", archived, limit: 500, offset: 0 }).length,
+        items: repos.workbenchSessions.listAll({ scopeKind, scopeId, query, lifecycleStatus: "active", archived, limit, offset }),
+        total: repos.workbenchSessions.countAll({ scopeKind, scopeId, query, lifecycleStatus: "active", archived }),
         limit,
         offset,
       });
@@ -1237,15 +1236,11 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
         : await sessions.restoreSession(sessionId));
       return;
     }
-    if (body.operation === "retryDraft") {
-      ok(res, await sessions.retryDraft({
-        sessionId,
-        question: requireString(body, "question"),
-        oneShotSources: optionalSourceList(body, "oneShotSources"),
-      }));
+    if (body.operation === "confirmDraft") {
+      ok(res, await sessions.confirmDraft({ sessionId }));
       return;
     }
-    throw new ApiError(422, "INVALID_OPERATION", "operation must be rename, move, archive, restore, or retryDraft");
+    throw new ApiError(422, "INVALID_OPERATION", "operation must be rename, move, archive, restore, or confirmDraft");
   }
 
   async function handleChatSessionDelete(req, res, { params }) {

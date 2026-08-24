@@ -23,6 +23,12 @@ function parts(value, timeZone) {
   return { date: `${date.year}-${pad(date.month)}-${pad(date.day)}`, time: `${pad(date.hour)}:${pad(date.minute)}` };
 }
 
+export function filterTodos(todos, query = "") {
+  const needle = String(query ?? "").trim().toLocaleLowerCase();
+  if (!needle) return Array.isArray(todos) ? todos : [];
+  return (Array.isArray(todos) ? todos : []).filter((todo) => String(todo?.title || "").toLocaleLowerCase().includes(needle));
+}
+
 export function organizeTodos(todos, { view = "pending", timeZone = DEFAULT_TIME_ZONE, now = new Date() } = {}) {
   const today = localDateKey(now, timeZone);
   const tomorrow = addLocalDays(today, 1);
@@ -73,11 +79,12 @@ function TodoDialog({ todo, onSave, onClose, busy, error, timeZone }) {
       React.createElement("div", { className: "cpwb-modal-actions" }, React.createElement("button", { type: "button", className: "cpwb-btn", onClick: onClose }, "取消"), React.createElement("button", { type: "submit", className: "cpwb-btn cpwb-btn-primary", disabled: busy }, busy ? "保存中…" : "保存"))));
 }
 
-export function Todos({ store, projectId, now }) {
+export function Todos({ store, projectId, now, initialQuery = "" }) {
   const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const [dialog, setDialog] = React.useState(null);
   const [deleteTarget, setDeleteTarget] = React.useState(null);
   const [view, setView] = React.useState("pending");
+  const [query, setQuery] = React.useState(initialQuery);
   const action = state.action;
   const todos = Array.isArray(state.todos) ? state.todos : [];
   const timeZone = state.settings?.timezone || DEFAULT_TIME_ZONE;
@@ -90,10 +97,14 @@ export function Todos({ store, projectId, now }) {
   const toggle = (todo) => store.actions.updateTodo({ id: todo.id, done: !todo.done }).catch(() => {});
   const pending = todos.filter((todo) => !todo.done).length;
   const completed = todos.length - pending;
-  const sections = organizeTodos(todos, { view, timeZone, now: now || new Date() });
+  const filteredTodos = filterTodos(todos, query);
+  const sections = organizeTodos(filteredTodos, { view, timeZone, now: now || new Date() });
   const remove = () => store.actions.deleteTodo(deleteTarget.id).then(() => setDeleteTarget(null));
   return React.createElement("section", { className: "cpwb-tool-panel" },
     React.createElement("div", { className: "cpwb-tool-head" }, React.createElement("span", null, "PROJECT TODO"), React.createElement("button", { className: "cpwb-btn cpwb-btn-primary cpwb-button-content", type: "button", onClick: () => setDialog({ todo: null }) }, React.createElement(Plus, { size: 14, weight: "bold" }), React.createElement("span", null, "新增"))),
+    React.createElement("label", { className: "cpwb-tool-search" },
+      React.createElement("span", { "aria-hidden": true }, "⌕"),
+      React.createElement("input", { type: "search", value: query, onChange: (event) => setQuery(event.target.value), placeholder: "搜索待办事项", "aria-label": "搜索待办" })),
     React.createElement("div", { className: "cpwb-todo-tabs", role: "tablist", "aria-label": "待办状态" },
       React.createElement("button", { type: "button", role: "tab", "aria-selected": view === "pending", className: view === "pending" ? "cpwb-active" : "", onClick: () => setView("pending") }, React.createElement("span", null, "待处理"), React.createElement("small", null, pending)),
       React.createElement("button", { type: "button", role: "tab", "aria-selected": view === "completed", className: view === "completed" ? "cpwb-active" : "", onClick: () => setView("completed") }, React.createElement("span", null, "已完成"), React.createElement("small", null, completed))),

@@ -246,14 +246,14 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
             signal,
           });
         },
-        create({ scope, question, pinnedSources = [], oneShotSources = [] }, { signal } = {}) {
-          return request({ method: "POST", path: "/chat/sessions", body: { scope, question, pinnedSources, oneShotSources }, signal });
+        create({ scope, title, pinnedSources = [] }, { signal } = {}) {
+          return request({ method: "POST", path: "/chat/sessions", body: { scope, title, pinnedSources }, signal });
         },
         open(sessionId, { signal } = {}) {
           return request({ method: "POST", path: "/chat/sessions/" + encodeURIComponent(sessionId) + "/open", body: {}, signal });
         },
-        retry({ sessionId, question, oneShotSources = [] }, { signal } = {}) {
-          return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "retryDraft", question, oneShotSources }, signal });
+        confirm(sessionId, { signal } = {}) {
+          return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "confirmDraft" }, signal });
         },
         rename({ sessionId, title }, { signal } = {}) {
           return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "rename", title }, signal });

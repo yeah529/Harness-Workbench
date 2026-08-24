@@ -106,10 +106,13 @@ test("global sidebar keeps recents scrollable while settings and the approved lo
   assert.match(footer, /flex:\s*0 0 auto/);
 
   const logo = fs.readFileSync(fileURLToPath(new URL("../src/client/assets/harness-workbench-logo.svg", import.meta.url)), "utf8");
-  assert.match(logo, /viewBox="0 0 190 74"/);
+  assert.match(logo, /viewBox="0 0 306 72"/);
   assert.match(logo, /<title[^>]*>Harness Workbench<\/title>/);
-  assert.match(logo, /M43 9h8L37 43h-8zM94 8h7L87 44h-7zM146 8h7l-14 36h-7z/);
-  assert.match(logo, /M2 45L28 39M0 49L43 45M159 39L188 31M153 44L190 39/);
+  assert.match(logo, /viewBox="0 0 64 64"/);
+  assert.match(logo, /viewBox="0 0 236 66"/);
+  assert.match(logo, /M23 2h5l-5 6h-5l5-6/);
+  assert.match(logo, /M0 0h7v16h11V0h7v42/);
+  assert.doesNotMatch(logo, /<text|font-family|font-weight/);
 });
 
 test("top-layer Workbench dialogs remain interactive above the pointer-isolated shell", () => {
@@ -121,6 +124,16 @@ test("top-layer Workbench dialogs remain interactive above the pointer-isolated 
   assert.match(shell, /pointer-events:\s*none/);
   assert.match(modal, /pointer-events:\s*auto/);
   assert.match(draft, /pointer-events:\s*auto/);
+});
+
+test("session ID restores hover interaction inside the pointer-isolated conversation chrome", () => {
+  const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
+  const source = fs.readFileSync(path.resolve(filename), "utf8");
+  const sessionId = source.match(/\.cpwb-session-id\s*\{([^}]*)\}/)?.[1] ?? "";
+  const copy = source.match(/\.cpwb-session-id-copy\s*\{([^}]*)\}/)?.[1] ?? "";
+  assert.match(sessionId, /pointer-events:\s*auto/);
+  assert.match(copy, /opacity:\s*0/);
+  assert.match(source, /\.cpwb-session-id:hover\s+\.cpwb-session-id-copy/);
 });
 
 test("project new-session action centers its plus icon with the label", () => {
@@ -137,6 +150,13 @@ test("modal width includes padding so project dialogs fit narrow viewports", () 
   const source = fs.readFileSync(path.resolve(filename), "utf8");
   assert.match(source, /\.cpwb-modal\s*\{[^}]*box-sizing:\s*border-box[^}]*\}/);
   assert.match(source, /\.cpwb-modal\s*\{[^}]*width:\s*min\(100%,\s*480px\)[^}]*\}/);
+});
+
+test("pending composer does not clip the model menu outside its bounds", () => {
+  const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
+  const source = fs.readFileSync(path.resolve(filename), "utf8");
+  const composer = source.match(/\.cpwb-draft-composer\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+  assert.doesNotMatch(composer, /clip-path:/);
 });
 
 test("knowledge backplane preserves the approved layering and responsive connector contract", () => {

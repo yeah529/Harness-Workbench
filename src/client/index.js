@@ -24,7 +24,7 @@ function injectCss(tagId, css) {
 const store = getStore();
 const navigation = createNavigationStore();
 
-const inject = ["slots", "layout", "workspaces", "sessions", "connection", "inputTriggers"];
+const inject = ["slots", "layout", "workspaces", "sessions", "connection", "conversation", "inputTriggers"];
 
 function registerWorkbenchSettingsSection(ctx, settingsStore = store) {
   return registerSettingsSection(ctx, settingsStore);
@@ -82,6 +82,7 @@ function apply(ctx) {
           navigation,
           sessions: ctx.sessions,
           connection: ctx.connection,
+          conversation: ctx.conversation,
           workspaces: ctx.workspaces,
           createProject,
           openActivatedSession(result) {

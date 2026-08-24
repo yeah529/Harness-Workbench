@@ -141,19 +141,19 @@ function makeFakeIndexer(repos) {
 }
 
 /** A fake unified session service that records calls and returns canned results. */
-function makeFakeSessionService({ activateResult, activateError, retryResult, retryError } = {}) {
-  const calls = { activate: [], retry: [], open: [], rename: [], move: [], archive: [], restore: [], delete: [], contextGet: [], contextSet: [], contextRemove: [] };
+function makeFakeSessionService({ materializeResult, materializeError, confirmResult, confirmError } = {}) {
+  const calls = { materialize: [], confirm: [], open: [], rename: [], move: [], archive: [], restore: [], delete: [], contextGet: [], contextSet: [], contextRemove: [] };
   return {
     calls,
-    async activateDraft(input) {
-      calls.activate.push(input);
-      if (activateError) throw activateError;
-      return activateResult ?? { sessionId: "session-1", scope: input.scope, lifecycleStatus: "active" };
+    async materializeDraft(input) {
+      calls.materialize.push(input);
+      if (materializeError) throw materializeError;
+      return materializeResult ?? { sessionId: "session-1", scope: input.scope, title: input.title, lifecycleStatus: "draft_failed" };
     },
-    async retryDraft(input) {
-      calls.retry.push(input);
-      if (retryError) throw retryError;
-      return retryResult ?? { sessionId: input.sessionId, lifecycleStatus: "active" };
+    async confirmDraft(input) {
+      calls.confirm.push(input);
+      if (confirmError) throw confirmError;
+      return confirmResult ?? { sessionId: input.sessionId, lifecycleStatus: "active" };
     },
     async openSession(input) { calls.open.push(input); return { sessionId: input.sessionId, reused: true }; },
     async renameSession(input) { calls.rename.push(input); return { sessionId: input.sessionId, title: input.title, titleLocked: true }; },
@@ -1391,22 +1391,22 @@ test("unknown internal errors are logged in full but never leak the stack", asyn
 });
 // ------------------------------------------------------ unified chat sessions
 
-test("POST /chat/sessions activates the first prompt with one canonical scope", async (t) => {
+test("POST /chat/sessions materializes one hidden session with a canonical scope", async (t) => {
   const fake = makeFakeSessionService();
   const { base } = await startApi(t, { sessions: fake });
   const res = await fetch(base + "/chat/sessions", {
     method: "POST",
     headers: JSON_HEADERS,
-    body: JSON.stringify({ scope: { kind: "knowledge_base", id: 3 }, question: "第一句话" }),
+    body: JSON.stringify({ scope: { kind: "knowledge_base", id: 3 }, title: "第一句话", pinnedSources: [] }),
   });
   assert.equal(res.status, 201);
   assert.equal((await res.json()).sessionId, "session-1");
-  assert.deepEqual(fake.calls.activate, [{ scope: { kind: "knowledge_base", id: 3 }, question: "第一句话", pinnedSources: [], oneShotSources: [] }]);
+  assert.deepEqual(fake.calls.materialize, [{ scope: { kind: "knowledge_base", id: 3 }, title: "第一句话", pinnedSources: [] }]);
 });
 
-test("POST /chat/sessions returns retry metadata without leaking an internal cause", async (t) => {
+test("POST /chat/sessions returns materialization failure without leaking an internal cause", async (t) => {
   const fake = makeFakeSessionService({
-    activateError: new WorkbenchSessionError(
+    materializeError: new WorkbenchSessionError(
       SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED,
       "failed to activate session draft",
       new Error("secret vector endpoint"),
@@ -1416,7 +1416,7 @@ test("POST /chat/sessions returns retry metadata without leaking an internal cau
   const { base } = await startApi(t, { sessions: fake });
   const res = await fetch(base + "/chat/sessions", {
     method: "POST", headers: JSON_HEADERS,
-    body: JSON.stringify({ scope: { kind: "project", id: 1 }, question: "保留正文" }),
+    body: JSON.stringify({ scope: { kind: "project", id: 1 }, title: "保留正文" }),
   });
   assert.equal(res.status, 502);
   const body = await res.json();
@@ -1436,6 +1436,18 @@ test("GET /chat/sessions filters one canonical scope and excludes failed drafts"
   const res = await fetch(base + `/chat/sessions?scopeKind=project&scopeId=${project.id}`);
   assert.equal(res.status, 200);
   assert.deepEqual((await res.json()).items.map((row) => row.sessionId), ["session-active"]);
+});
+
+test("GET /chat/sessions applies keyword search inside one project scope", async (t) => {
+  const { base, repos } = await startApi(t, { sessions: makeFakeSessionService() });
+  const project = repos.projects.create({ name: "Research" });
+  repos.workbenchSessions.create({ sessionId: "session-hit", scope: { kind: "project", id: project.id }, title: "定时任务回归" });
+  repos.workbenchSessions.create({ sessionId: "session-miss", scope: { kind: "project", id: project.id }, title: "知识库检索" });
+  const res = await fetch(base + `/chat/sessions?scopeKind=project&scopeId=${project.id}&query=${encodeURIComponent("定时")}`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(body.items.map((row) => row.sessionId), ["session-hit"]);
+  assert.equal(body.total, 1);
 });
 
 test("GET /chat/sessions lists active sessions across all containers", async (t) => {
@@ -1462,7 +1474,7 @@ test("GET /chat/sessions separates archived records from active recents", async 
   assert.equal(archived.items[0].archivedAt, "2026-08-23T09:30:00.000Z");
 });
 
-test("PATCH /chat/sessions/:id dispatches rename, move, archive, restore, and failed-draft retry", async (t) => {
+test("PATCH /chat/sessions/:id dispatches rename, move, archive, restore, and draft confirmation", async (t) => {
   const fake = makeFakeSessionService();
   const { base } = await startApi(t, { sessions: fake });
   const patch = (body) => fetch(base + "/chat/sessions/session-1", { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify(body) });
@@ -1471,12 +1483,12 @@ test("PATCH /chat/sessions/:id dispatches rename, move, archive, restore, and fa
   assert.equal((await patch({ operation: "move", scope: { kind: "independent" } })).status, 200);
   assert.equal((await patch({ operation: "archive" })).status, 200);
   assert.equal((await patch({ operation: "restore" })).status, 200);
-  assert.equal((await patch({ operation: "retryDraft", question: "再次发送" })).status, 200);
+  assert.equal((await patch({ operation: "confirmDraft" })).status, 200);
   assert.deepEqual(fake.calls.rename, [{ sessionId: "session-1", title: "新标题" }]);
   assert.deepEqual(fake.calls.move, [{ sessionId: "session-1", scope: { kind: "independent", id: null } }]);
   assert.deepEqual(fake.calls.archive, ["session-1"]);
   assert.deepEqual(fake.calls.restore, ["session-1"]);
-  assert.deepEqual(fake.calls.retry, [{ sessionId: "session-1", question: "再次发送", oneShotSources: [] }]);
+  assert.deepEqual(fake.calls.confirm, [{ sessionId: "session-1" }]);
 });
 
 test("DELETE /chat/sessions/:id delegates native-first deletion", async (t) => {
@@ -1530,7 +1542,7 @@ test("session activation returns 501 when the unified session service is unavail
   const { base } = await startApi(t);
   const res = await fetch(base + "/chat/sessions", {
     method: "POST", headers: JSON_HEADERS,
-    body: JSON.stringify({ scope: { kind: "independent" }, question: "hello" }),
+    body: JSON.stringify({ scope: { kind: "independent" }, title: "hello" }),
   });
   assert.equal(res.status, 501);
   assert.equal((await res.json()).error.code, "NOT_IMPLEMENTED");
@@ -1561,14 +1573,14 @@ test("502 retrieval failure is logged server-side and its cause never leaks", as
   const logged = [];
   const logger = { error: (err) => logged.push(err) };
   const sessions = makeFakeSessionService({
-    activateError: new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED, "failed to activate session draft", new Error("vector store secret"), {
+    materializeError: new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED, "failed to activate session draft", new Error("vector store secret"), {
       sessionId: "session-failed", lifecycleStatus: "draft_failed", pendingQuestion: "q",
     }),
   });
   const { base } = await startApi(t, { sessions, logger });
 
   const res = await fetch(base + "/chat/sessions", {
-    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ scope: { kind: "independent" }, question: "q" }),
+    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ scope: { kind: "independent" }, title: "q" }),
   });
   assert.equal(res.status, 502);
   const body = await res.json();

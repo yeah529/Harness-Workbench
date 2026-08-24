@@ -16,9 +16,9 @@ import {
   registerKnowledgeBaseReferenceSource,
 } from "../src/client/knowledgeReferences.js";
 import { createWorkbenchRagPreStep, deriveSessionTitle } from "../src/host/sessions.js";
-import { Automation, buildSummaryMarkdown } from "../src/client/Automation.js";
+import { Automation, buildSummaryMarkdown, filterSchedules } from "../src/client/Automation.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
-import { Todos, organizeTodos } from "../src/client/Todos.js";
+import { Todos, filterTodos, organizeTodos } from "../src/client/Todos.js";
 
 function staticStore(overrides = {}) {
   const state = {
@@ -124,7 +124,9 @@ test("schedule UI uses a compact add action and exposes date-time plus recurrenc
   assert.match(html, /每日/);
   assert.match(html, /每周/);
   assert.match(html, /每月/);
+  assert.match(html, /aria-label="搜索定时任务"/);
   assert.doesNotMatch(html, /daily 21:00 \/ weekly/);
+  assert.deepEqual(filterSchedules([{ name: "生成周报" }, { name: "同步索引" }], "周报").map((row) => row.name), ["生成周报"]);
 });
 
 test("todo UI separates completed items and groups pending items by local date status", () => {
@@ -159,7 +161,9 @@ test("todo UI separates completed items and groups pending items by local date s
   assert.match(html, />已完成<.*>1</);
   assert.match(html, /cpwb-todo-overdue/);
   assert.match(html, /aria-label="删除待办 过期"/);
+  assert.match(html, /aria-label="搜索待办"/);
   assert.doesNotMatch(html, /已经完成/);
+  assert.deepEqual(filterTodos(todos, "今天").map((row) => row.id), [2]);
 });
 
 test("summary UI exposes generation feedback plus download and delete actions", () => {

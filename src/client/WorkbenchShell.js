@@ -7,6 +7,7 @@ import { KnowledgeCenterPage } from "./KnowledgeCenterPage.js";
 import { SessionListPage } from "./SessionListPage.js";
 import { DraftConversation, NewSessionDialog } from "./NewSessionDialog.js";
 import { DrawerDialog, nextDrawerOwner, useWorkbenchLayoutMode } from "./responsive.js";
+import { DEFAULT_TIME_ZONE } from "./timezone.js";
 
 export function WorkbenchShell(props) {
   const navigation = props.navigation;
@@ -19,12 +20,13 @@ export function WorkbenchShell(props) {
   const layoutMode = useWorkbenchLayoutMode(props.layoutMode);
   const [drawerOwner, setDrawerOwner] = React.useState(null);
   const [newSessionOpen, setNewSessionOpen] = React.useState(false);
+  const [sessionListScope, setSessionListScope] = React.useState(null);
   const navigationTriggerRef = React.useRef(null);
 
   const navigate = function (page) {
     if (page === "home") navigation.openHome();
     else if (page === "knowledge") navigation.openKnowledge();
-    else if (page === "sessions") navigation.openSessions();
+    else if (page === "sessions") { setSessionListScope(null); navigation.openSessions(); }
     else if (page === "archive") navigation.openArchive();
     if (layoutMode === "mobile") setDrawerOwner(null);
   };
@@ -38,6 +40,10 @@ export function WorkbenchShell(props) {
     if (layoutMode === "mobile") closeDrawer();
     setNewSessionOpen(true);
   };
+  const archiveSession = async function (sessionId) {
+    await props.store.actions.archiveSession(sessionId);
+    if (view.sessionId === sessionId) navigation.openArchive();
+  };
   const openNativeSettings = function () {
     closeDrawer();
     if (typeof document === "undefined") return;
@@ -50,17 +56,6 @@ export function WorkbenchShell(props) {
     || state.recentSessions?.find?.((item) => item.sessionId === view.sessionId)
     || null;
   const currentScope = state.draft?.scope ?? activeEntry?.scope ?? null;
-  const currentContainerName = currentScope?.kind === "project"
-    ? state.projects?.find?.((item) => item.id === currentScope.id)?.name
-    : currentScope?.kind === "knowledge_base"
-      ? state.knowledgeBases?.find?.((item) => item.id === currentScope.id)?.name
-      : activeEntry?.title || activeEntry?.displayTitle || "当前独立会话";
-
-  React.useEffect(function () {
-    if (!currentScope || (view.page !== "conversation" && view.page !== "draft")) return;
-    props.store.actions.loadScopeSessions?.(currentScope).catch(function () {});
-  }, [currentScope?.kind, currentScope?.id, props.store, view.page, view.sessionId]);
-
   React.useEffect(function () {
     if (view.page !== "conversation" && drawerOwner === "project") closeDrawer();
     if (layoutMode !== "mobile" && drawerOwner === "navigation") closeDrawer();
@@ -79,21 +74,17 @@ export function WorkbenchShell(props) {
       projectDrawerOpen: drawerOwner === "project",
       onProjectDrawerOpen: () => openDrawer("project"),
       onProjectDrawerClose: closeDrawer,
-      onArchive: async () => {
-        await props.store.actions.archiveSession(view.sessionId);
-        navigation.openArchive();
-      },
-      onRestore: async () => {
-        await props.store.actions.restoreSession(view.sessionId);
-      },
     });
   } else if (view.page === "draft") {
     center = React.createElement(DraftConversation, {
       store: props.store,
+      sessions: props.sessions,
+      workspaces: props.workspaces,
+      connection: props.connection,
+      conversation: props.conversation,
       onActivated: props.openActivatedSession,
       onCancel() {
-        props.store.actions.discardDraft();
-        navigation.openHome();
+        Promise.resolve(props.store.actions.discardDraft()).finally(navigation.openHome);
       },
     });
   } else if (view.page === "knowledge") {
@@ -105,25 +96,29 @@ export function WorkbenchShell(props) {
       onDraftOpen: navigation.openDraft,
     });
   } else if (view.page === "sessions") {
-    center = React.createElement(SessionListPage, { store: props.store, onOpenSession: openSession });
+    center = React.createElement(SessionListPage, { store: props.store, onOpenSession: openSession, initialScope: sessionListScope });
   } else if (view.page === "archive") {
     center = React.createElement(SessionListPage, { archived: true, store: props.store, onOpenSession: openSession });
   } else {
-    center = React.createElement(ProjectHome, { ...props, open: true });
+    center = React.createElement(ProjectHome, {
+      ...props,
+      open: true,
+      openProjectSessions(project) {
+        setSessionListScope({ kind: "project", id: project.id, name: project.name });
+        navigation.openSessions();
+      },
+    });
   }
 
-  const sidebarSessions = [...(state.scopeSessionPage?.items || []), ...(state.recentSessions || [])]
-    .filter((item, index, list) => list.findIndex((candidate) => candidate.sessionId === item.sessionId) === index);
   const sidebar = React.createElement(WorkbenchSidebar, {
       page: view.page,
       activeSessionId: view.sessionId,
-      recentSessions: sidebarSessions,
-      currentScope: view.page === "conversation" || view.page === "draft" ? currentScope : null,
-      currentContainerName,
-      currentContainerTotal: currentScope?.kind === "independent" ? (view.sessionId ? 1 : 0) : state.scopeSessionPage?.total || 0,
+      recentSessions: state.recentSessions,
       onNavigate: navigate,
       onNewSession: createSession,
       onOpenSession: openSession,
+      onArchiveSession: (sessionId) => archiveSession(sessionId).catch(function () {}),
+      timeZone: state.settings?.timezone || DEFAULT_TIME_ZONE,
       mobile: layoutMode === "mobile",
       settingsTrigger: openNativeSettings,
     });

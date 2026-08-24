@@ -567,8 +567,9 @@ export function createSessionService({
     return conversations.sort((a, b) => a.messages[0].time - b.messages[0].time);
   }
 
-  function registerHandle(sessionId, { dispose, cleanup, scope, owned }) {
+  function registerHandle(sessionId, { agent = null, dispose, cleanup, scope, owned }) {
     handles.set(sessionId, {
+      agent,
       dispose: owned ? dispose : null,
       cleanup: typeof cleanup === "function" ? cleanup : null,
       scope,
@@ -754,13 +755,13 @@ export function createSessionService({
       const nativeTitle = persistedSessionTitle(liveAgent?.session?.events);
       if (nativeTitle) repos.workbenchSessions.setTitleIfEmpty(sessionId, nativeTitle);
       const cleanup = installScopedRag(liveAgent, scope, sessionId);
-      registerHandle(sessionId, { dispose: null, cleanup, scope, owned: false });
+      registerHandle(sessionId, { agent: liveAgent, dispose: null, cleanup, scope, owned: false });
       return { ...repos.workbenchSessions.touch(sessionId), reused: true };
     }
     const resumed = await resumeWorkbenchSession(sessionId);
     const liveAgent = resumed.agent ?? ctx.agents.get(SessionId(sessionId));
     const cleanup = installScopedRag(liveAgent, scope, sessionId);
-    registerHandle(sessionId, { dispose: resumed.dispose, cleanup, scope, owned: true });
+    registerHandle(sessionId, { agent: liveAgent, dispose: resumed.dispose, cleanup, scope, owned: true });
     return { ...repos.workbenchSessions.touch(sessionId), reused: true };
   }
 
@@ -779,7 +780,7 @@ export function createSessionService({
     }
 
     const cleanup = installScopedRag(created.agent, scope, created.sessionId, !scheduled);
-    registerHandle(created.sessionId, { dispose: created.dispose, cleanup, scope, owned: true });
+    registerHandle(created.sessionId, { agent: created.agent, dispose: created.dispose, cleanup, scope, owned: true });
     return { sessionId: created.sessionId, scope, reused: false, scheduled };
   }
 
@@ -791,6 +792,62 @@ export function createSessionService({
       );
     }
     return createScopedSession({ scope, scheduled: true });
+  }
+
+  async function runScheduledSubagent({ projectId, title, prompt }) {
+    const normalizedTitle = String(title || "定时任务执行").trim() || "定时任务执行";
+    const normalizedPrompt = String(prompt || "").trim();
+    if (!normalizedPrompt) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED, "scheduled subagent prompt must not be empty");
+    }
+
+    const created = await createScopedSession({ scope: { kind: "project", id: projectId }, scheduled: true });
+    const entry = handles.get(created.sessionId);
+    await persistOwnedSession({
+      sessionId: created.sessionId,
+      scope: created.scope,
+      selection: { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
+      lifecycleStatus: "active",
+      title: normalizedTitle,
+      dispose: entry?.dispose,
+    });
+
+    let run = null;
+    try {
+      const runtime = ctx.subagents;
+      if (!runtime || typeof runtime.list !== "function" || typeof runtime.start !== "function") {
+        throw new Error("DSH Subagent runtime is unavailable");
+      }
+      const providers = runtime.list();
+      const ordered = ["spawn", "fork", ...providers.filter((name) => name !== "spawn" && name !== "fork")];
+      const providerName = ordered.find((name) => {
+        if (!providers.includes(name)) return false;
+        const provider = typeof runtime.getProvider === "function" ? runtime.getProvider(name) : null;
+        return provider?.capabilities?.toolFilter === true;
+      });
+      if (!providerName) throw new Error("no Subagent provider supports restricted scheduled execution");
+
+      run = await runtime.start(providerName, {
+        label: normalizedTitle,
+        prompt: [{ type: "text", text: normalizedPrompt }],
+        parent: entry?.agent,
+        signal: new AbortController().signal,
+        toolFilter: { allow: [] },
+      });
+      const result = await run.result;
+      const text = messageText({ content: result.output });
+      if (result.stopReason !== "completed") {
+        throw new Error(result.diagnostic || "scheduled Subagent ended with " + result.stopReason);
+      }
+      repos.workbenchSessions.touch(created.sessionId);
+      return { sessionId: created.sessionId, childSessionId: String(run.id), text, stopReason: result.stopReason };
+    } catch (error) {
+      const wrapped = new Error(error instanceof Error ? error.message : String(error));
+      wrapped.sessionId = created.sessionId;
+      throw wrapped;
+    } finally {
+      if (run) await run.dispose().catch(() => {});
+    }
   }
 
   async function submitPrompt({ sessionId, question, oneShotSources = [] }) {
@@ -859,8 +916,25 @@ export function createSessionService({
   }
 
   async function activateDraft({ scope, question, pinnedSources = [], oneShotSources = [] }) {
-    const title = deriveSessionTitle(question);
-    if (!title) {
+    const pending = await materializeDraft({ scope, title: question, pinnedSources });
+    try {
+      const result = await submitPrompt({ sessionId: pending.sessionId, question, oneShotSources });
+      const saved = await confirmDraft({ sessionId: pending.sessionId });
+      return { ...result, ...saved };
+    } catch (error) {
+      repos.workbenchSessions.updateLifecycle({ sessionId: pending.sessionId, lifecycleStatus: "draft_failed" });
+      throw new WorkbenchSessionError(
+        SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED,
+        "failed to activate session draft",
+        error,
+        { sessionId: pending.sessionId, lifecycleStatus: "draft_failed", pendingQuestion: question },
+      );
+    }
+  }
+
+  async function materializeDraft({ scope, title, pinnedSources = [] }) {
+    const normalizedTitle = deriveSessionTitle(title);
+    if (!normalizedTitle) {
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED, "first prompt must not be empty");
     }
     const created = await createScopedSession({ scope });
@@ -869,27 +943,25 @@ export function createSessionService({
       scope: created.scope,
       selection: { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
       lifecycleStatus: "draft_failed",
-      title,
+      title: normalizedTitle,
       dispose: handles.get(created.sessionId)?.dispose,
     });
-    try {
-      if (contextResolver) {
-        for (const source of pinnedSources) {
-          contextResolver.setOverride({ sessionId: created.sessionId, source, mode: "pinned" });
-        }
+    if (contextResolver) {
+      for (const source of pinnedSources) {
+        contextResolver.setOverride({ sessionId: created.sessionId, source, mode: "pinned" });
       }
-      const result = await submitPrompt({ sessionId: created.sessionId, question, oneShotSources });
-      const saved = repos.workbenchSessions.updateLifecycle({ sessionId: created.sessionId, lifecycleStatus: "active" });
-      return { ...result, ...saved };
-    } catch (error) {
-      repos.workbenchSessions.updateLifecycle({ sessionId: created.sessionId, lifecycleStatus: "draft_failed" });
-      throw new WorkbenchSessionError(
-        SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED,
-        "failed to activate session draft",
-        error,
-        { sessionId: created.sessionId, lifecycleStatus: "draft_failed", pendingQuestion: question },
-      );
     }
+    return repos.workbenchSessions.get(created.sessionId);
+  }
+
+  async function confirmDraft({ sessionId }) {
+    const saved = repos.workbenchSessions.get(sessionId);
+    if (!saved) throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "workbench session not found: " + sessionId);
+    if (saved.lifecycleStatus === "active") return saved;
+    if (saved.lifecycleStatus !== "draft_failed") {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_NOT_RETRYABLE, "session is not a pending draft");
+    }
+    return repos.workbenchSessions.updateLifecycle({ sessionId, lifecycleStatus: "active" });
   }
 
   async function retryDraft({ sessionId, question, oneShotSources = [] }) {
@@ -1055,7 +1127,10 @@ export function createSessionService({
 
   return {
     createSession,
+    runScheduledSubagent,
     openSession,
+    materializeDraft,
+    confirmDraft,
     activateDraft,
     retryDraft,
     submitPrompt,

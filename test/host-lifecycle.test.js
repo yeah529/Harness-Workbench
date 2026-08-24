@@ -98,34 +98,34 @@ test("host apply disposes cleanly on the happy path in order", async (t) => {
 test("scheduled prompt releases its live handle and carries the persisted session id on failure", async () => {
   const calls = [];
   const runner = createScheduledRunPrompt({
-    async createSession() {
-      calls.push("create");
-      return { sessionId: "session-scheduled-failed" };
-    },
-    async submitPrompt(input) {
-      calls.push(["submit", input.sessionId]);
-      throw new Error("provider unavailable");
+    async runScheduledSubagent() {
+      calls.push("subagent");
+      const error = new Error("provider unavailable");
+      error.sessionId = "session-scheduled-failed";
+      throw error;
     },
     async release(sessionId) { calls.push(["release", sessionId]); },
   });
 
   await assert.rejects(
-    () => runner({ projectId: 7, prompt: "run" }),
+    () => runner({ kind: "schedule", projectId: 7, prompt: "run", schedule: { name: "夜间审计" } }),
     (error) => error.message === "provider unavailable" && error.sessionId === "session-scheduled-failed",
   );
-  assert.deepEqual(calls, ["create", ["submit", "session-scheduled-failed"], ["release", "session-scheduled-failed"]]);
+  assert.deepEqual(calls, ["subagent", ["release", "session-scheduled-failed"]]);
 });
 
 test("scheduled prompt releases its live handle after success", async () => {
   let released = null;
   const runner = createScheduledRunPrompt({
-    async createSession() { return { sessionId: "session-scheduled-ok" }; },
-    async submitPrompt() { return { outcome: { text: "ok", reason: { kind: "completed" } } }; },
+    async runScheduledSubagent(input) {
+      assert.deepEqual(input, { projectId: 7, prompt: "run", title: "夜间审计" });
+      return { sessionId: "session-scheduled-ok", childSessionId: "session-child", text: "ok" };
+    },
     async release(sessionId) { released = sessionId; },
   });
 
-  const result = await runner({ projectId: 7, prompt: "run" });
-  assert.deepEqual(result, { sessionId: "session-scheduled-ok", text: "ok" });
+  const result = await runner({ kind: "schedule", projectId: 7, prompt: "run", schedule: { name: "夜间审计" } });
+  assert.deepEqual(result, { sessionId: "session-scheduled-ok", childSessionId: "session-child", text: "ok" });
   assert.equal(released, "session-scheduled-ok");
 });
 

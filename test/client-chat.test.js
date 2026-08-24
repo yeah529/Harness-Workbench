@@ -71,20 +71,19 @@ function makeSessions(initialById = {}) {
 
 // -------------------------------------------------------------------- api
 
-test("api: chat.sessions.create posts one canonical owner and first prompt", async () => {
+test("api: chat.sessions.create materializes one canonical owner without a prompt", async () => {
   const fetchImpl = makeFetch(({ url, init }) => {
     assert.equal(parse(url).pathname, "/api/cpwb/chat/sessions");
     assert.equal(init.method, "POST");
     assert.deepEqual(JSON.parse(init.body), {
       scope: { kind: "project", id: 1 },
-      question: "开始实现",
+      title: "开始实现",
       pinnedSources: [],
-      oneShotSources: [],
     });
     return jsonResponse(201, { sessionId: "s1", scope: { kind: "project", id: 1 } });
   });
   const api = createCpwbApi({ fetchImpl });
-  const out = await api.chat.sessions.create({ scope: { kind: "project", id: 1 }, question: "开始实现" });
+  const out = await api.chat.sessions.create({ scope: { kind: "project", id: 1 }, title: "开始实现" });
   assert.equal(out.sessionId, "s1");
 });
 
@@ -105,7 +104,7 @@ test("api: chat.sessions mutation and context routes use the session id", async 
   const fetchImpl = makeFetch(({ url, init }) => {
     call += 1;
     const parsed = parse(url);
-    if (call === 1) assert.deepEqual(JSON.parse(init.body), { operation: "retryDraft", question: "重试", oneShotSources: [] });
+    if (call === 1) assert.deepEqual(JSON.parse(init.body), { operation: "confirmDraft" });
     if (call === 2) assert.deepEqual(JSON.parse(init.body), { operation: "rename", title: "新标题" });
     if (call === 3) assert.deepEqual(JSON.parse(init.body), { operation: "move", scope: { kind: "independent", id: null } });
     if (call === 4) assert.deepEqual(JSON.parse(init.body), { operation: "archive" });
@@ -124,7 +123,7 @@ test("api: chat.sessions mutation and context routes use the session id", async 
     return jsonResponse(200, { sessionId: "s-old", scope: { kind: "independent", id: null } });
   });
   const api = createCpwbApi({ fetchImpl });
-  await api.chat.sessions.retry({ sessionId: "s-old", question: "重试" });
+  await api.chat.sessions.confirm("s-old");
   await api.chat.sessions.rename({ sessionId: "s-old", title: "新标题" });
   await api.chat.sessions.move({ sessionId: "s-old", scope: { kind: "independent", id: null } });
   await api.chat.sessions.archive("s-old");
@@ -290,8 +289,14 @@ function chatScenarioFetch(overrides = {}) {
       return jsonResponse(201, overrides.createResult ?? {
         sessionId: "s1",
         scope: { kind: "project", id: 1 },
+        lifecycleStatus: "draft_failed",
+      });
+    }
+    if (pathname === "/api/cpwb/chat/sessions/s1" && method === "PATCH") {
+      return jsonResponse(200, overrides.confirmResult ?? {
+        sessionId: "s1",
+        scope: { kind: "project", id: 1 },
         lifecycleStatus: "active",
-        citations: [],
       });
     }
     if (pathname.endsWith("/open") && method === "POST") {
@@ -301,17 +306,18 @@ function chatScenarioFetch(overrides = {}) {
   });
 }
 
-test("store: activation registers the canonical session and reloads recents", async () => {
+test("store: confirmation registers the canonical session and reloads recents", async () => {
   clearWorkbenchSessions();
   const store = createWorkbenchStore(createCpwbApi({ fetchImpl: chatScenarioFetch() }));
   store.actions.startDraft({ scope: { kind: "project", id: 1 } });
-  const out = await store.actions.activateDraft({ text: "开始" });
+  await store.actions.materializeDraft({ text: "开始" });
+  store.actions.markDraftAdmitted();
+  const out = await store.actions.confirmDraft();
   assert.equal(out.sessionId, "s1");
   assert.deepEqual(store.getSnapshot().workbenchSessions.s1.scope, { kind: "project", id: 1 });
-  assert.deepEqual(store.getSnapshot().citationsBySession.s1, []);
 });
 
-test("store: loads recent and scoped session pages", async () => {
+test("store: loads recent and filtered all-session pages", async () => {
   const sessionPage = {
     items: [
       { sessionId: "session-cpwb-i", scopeKind: "independent", scopeId: null, contextName: "独立" },

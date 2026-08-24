@@ -34,7 +34,7 @@ import { createSessionIndexAdapter } from "./session-index.js";
  * composes. Optional services are read from the injected context without
  * probing the DSH context accessor for names that may not be registered.
  */
-const inject = ["webServer", "agents", "sessions", "workspaceRegistry", "credentials", "sessionQuery"];
+const inject = ["webServer", "agents", "sessions", "workspaceRegistry", "credentials", "sessionQuery", "subagents"];
 
 function optionalContextService(ctx, name) {
   // Cordis only exposes injected services as context properties. The `in`
@@ -46,9 +46,18 @@ function optionalContextService(ctx, name) {
 
 /** Build the host-owned scheduled prompt runner with one release seam. */
 export function createScheduledRunPrompt(sessionService) {
-  return async function runScheduledPrompt({ kind = "schedule", projectId, prompt }) {
+  return async function runScheduledPrompt({ kind = "schedule", projectId, prompt, schedule = null }) {
     let session = null;
     try {
+      if (kind === "schedule") {
+        const result = await sessionService.runScheduledSubagent({
+          projectId,
+          prompt,
+          title: schedule?.name || "定时任务执行",
+        });
+        session = { sessionId: result.sessionId };
+        return result;
+      }
       session = await sessionService.createSession({ scope: { kind: "project", id: projectId }, scheduled: true });
       let result = await sessionService.submitPrompt({
         sessionId: session.sessionId,
@@ -74,6 +83,7 @@ export function createScheduledRunPrompt(sessionService) {
         text: kind === "summary" || kind === "todo" ? assertAutomationText(text, kind) : text,
       };
     } catch (error) {
+      if (!session?.sessionId && error?.sessionId) session = { sessionId: error.sessionId };
       if (!session?.sessionId) throw error;
       const wrapped = new Error(error instanceof Error ? error.message : String(error));
       wrapped.sessionId = session.sessionId;

@@ -13,7 +13,7 @@
  *   { phase, projects, knowledgeBases, documents, health, error,
  *     activeProjectId, activeKnowledgeBaseId, linkedKnowledgeBases,
  *     todos, schedules, summaries, citations, action,
- *     draft, workbenchSessions, scopeSessionPage, contextBySession }
+ *     draft, workbenchSessions, contextBySession }
  *
  * refresh() aborts any prior refresh and fetches health / projects /
  * knowledgeBases / documents in parallel. refreshProject(projectId, today)
@@ -24,6 +24,8 @@
  */
 
 import { registerWorkbenchSession } from "./workbenchSessions.js";
+
+const RECENT_SESSION_LIMIT = 20;
 
 /** Local calendar day as YYYY-MM-DD (never derived from the UTC clock). */
 export function localDateKey(date = new Date()) {
@@ -121,7 +123,6 @@ export function createWorkbenchStore(api) {
     workbenchSessions: {},
     citationsBySession: {},
     contextBySession: {},
-    scopeSessionPage: { items: [], total: 0, limit: 3, offset: 0 },
     globalSchedules: [],
     linkedProjects: [],
   };
@@ -263,7 +264,7 @@ export function createWorkbenchStore(api) {
         api.documents.list({ signal: ac.signal }),
       ]);
       if (disposed || seq !== refreshSeq) return;
-      const sessionPage = await fetchSessionPage({ limit: 8, offset: 0 }, ac.signal);
+      const sessionPage = await fetchSessionPage({ limit: RECENT_SESSION_LIMIT, offset: 0 }, ac.signal);
       if (disposed || seq !== refreshSeq) return;
       const recentSessions = sessionPage.items.map(normalizeSessionRow);
       setState({
@@ -437,24 +438,12 @@ export function createWorkbenchStore(api) {
       return result;
     },
 
-    loadRecentSessions: async function loadRecentSessions({ limit = 8 } = {}) {
+    loadRecentSessions: async function loadRecentSessions({ limit = RECENT_SESSION_LIMIT } = {}) {
       return loadRecent.run(limit);
     },
 
     loadAllSessions: async function loadAllSessions({ query = "", scopeKind = null, scopeId = null, archived = false, offset = 0, limit = 20 } = {}) {
       return loadSessionPage.run({ query, scopeKind, scopeId, archived, offset, limit });
-    },
-
-    loadScopeSessions: async function loadScopeSessions(scope) {
-      const normalized = normalizeSessionScope(scope);
-      if (normalized.kind === "independent") {
-        const page = { items: [], total: 0, limit: 3, offset: 0 };
-        setState({ scopeSessionPage: page });
-        return page;
-      }
-      const page = await fetchSessionPage({ scopeKind: normalized.kind, scopeId: normalized.id, limit: 3, offset: 0 });
-      setState({ scopeSessionPage: page });
-      return page;
     },
 
     loadGlobalSchedules: async function loadGlobalSchedules() {
@@ -488,76 +477,73 @@ export function createWorkbenchStore(api) {
       return draft;
     },
 
-    discardDraft: function discardDraft() {
+    discardDraft: async function discardDraft() {
+      const draft = state.draft;
+      if (!draft) return null;
+      if (draft.status === "admitted") return actions.confirmDraft();
+      if (draft.sessionId) {
+        await runAction("discardDraft", () => api.chat.sessions.remove(draft.sessionId));
+      }
       setState({ draft: null });
+      return null;
     },
 
-    activateDraft: async function activateDraft({ text, oneShotSources = [] }) {
-      const question = typeof text === "string" ? text.trim() : "";
-      if (!question) throw new TypeError("首条消息不能为空");
+    materializeDraft: async function materializeDraft({ text }) {
+      const title = typeof text === "string" ? text.trim() : "";
+      if (!title) throw new TypeError("首条消息不能为空");
       const draft = state.draft;
       if (!draft) throw new TypeError("当前没有待激活的会话草稿");
-      setState({ draft: { ...draft, text, status: "activating", error: null } });
+      if (draft.sessionId) {
+        setState({ draft: { ...draft, text, error: null } });
+        return { sessionId: draft.sessionId, scope: draft.scope, title };
+      }
+      setState({ draft: { ...draft, text, status: "materializing", error: null } });
       const ac = track(new AbortController());
-      let result;
       try {
-        result = await runAction("activateDraft", () => api.chat.sessions.create({
+        const result = await runAction("materializeDraft", () => api.chat.sessions.create({
           scope: draft.scope,
-          question,
+          title,
           pinnedSources: draft.pinnedSources,
-          oneShotSources,
         }, { signal: ac.signal }));
-      } catch (error) {
-        const details = error?.details;
         setState({ draft: {
           ...draft,
           text,
-          status: details?.lifecycleStatus === "draft_failed" ? "draft_failed" : "error",
-          sessionId: details?.sessionId ?? null,
-          error: toError(error),
+          status: "materialized",
+          sessionId: result.sessionId,
+          error: null,
         } });
+        return result;
+      } catch (error) {
+        setState({ draft: { ...draft, text, status: "error", error: toError(error) } });
         throw error;
       } finally {
         untrack(ac);
       }
-      const entry = normalizeSessionRow(result);
-      registerWorkbenchSession({ sessionId: result.sessionId, scope: entry.scope });
-      setState({
-        draft: null,
-        workbenchSessions: { ...state.workbenchSessions, [result.sessionId]: entry },
-        citationsBySession: { ...state.citationsBySession, [result.sessionId]: Array.isArray(result.citations) ? result.citations : [] },
-      });
-      await loadRecent.run(8);
-      return result;
     },
 
-    retryDraft: async function retryDraft({ text, oneShotSources = [] }) {
+    markDraftAdmitted: function markDraftAdmitted() {
       const draft = state.draft;
-      const question = typeof text === "string" ? text.trim() : "";
-      if (!draft?.sessionId || draft.status !== "draft_failed") throw new TypeError("当前草稿不可重试");
-      if (!question) throw new TypeError("首条消息不能为空");
-      const ac = track(new AbortController());
-      let result;
-      try {
-        result = await runAction("retryDraft", () => api.chat.sessions.retry({
-          sessionId: draft.sessionId,
-          question,
-          oneShotSources,
-        }, { signal: ac.signal }));
-      } catch (error) {
-        setState({ draft: { ...draft, text, status: "draft_failed", error: toError(error) } });
-        throw error;
-      } finally {
-        untrack(ac);
-      }
+      if (!draft?.sessionId) throw new TypeError("会话尚未物化");
+      setState({ draft: { ...draft, status: "admitted", error: null } });
+    },
+
+    markDraftError: function markDraftError(error) {
+      const draft = state.draft;
+      if (!draft) return;
+      setState({ draft: { ...draft, status: draft.status === "admitted" ? "admitted" : "materialized", error: toError(error) } });
+    },
+
+    confirmDraft: async function confirmDraft() {
+      const draft = state.draft;
+      if (!draft?.sessionId || draft.status !== "admitted") throw new TypeError("首条消息尚未被 DSH 接受");
+      const result = await runAction("confirmDraft", () => api.chat.sessions.confirm(draft.sessionId));
       const entry = normalizeSessionRow({ ...result, scope: result.scope ?? draft.scope });
       registerWorkbenchSession({ sessionId: result.sessionId, scope: entry.scope });
       setState({
         draft: null,
         workbenchSessions: { ...state.workbenchSessions, [result.sessionId]: entry },
-        citationsBySession: { ...state.citationsBySession, [result.sessionId]: Array.isArray(result.citations) ? result.citations : [] },
       });
-      await loadRecent.run(8);
+      await loadRecent.run(RECENT_SESSION_LIMIT);
       return result;
     },
 
@@ -573,7 +559,7 @@ export function createWorkbenchStore(api) {
       const result = await runAction("renameSession", () => api.chat.sessions.rename({ sessionId, title }));
       const entry = normalizeSessionRow(result);
       setState({ workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry } });
-      await loadRecent.run(8);
+      await loadRecent.run(RECENT_SESSION_LIMIT);
       return entry;
     },
 
@@ -582,24 +568,18 @@ export function createWorkbenchStore(api) {
       const entry = normalizeSessionRow(result);
       registerWorkbenchSession({ sessionId, scope: entry.scope });
       setState({ workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry } });
-      await loadRecent.run(8);
+      await loadRecent.run(RECENT_SESSION_LIMIT);
       return entry;
     },
 
     archiveSession: async function archiveSession(sessionId) {
       const result = await runAction("archiveSession", () => api.chat.sessions.archive(sessionId));
       const entry = normalizeSessionRow(result);
-      const scopeItems = state.scopeSessionPage.items;
       setState({
         recentSessions: state.recentSessions.filter((row) => row.sessionId !== sessionId),
-        scopeSessionPage: {
-          ...state.scopeSessionPage,
-          items: scopeItems.filter((row) => row.sessionId !== sessionId),
-          total: Math.max(0, state.scopeSessionPage.total - (scopeItems.some((row) => row.sessionId === sessionId) ? 1 : 0)),
-        },
         workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry },
       });
-      await loadRecent.run(8);
+      await loadRecent.run(RECENT_SESSION_LIMIT);
       return entry;
     },
 
@@ -607,7 +587,7 @@ export function createWorkbenchStore(api) {
       const result = await runAction("restoreSession", () => api.chat.sessions.restore(sessionId));
       const entry = normalizeSessionRow(result);
       setState({ workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry } });
-      await loadRecent.run(8);
+      await loadRecent.run(RECENT_SESSION_LIMIT);
       return entry;
     },
 
@@ -616,7 +596,7 @@ export function createWorkbenchStore(api) {
       const next = { ...state.workbenchSessions };
       delete next[sessionId];
       setState({ workbenchSessions: next });
-      await loadRecent.run(8);
+      await loadRecent.run(RECENT_SESSION_LIMIT);
       return result;
     },
 
@@ -867,6 +847,17 @@ export function createWorkbenchStore(api) {
       await refreshProject(projectId, lastToday ?? localDateKey());
     },
 
+    createGlobalSchedule: async function createGlobalSchedule({ projectId, name, recurrence, startsAt, prompt, enabled }) {
+      const ac = track(new AbortController());
+      try {
+        await runAction("createGlobalSchedule", () => api.schedules.create({ projectId, name, recurrence, startsAt, prompt, enabled }, { signal: ac.signal }));
+      } finally {
+        untrack(ac);
+      }
+      const schedules = await api.schedules.list({});
+      setState({ globalSchedules: Array.isArray(schedules) ? schedules : [] });
+    },
+
     updateSchedule: async function updateSchedule({ id, name, prompt, recurrence, startsAt, enabled }) {
       const ac = track(new AbortController());
       try {
@@ -897,6 +888,7 @@ export function createWorkbenchStore(api) {
         untrack(ac);
       }
       if (state.activeProjectId != null) await refreshProject(state.activeProjectId, lastToday ?? localDateKey());
+      await loadRecent.run(RECENT_SESSION_LIMIT);
     },
 
     runSummary: async function runSummary({ projectId, summaryDate }) {
