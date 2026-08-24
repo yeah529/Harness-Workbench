@@ -60,6 +60,11 @@ function messageText(message) {
     .trim();
 }
 
+function userMessageIdentity(event) {
+  const value = event?.data?.id ?? event?.data?.message?.id ?? event?.id ?? event?.seq;
+  return value == null ? null : String(value);
+}
+
 function isWorkbenchRecall(message) {
   return message?.source?.kind === "plugin"
     && message.source.plugin === "dsh-cyberpunk-workbench"
@@ -70,8 +75,21 @@ function isKnowledgeScopedSession(scope) {
   return scope?.kind === "project" || scope?.kind === "knowledge_base";
 }
 
+function scopeIdOf(scope) {
+  return scope?.id ?? scope?.scopeId ?? null;
+}
+
 function retrievalScopeKind(scopeKind) {
   return scopeKind === "knowledge_base" ? "knowledgeBase" : scopeKind;
+}
+
+function retrievalInputForSource(source) {
+  const scopeId = Number(source.id);
+  if (!Number.isSafeInteger(scopeId) || scopeId <= 0) return null;
+  if (source.kind === "knowledge_base") return { scope: "knowledgeBase", scopeId };
+  if (source.kind === "workspace_file") return { scope: "project", scopeId };
+  if (source.kind === "uploaded_file") return { scope: "document", scopeId };
+  return null;
 }
 
 /** Derive a concise persistent title from the first natural user sentence. */
@@ -98,7 +116,7 @@ function persistedSessionTitle(events) {
  * model step. The adapter is deliberately fail-closed: a retrieval failure
  * rejects the step, so the native SessionFace never sends a model request.
  */
-export function createWorkbenchRagPreStep({ retriever, scope, onQuestion }) {
+export function createWorkbenchRagPreStep({ retriever, scope, onQuestion, contextResolver, sessionId }) {
   if (!retriever || typeof retriever.search !== "function") {
     throw new TypeError("createWorkbenchRagPreStep requires retriever.search");
   }
@@ -115,16 +133,31 @@ export function createWorkbenchRagPreStep({ retriever, scope, onQuestion }) {
     try { await onQuestion?.(rawQuestion); } catch { /* title metadata never blocks a model turn */ }
     if (decision.messages.some(isWorkbenchRecall)) return decision;
     const question = stripKnowledgeBaseReferences(rawQuestion);
-    const scopes = [];
-    if (isKnowledgeScopedSession(scope)) scopes.push({ scope: retrievalScopeKind(scope.kind), scopeId: scope.scopeId });
-    for (const scopeId of extractKnowledgeBaseReferenceIds(rawQuestion)) {
-      if (!scopes.some((item) => item.scope === "knowledgeBase" && item.scopeId === scopeId)) {
-        scopes.push({ scope: "knowledgeBase", scopeId });
-      }
-    }
-    if (scopes.length === 0) return decision;
+    let scopes = [];
     let citations = [];
     try {
+      if (contextResolver && sessionId) {
+        const sources = contextResolver.resolveForPrompt({
+          sessionId,
+          oneShotSources: extractKnowledgeBaseReferenceIds(rawQuestion).map((id) => ({ kind: "knowledge_base", id: String(id) })),
+        });
+        scopes = sources.map(retrievalInputForSource).filter(Boolean);
+        const sessionSources = sources.filter((source) => source.kind === "session");
+        if (sessionSources.length > 0 && typeof retriever.searchSession !== "function") {
+          return { kind: "reject" };
+        }
+        for (const source of sessionSources) {
+          const found = await retriever.searchSession({ sourceSessionId: source.id, query: question || rawQuestion, signal });
+          if (Array.isArray(found)) citations.push(...found);
+        }
+      } else {
+        if (isKnowledgeScopedSession(scope)) scopes.push({ scope: retrievalScopeKind(scope.kind), scopeId: scopeIdOf(scope) });
+        for (const scopeId of extractKnowledgeBaseReferenceIds(rawQuestion)) {
+          if (!scopes.some((item) => item.scope === "knowledgeBase" && item.scopeId === scopeId)) {
+            scopes.push({ scope: "knowledgeBase", scopeId });
+          }
+        }
+      }
       for (const item of scopes) {
         const found = await retriever.search({ query: question || rawQuestion, ...item, signal });
         if (Array.isArray(found)) citations.push(...found);
@@ -465,7 +498,16 @@ export async function submitWorkbenchPrompt(ctx, { sessionId, question, citation
   await agent.whenIdle();
   await ctx.sessions.flush(agent.session);
 
-  return { citations, outcome: summarizeTurn(agent.session.events, firstSeq) };
+  const userEvent = agent.session.events.find((event) =>
+    event.seq >= firstSeq
+      && event.type === "user/message"
+      && event.data?.source?.kind === "user",
+  );
+  return {
+    citations,
+    outcome: summarizeTurn(agent.session.events, firstSeq),
+    userMessageId: userMessageIdentity(userEvent),
+  };
 }
 
 // ---------------------------------------------------------- session service
@@ -483,12 +525,21 @@ export async function submitWorkbenchPrompt(ctx, { sessionId, question, citation
  * @param {ReturnType<import("./repositories.js").createRepositories>} deps.repos
  * @param {{ search: Function }} deps.retriever
  */
-export function createSessionService({ ctx, repos, retriever, sessionWorkspace }) {
+export function createSessionService({
+  ctx,
+  repos,
+  retriever,
+  sessionWorkspace,
+  contextResolver,
+  renameNativeSession,
+  deleteNativeSession,
+  sessionIndex,
+}) {
   if (!ctx || !repos || !retriever) {
     throw new Error("createSessionService requires ctx, repos, and retriever");
   }
 
-  const handles = new Map(); // sessionId -> { dispose, scope, chatId, owned, tail }
+  const handles = new Map(); // sessionId -> { dispose, cleanup, scope, owned, tail }
 
   async function readProjectDailyConversation({ projectId, date, timeZone }) {
     const sessionQuery = ctx.get("sessionQuery");
@@ -516,12 +567,11 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
     return conversations.sort((a, b) => a.messages[0].time - b.messages[0].time);
   }
 
-  function registerHandle(sessionId, { dispose, cleanup, scope, chatId, owned }) {
+  function registerHandle(sessionId, { dispose, cleanup, scope, owned }) {
     handles.set(sessionId, {
       dispose: owned ? dispose : null,
       cleanup: typeof cleanup === "function" ? cleanup : null,
       scope,
-      chatId,
       owned: owned !== false,
       tail: Promise.resolve(),
     });
@@ -532,7 +582,7 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
     if (title) repos.workbenchSessions.setTitleIfEmpty(sessionId, title);
   }
 
-  function installScopedRag(agent, scope, sessionId) {
+  function installScopedRag(agent, scope, sessionId, useResolvedContext = true) {
     if (typeof agent?.ctx?.on !== "function") {
       throw new WorkbenchSessionError(
         SESSION_ERROR_CODES.SESSION_CREATE_FAILED,
@@ -542,22 +592,36 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
     return agent.ctx.on("agent/pre-step", createWorkbenchRagPreStep({
       retriever,
       scope,
+      contextResolver: useResolvedContext ? contextResolver : undefined,
+      sessionId,
       onQuestion: (question) => recordTitle(sessionId, question),
     }), { prepend: true });
   }
 
-  /** Resolve and validate the declared scope and its workspace/cwd. */
-  async function resolveScope({ projectId, knowledgeBaseId }) {
-    const hasProject = projectId !== undefined && projectId !== null;
-    const hasKb = knowledgeBaseId !== undefined && knowledgeBaseId !== null;
-    if (hasProject && hasKb) {
-      throw new WorkbenchSessionError(
-        SESSION_ERROR_CODES.INVALID_SCOPE,
-        "provide at most one of projectId or knowledgeBaseId",
-      );
+  function normalizeScope(scope) {
+    if (!scope || typeof scope !== "object") {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.MISSING_SCOPE, "session scope is required");
     }
+    if (!['project', 'knowledge_base', 'independent'].includes(scope.kind)) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.INVALID_SCOPE, "invalid session scope kind");
+    }
+    if (scope.kind === "independent") {
+      if (scope.id !== undefined && scope.id !== null) {
+        throw new WorkbenchSessionError(SESSION_ERROR_CODES.INVALID_SCOPE, "independent scope cannot have an id");
+      }
+      return { kind: "independent", id: null };
+    }
+    const id = Number(scope.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.INVALID_SCOPE, scope.kind + " scope requires a positive id");
+    }
+    return { kind: scope.kind, id };
+  }
 
-    if (!hasProject && !hasKb) {
+  /** Resolve and validate one canonical scope and its native workspace. */
+  async function resolveScope(input) {
+    const scope = normalizeScope(input);
+    if (scope.kind === "independent") {
       if (typeof sessionWorkspace !== "function") {
         throw new WorkbenchSessionError(
           SESSION_ERROR_CODES.WORKSPACE_NOT_FOUND,
@@ -571,37 +635,37 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
       return {
         workspaceId: workspace.id ?? workspace.workspaceId,
         cwd: workspace.path,
-        scope: { kind: "independent", scopeId: null },
+        scope,
       };
     }
 
-    if (hasProject) {
-      const project = repos.projects.get(projectId);
+    if (scope.kind === "project") {
+      const project = repos.projects.get(scope.id);
       if (!project) {
-        throw new WorkbenchSessionError(SESSION_ERROR_CODES.PROJECT_NOT_FOUND, "project not found: " + projectId);
+        throw new WorkbenchSessionError(SESSION_ERROR_CODES.PROJECT_NOT_FOUND, "project not found: " + scope.id);
       }
       if (!project.workspaceId) {
-        throw new WorkbenchSessionError(SESSION_ERROR_CODES.WORKSPACE_NOT_FOUND, "project has no workspace: " + projectId);
+        throw new WorkbenchSessionError(SESSION_ERROR_CODES.WORKSPACE_NOT_FOUND, "project has no workspace: " + scope.id);
       }
-      return { workspaceId: project.workspaceId, cwd: undefined, scope: { kind: "project", scopeId: projectId } };
+      return { workspaceId: project.workspaceId, cwd: undefined, scope };
     }
 
-    const kb = repos.knowledgeBases.get(knowledgeBaseId);
+    const kb = repos.knowledgeBases.get(scope.id);
     if (!kb) {
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.KNOWLEDGE_BASE_NOT_FOUND, "knowledge base not found: " + knowledgeBaseId);
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.KNOWLEDGE_BASE_NOT_FOUND, "knowledge base not found: " + scope.id);
     }
     if (typeof sessionWorkspace === "function") {
-      const workspace = await sessionWorkspace({ kind: "knowledge_base", scopeId: knowledgeBaseId });
+      const workspace = await sessionWorkspace({ kind: "knowledge_base", scopeId: scope.id });
       if (!workspace?.id && !workspace?.workspaceId) {
-        throw new WorkbenchSessionError(SESSION_ERROR_CODES.WORKSPACE_NOT_FOUND, "knowledge base workspace unavailable: " + knowledgeBaseId);
+        throw new WorkbenchSessionError(SESSION_ERROR_CODES.WORKSPACE_NOT_FOUND, "knowledge base workspace unavailable: " + scope.id);
       }
       return {
         workspaceId: workspace.id ?? workspace.workspaceId,
         cwd: workspace.path,
-        scope: { kind: "knowledge_base", scopeId: knowledgeBaseId },
+        scope,
       };
     }
-    return { workspaceId: undefined, cwd: process.cwd(), scope: { kind: "knowledge_base", scopeId: knowledgeBaseId } };
+    return { workspaceId: undefined, cwd: process.cwd(), scope };
   }
 
   /**
@@ -610,7 +674,7 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
    * resume receives no model metadata, so rc.2's persisted creation header and
    * any durable selection events stay authoritative.
    */
-  async function resumeWorkbenchSession(sessionId, scope) {
+  async function resumeWorkbenchSession(sessionId) {
     try {
       const persistence = ctx.get("sessionPersistence");
       if (persistence === undefined) {
@@ -633,14 +697,6 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
           if (presets !== undefined && presetId !== undefined) {
             await presets.mount(agentCtx, presetId);
           }
-          if (typeof agentCtx.on === "function") {
-            const dispose = agentCtx.on("agent/pre-step", createWorkbenchRagPreStep({
-              retriever,
-              scope,
-              onQuestion: (question) => recordTitle(sessionId, question),
-            }), { prepend: true });
-            if (typeof dispose === "function") setupDisposers.push(dispose);
-          }
         },
       });
       let disposed = false;
@@ -661,236 +717,90 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
     }
   }
 
-  function persistSession({ sessionId, scope, chatId = null, selection }) {
-    return repos.workbenchSessions.upsert({
+  function persistSession({ sessionId, scope, selection, lifecycleStatus = "active", title = null }) {
+    return repos.workbenchSessions.create({
       sessionId,
-      scopeKind: scope.kind,
-      scopeId: scope.scopeId,
-      chatId,
+      scope,
       provider: selection.provider,
       model: selection.model,
       reasoningEffort: selection.reasoningEffort,
+      lifecycleStatus,
+      title,
     });
   }
 
-  async function persistOwnedSession({ sessionId, scope, chatId = null, selection, dispose, rollback }) {
+  async function persistOwnedSession({ sessionId, scope, selection, dispose, lifecycleStatus = "active", title = null }) {
     try {
-      persistSession({ sessionId, scope, chatId, selection });
+      persistSession({ sessionId, scope, selection, lifecycleStatus, title });
     } catch (err) {
       handles.delete(sessionId);
       repos.workbenchSessions.remove?.(sessionId);
-      await Promise.resolve(rollback?.()).catch(() => {});
       await Promise.resolve(dispose?.()).catch(() => {});
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.CHAT_PERSIST_FAILED, "failed to persist workbench session", err);
     }
   }
 
-  async function reopenScopedSession({ sessionId, scope }) {
+  async function reopenScopedSession({ sessionId }) {
     const saved = repos.workbenchSessions.get(sessionId);
     if (!saved) {
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "workbench session not found: " + sessionId);
     }
-    if (saved.scopeKind !== scope.kind || saved.scopeId !== scope.scopeId) {
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SCOPE_MISMATCH, "session does not belong to this context");
-    }
+    const scope = saved.scope;
     if (handles.has(sessionId)) {
-      const current = handles.get(sessionId);
-      if (current.scope.kind !== scope.kind || current.scope.scopeId !== scope.scopeId) {
-        throw new WorkbenchSessionError(SESSION_ERROR_CODES.SCOPE_MISMATCH, "session is already bound to another scope");
-      }
-      return { sessionId, scope, reused: true };
+      return { ...saved, reused: true };
     }
     if (ctx.agents.get(SessionId(sessionId)) !== undefined) {
       const liveAgent = ctx.agents.get(SessionId(sessionId));
       const nativeTitle = persistedSessionTitle(liveAgent?.session?.events);
       if (nativeTitle) repos.workbenchSessions.setTitleIfEmpty(sessionId, nativeTitle);
       const cleanup = installScopedRag(liveAgent, scope, sessionId);
-      registerHandle(sessionId, { dispose: null, cleanup, scope, chatId: null, owned: false });
-      repos.workbenchSessions.touch(sessionId);
-      return { sessionId, scope, reused: true };
+      registerHandle(sessionId, { dispose: null, cleanup, scope, owned: false });
+      return { ...repos.workbenchSessions.touch(sessionId), reused: true };
     }
-    const { dispose } = await resumeWorkbenchSession(sessionId, scope);
-    registerHandle(sessionId, { dispose, scope, chatId: null, owned: true });
-    repos.workbenchSessions.touch(sessionId);
-    return { sessionId, scope, reused: true };
+    const resumed = await resumeWorkbenchSession(sessionId);
+    const liveAgent = resumed.agent ?? ctx.agents.get(SessionId(sessionId));
+    const cleanup = installScopedRag(liveAgent, scope, sessionId);
+    registerHandle(sessionId, { dispose: resumed.dispose, cleanup, scope, owned: true });
+    return { ...repos.workbenchSessions.touch(sessionId), reused: true };
   }
 
-  /** Reopen an existing knowledge chat, restoring or reusing its DSH session. */
-  async function reopenKnowledgeChat({ knowledgeBaseId, chatId, workspaceId, cwd, scope }) {
-    const chat = repos.knowledgeChats.get(chatId);
-    if (!chat) {
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.CHAT_NOT_FOUND, "chat not found: " + chatId);
-    }
-    if (chat.knowledgeBaseId !== knowledgeBaseId) {
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.CHAT_KB_MISMATCH, "chat does not belong to knowledge base " + knowledgeBaseId);
-    }
-
-    const sessionId = chat.dshSessionId;
-    if (sessionId) {
-      // 1. Prefer a handle this service already registered.
-      if (handles.has(sessionId)) {
-        const existing = handles.get(sessionId);
-        if (existing.scope.scopeId !== scope.scopeId || existing.chatId !== chatId) {
-          throw new WorkbenchSessionError(
-            SESSION_ERROR_CODES.SCOPE_MISMATCH,
-            "session " + sessionId + " is already bound to a different knowledge base or chat",
-          );
-        }
-        return { sessionId, scope: existing.scope, chatId, reused: true };
-      }
-      // 2. Adopt a session already live in the DSH process but not owned here
-      //    (never disposed by this service).
-      if (ctx.agents.get(SessionId(sessionId)) !== undefined) {
-        const cleanup = installScopedRag(ctx.agents.get(SessionId(sessionId)), scope, sessionId);
-        registerHandle(sessionId, { dispose: null, cleanup, scope, chatId, owned: false });
-        if (!repos.workbenchSessions.get(sessionId)) {
-          try {
-            persistSession({ sessionId, scope, chatId, selection: { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL } });
-          } catch (err) {
-            handles.delete(sessionId);
-            throw new WorkbenchSessionError(SESSION_ERROR_CODES.CHAT_PERSIST_FAILED, "failed to persist workbench session", err);
-          }
-        }
-        return { sessionId, scope, chatId, reused: true };
-      }
-      // 3. Restore the persisted session and register an owned handle.
-      const saved = repos.workbenchSessions.get(sessionId);
-      const { dispose } = await resumeWorkbenchSession(sessionId, scope);
-      registerHandle(sessionId, { dispose, scope, chatId, owned: true });
-      if (saved) {
-        // The Workbench row is an index/list identity, not a second model
-        // selection store.  Resume must consume the durable DSH header/events
-        // and must not rewrite it from stale Workbench metadata.
-        repos.workbenchSessions.touch(sessionId);
-      } else {
-        await persistOwnedSession({
-          sessionId,
-          scope,
-          chatId,
-          selection: { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
-          dispose,
-        });
-      }
-      return { sessionId, scope, chatId, reused: true };
-    }
-
-    // No durable session yet: create then bind. Dispose the new handle if the
-    // bind fails so a half-registered session can never leak.
-    let created;
-    try {
-      created = await createWorkbenchSession(ctx, {
-        workspaceId, cwd, retriever, ragScope: scope, onQuestion: recordTitle,
-      });
-    } catch (err) {
-      if (err instanceof WorkbenchSessionError) throw err;
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_CREATE_FAILED, "session create failed", err);
-    }
-    let bound;
-    try {
-      bound = repos.knowledgeChats.bindSession({ id: chatId, dshSessionId: created.sessionId });
-    } catch (err) {
-      await created.dispose();
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.CHAT_PERSIST_FAILED, "failed to persist chat", err);
-    }
-    if (bound === null) {
-      await created.dispose();
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.CHAT_PERSIST_FAILED, "failed to persist chat: chat no longer exists");
-    }
-    registerHandle(created.sessionId, { dispose: created.dispose, scope, chatId, owned: true });
-    await persistOwnedSession({
-      sessionId: created.sessionId,
-      scope,
-      chatId,
-      selection: { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
-      dispose: created.dispose,
-      rollback: () => repos.knowledgeChats.remove?.(chatId),
-    });
-    return { sessionId: created.sessionId, scope, chatId, reused: false };
-  }
-
-  /** @param {{ projectId?: number, knowledgeBaseId?: number, title?: string | null, chatId?: number, resumeSessionId?: string }} input */
-  async function createSession({ projectId, knowledgeBaseId, title = null, chatId, resumeSessionId, scheduled = false }) {
-    const { workspaceId, cwd, scope } = await resolveScope({ projectId, knowledgeBaseId });
-    const hasChatId = chatId !== undefined && chatId !== null;
-
-    if (resumeSessionId !== undefined && resumeSessionId !== null) {
-      if (scope.kind === "knowledge_base" || hasChatId) {
-        throw new WorkbenchSessionError(SESSION_ERROR_CODES.INVALID_SCOPE, "knowledge-base sessions reopen through chatId");
-      }
-      return reopenScopedSession({ sessionId: resumeSessionId, scope });
-    }
-
-    if (hasChatId) {
-      if (scope.kind !== "knowledge_base") {
-        throw new WorkbenchSessionError(SESSION_ERROR_CODES.INVALID_SCOPE, "chatId is only valid for knowledgeBase sessions");
-      }
-      return reopenKnowledgeChat({ knowledgeBaseId: scope.scopeId, chatId, workspaceId, cwd, scope });
-    }
-
+  async function createScopedSession({ scope: inputScope, scheduled = false }) {
+    const { workspaceId, cwd, scope } = await resolveScope(inputScope);
     let created;
     try {
       created = await createWorkbenchSession(ctx, {
         workspaceId,
         cwd,
         scheduled,
-        retriever,
-        ragScope: scope,
-        onQuestion: recordTitle,
       });
     } catch (err) {
       if (err instanceof WorkbenchSessionError) throw err;
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_CREATE_FAILED, "session create failed", err);
     }
 
-    let resultChatId = null;
-    if (scope.kind === "knowledge_base") {
-      try {
-        const chat = repos.knowledgeChats.create({ knowledgeBaseId: scope.scopeId, title, dshSessionId: created.sessionId });
-        resultChatId = chat.id;
-      } catch (err) {
-        await created.dispose();
-        throw new WorkbenchSessionError(SESSION_ERROR_CODES.CHAT_PERSIST_FAILED, "failed to persist chat", err);
-      }
-    }
-
-    registerHandle(created.sessionId, { dispose: created.dispose, scope, chatId: resultChatId, owned: true });
-    // Project cards resume the newest *interactive* conversation. Host-owned
-    // scheduled runs have their own schedule_runs history and must never
-    // replace that card target merely because automation ran more recently.
-    if (!(scheduled && scope.kind === "project")) {
-      await persistOwnedSession({
-        sessionId: created.sessionId,
-        scope,
-        chatId: resultChatId,
-        selection: { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
-        dispose: created.dispose,
-        rollback: resultChatId === null ? undefined : () => repos.knowledgeChats.remove?.(resultChatId),
-      });
-    }
-
-    return {
-      sessionId: created.sessionId,
-      scope,
-      reused: false,
-      ...(resultChatId === null ? {} : { chatId: resultChatId }),
-    };
+    const cleanup = installScopedRag(created.agent, scope, created.sessionId, !scheduled);
+    registerHandle(created.sessionId, { dispose: created.dispose, cleanup, scope, owned: true });
+    return { sessionId: created.sessionId, scope, reused: false, scheduled };
   }
 
-  /** @param {{ sessionId: string, question: string, projectId?: number, knowledgeBaseId?: number }} input */
-  async function submitPrompt({ sessionId, question, projectId, knowledgeBaseId }) {
+  async function createSession({ scope, scheduled = false }) {
+    if (!scheduled) {
+      throw new WorkbenchSessionError(
+        SESSION_ERROR_CODES.INVALID_SCOPE,
+        "interactive sessions must be activated with their first prompt",
+      );
+    }
+    return createScopedSession({ scope, scheduled: true });
+  }
+
+  async function submitPrompt({ sessionId, question, oneShotSources = [] }) {
     const entry = handles.get(sessionId);
     if (!entry) {
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "session not found: " + sessionId);
     }
 
-    if (projectId !== undefined && knowledgeBaseId !== undefined) {
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SCOPE_MISMATCH, "provide at most one of projectId or knowledgeBaseId");
-    }
-    if (projectId !== undefined && (entry.scope.kind !== "project" || entry.scope.scopeId !== projectId)) {
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SCOPE_MISMATCH, "session scope does not match the declared project");
-    }
-    if (knowledgeBaseId !== undefined && (entry.scope.kind !== "knowledge_base" || entry.scope.scopeId !== knowledgeBaseId)) {
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SCOPE_MISMATCH, "session scope does not match the declared knowledge base");
+    if (typeof question !== "string" || question.trim() === "") {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED, "prompt must not be empty");
     }
 
     // Serialize submissions on the SAME session: the second request waits for
@@ -900,26 +810,211 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
       recordTitle(sessionId, question);
       // Retrieve BEFORE any message is sent: a retrieval failure sends nothing.
       let citations = [];
-      if (isKnowledgeScopedSession(entry.scope)) {
+      if (contextResolver && repos.workbenchSessions.get(sessionId)) {
+        try {
+          const sources = contextResolver.resolveForPrompt({ sessionId, oneShotSources });
+          for (const source of sources) {
+            if (source.kind === "session") {
+              if (typeof retriever.searchSession !== "function") {
+                throw new Error("session context index is unavailable");
+              }
+              const found = await retriever.searchSession({ sourceSessionId: source.id, query: question });
+              if (Array.isArray(found)) citations.push(...found);
+              continue;
+            }
+            const input = retrievalInputForSource(source);
+            if (!input) continue;
+            const found = await retriever.search({ query: question, ...input });
+            if (Array.isArray(found)) citations.push(...found);
+          }
+        } catch (err) {
+          throw new WorkbenchSessionError(SESSION_ERROR_CODES.RETRIEVAL_FAILED, "knowledge retrieval failed", err);
+        }
+      } else if (isKnowledgeScopedSession(entry.scope)) {
         try {
           citations = await retriever.search({
             query: question,
             scope: retrievalScopeKind(entry.scope.kind),
-            scopeId: entry.scope.scopeId,
+            scopeId: entry.scope.id,
           });
         } catch (err) {
           throw new WorkbenchSessionError(SESSION_ERROR_CODES.RETRIEVAL_FAILED, "knowledge retrieval failed", err);
         }
       }
 
-      const { outcome } = await submitWorkbenchPrompt(ctx, { sessionId, question, citations });
-      repos.workbenchSessions.touch(sessionId);
-      return { sessionId, citations, outcome };
+      const { outcome, userMessageId } = await submitWorkbenchPrompt(ctx, { sessionId, question, citations });
+      if (userMessageId && oneShotSources.length > 0) {
+        repos.messageContextRefs.addMany({ sessionId, messageId: userMessageId, sources: oneShotSources });
+      }
+      if (sessionIndex && typeof sessionIndex.reindex === "function") {
+        await sessionIndex.reindex(sessionId).catch(() => {});
+      }
+      if (repos.workbenchSessions.get(sessionId)) repos.workbenchSessions.touch(sessionId);
+      return { sessionId, citations, outcome, userMessageId };
     };
 
     const result = entry.tail.then(work, work);
     entry.tail = result.then(() => {}, () => {});
     return result;
+  }
+
+  async function activateDraft({ scope, question, pinnedSources = [], oneShotSources = [] }) {
+    const title = deriveSessionTitle(question);
+    if (!title) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED, "first prompt must not be empty");
+    }
+    const created = await createScopedSession({ scope });
+    await persistOwnedSession({
+      sessionId: created.sessionId,
+      scope: created.scope,
+      selection: { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
+      lifecycleStatus: "draft_failed",
+      title,
+      dispose: handles.get(created.sessionId)?.dispose,
+    });
+    try {
+      if (contextResolver) {
+        for (const source of pinnedSources) {
+          contextResolver.setOverride({ sessionId: created.sessionId, source, mode: "pinned" });
+        }
+      }
+      const result = await submitPrompt({ sessionId: created.sessionId, question, oneShotSources });
+      const saved = repos.workbenchSessions.updateLifecycle({ sessionId: created.sessionId, lifecycleStatus: "active" });
+      return { ...result, ...saved };
+    } catch (error) {
+      repos.workbenchSessions.updateLifecycle({ sessionId: created.sessionId, lifecycleStatus: "draft_failed" });
+      throw new WorkbenchSessionError(
+        SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED,
+        "failed to activate session draft",
+        error,
+        { sessionId: created.sessionId, lifecycleStatus: "draft_failed", pendingQuestion: question },
+      );
+    }
+  }
+
+  async function retryDraft({ sessionId, question, oneShotSources = [] }) {
+    const saved = repos.workbenchSessions.get(sessionId);
+    if (!saved) throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "workbench session not found: " + sessionId);
+    if (saved.lifecycleStatus !== "draft_failed") {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_NOT_RETRYABLE, "session is not a failed draft");
+    }
+    if (!handles.has(sessionId)) await reopenScopedSession({ sessionId });
+    try {
+      const result = await submitPrompt({ sessionId, question, oneShotSources });
+      const active = repos.workbenchSessions.updateLifecycle({ sessionId, lifecycleStatus: "active" });
+      return { ...result, ...active };
+    } catch (error) {
+      throw new WorkbenchSessionError(
+        SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED,
+        "failed to activate session draft",
+        error,
+        { sessionId, lifecycleStatus: "draft_failed", pendingQuestion: question },
+      );
+    }
+  }
+
+  async function openSession({ sessionId }) {
+    return reopenScopedSession({ sessionId });
+  }
+
+  async function renameSession({ sessionId, title }) {
+    const saved = repos.workbenchSessions.get(sessionId);
+    if (!saved) throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "workbench session not found: " + sessionId);
+    const normalizedTitle = typeof title === "string" ? title.trim() : "";
+    if (!normalizedTitle) throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_RENAME_FAILED, "session title is required");
+    try {
+      if (typeof renameNativeSession === "function") {
+        await renameNativeSession({ sessionId, title: normalizedTitle });
+      } else {
+        if (!handles.has(sessionId)) await openSession({ sessionId });
+        const titles = ctx.get("sessionTitle");
+        const agent = ctx.agents.get(SessionId(sessionId));
+        if (!titles || typeof titles.rename !== "function" || !agent?.session) {
+          throw new Error("native session title service is unavailable");
+        }
+        titles.rename(agent.session, normalizedTitle);
+        await ctx.sessions.flush(agent.session);
+      }
+    } catch (error) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_RENAME_FAILED, "failed to rename native session", error);
+    }
+    return repos.workbenchSessions.rename({ sessionId, title: normalizedTitle, titleLocked: true });
+  }
+
+  async function moveSession({ sessionId, scope: inputScope }) {
+    const saved = repos.workbenchSessions.get(sessionId);
+    if (!saved) throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "workbench session not found: " + sessionId);
+    const { scope } = await resolveScope(inputScope);
+    const entry = handles.get(sessionId);
+    if (entry) {
+      try { entry.cleanup?.(); } catch {}
+      entry.cleanup = installScopedRag(ctx.agents.get(SessionId(sessionId)), scope, sessionId);
+      entry.scope = scope;
+    }
+    const moved = repos.workbenchSessions.updateScope({ sessionId, scope });
+    contextResolver?.rebase({ sessionId, fromScope: saved.scope, toScope: scope });
+    return moved;
+  }
+
+  async function archiveSession(sessionId) {
+    if (!repos.workbenchSessions.get(sessionId)) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "workbench session not found: " + sessionId);
+    }
+    await release(sessionId);
+    return repos.workbenchSessions.archive(sessionId);
+  }
+
+  async function restoreSession(sessionId) {
+    const restored = repos.workbenchSessions.restore(sessionId);
+    if (!restored) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "workbench session not found: " + sessionId);
+    }
+    return restored;
+  }
+
+  async function deleteSession(sessionId) {
+    const saved = repos.workbenchSessions.get(sessionId);
+    if (!saved) return false;
+    await release(sessionId);
+    if (typeof deleteNativeSession !== "function") {
+      throw new WorkbenchSessionError(
+        SESSION_ERROR_CODES.SESSION_DELETE_UNAVAILABLE,
+        "native DSH session deletion is unavailable",
+      );
+    }
+    try {
+      const deleted = await deleteNativeSession({ sessionId });
+      if (deleted === false) throw new Error("native session was not deleted");
+      if (sessionIndex && typeof sessionIndex.remove === "function") {
+        await sessionIndex.remove(sessionId);
+      }
+    } catch (error) {
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_DELETE_FAILED, "failed to delete native session", error);
+    }
+    return repos.workbenchSessions.remove(sessionId);
+  }
+
+  function requireContextResolver() {
+    if (!contextResolver) {
+      throw new WorkbenchSessionError(
+        SESSION_ERROR_CODES.CONTEXT_SOURCE_UNAVAILABLE,
+        "session context resolver is unavailable",
+      );
+    }
+    return contextResolver;
+  }
+
+  function getContext(sessionId) {
+    return requireContextResolver().resolve({ sessionId });
+  }
+
+  function setContext({ sessionId, source, mode }) {
+    requireContextResolver().setOverride({ sessionId, source, mode });
+    return getContext(sessionId);
+  }
+
+  function removeContext({ sessionId, source }) {
+    return requireContextResolver().removeOverride({ sessionId, source });
   }
 
   async function dispose() {
@@ -951,8 +1046,32 @@ export function createSessionService({ ctx, repos, retriever, sessionWorkspace }
 
   function get(sessionId) {
     const entry = handles.get(sessionId);
-    return entry ? { scope: entry.scope, chatId: entry.chatId } : null;
+    return entry ? { scope: entry.scope } : null;
   }
 
-  return { createSession, submitPrompt, readProjectDailyConversation, release, dispose, has, get };
+  function canDeleteNativeSessions() {
+    return typeof deleteNativeSession === "function";
+  }
+
+  return {
+    createSession,
+    openSession,
+    activateDraft,
+    retryDraft,
+    submitPrompt,
+    renameSession,
+    moveSession,
+    archiveSession,
+    restoreSession,
+    deleteSession,
+    getContext,
+    setContext,
+    removeContext,
+    readProjectDailyConversation,
+    release,
+    dispose,
+    has,
+    get,
+    canDeleteNativeSessions,
+  };
 }

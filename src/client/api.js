@@ -5,11 +5,12 @@
 export const API_PREFIX = "/api/cpwb";
 
 export class CpwbApiError extends Error {
-  constructor(code, message, status = 0) {
+  constructor(code, message, status = 0, details) {
     super(message);
     this.name = "CpwbApiError";
     this.code = code;
     this.status = status;
+    if (details !== undefined) this.details = details;
   }
 }
 
@@ -66,7 +67,7 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       const err = data && typeof data.error === "object" && data.error !== null ? data.error : {};
       const code = typeof err.code === "string" && err.code ? err.code : "HTTP_" + response.status;
       const message = typeof err.message === "string" && err.message ? err.message : "request failed";
-      throw new CpwbApiError(code, message, response.status);
+      throw new CpwbApiError(code, message, response.status, err.details);
     }
     return data;
   }
@@ -86,8 +87,11 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       update({ id, name }, { signal } = {}) {
         return request({ method: "PATCH", path: "/projects/" + id, body: { name }, signal });
       },
-      remove(id, { signal } = {}) {
-        return request({ method: "DELETE", path: "/projects/" + id, signal });
+      deletionPlan(id, { signal } = {}) {
+        return request({ path: "/projects/" + id + "/deletion-plan", signal });
+      },
+      remove(id, { sessionPolicy = "detach", signal } = {}) {
+        return request({ method: "DELETE", path: "/projects/" + id, query: { sessionPolicy }, signal });
       },
     },
 
@@ -98,8 +102,11 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       create({ name, description }, { signal } = {}) {
         return request({ method: "POST", path: "/knowledge-bases", body: { name, description }, signal });
       },
-      remove(id, { signal } = {}) {
-        return request({ method: "DELETE", path: "/knowledge-bases/" + id, signal });
+      deletionPlan(id, { signal } = {}) {
+        return request({ path: "/knowledge-bases/" + id + "/deletion-plan", signal });
+      },
+      remove(id, { sessionPolicy = "detach", signal } = {}) {
+        return request({ method: "DELETE", path: "/knowledge-bases/" + id, query: { sessionPolicy }, signal });
       },
     },
 
@@ -112,6 +119,12 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       },
       unlink(projectId, knowledgeBaseId, { signal } = {}) {
         return request({ method: "DELETE", path: "/projects/" + projectId + "/knowledge-bases/" + knowledgeBaseId, signal });
+      },
+    },
+
+    knowledgeBaseProjects: {
+      list(knowledgeBaseId, { signal } = {}) {
+        return request({ path: "/knowledge-bases/" + knowledgeBaseId + "/projects", signal });
       },
     },
 
@@ -224,34 +237,54 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       },
     },
 
-    knowledgeChats: {
-      list({ knowledgeBaseId, signal } = {}) {
-        return request({ path: "/knowledge-chats", query: { knowledgeBaseId }, signal });
-      },
-      create({ knowledgeBaseId, title }, { signal } = {}) {
-        return request({ method: "POST", path: "/knowledge-chats", body: { knowledgeBaseId, title }, signal });
-      },
-    },
-
     chat: {
       sessions: {
-        list({ projectId, knowledgeBaseId, limit, offset, query, context } = {}, { signal } = {}) {
-          if (projectId != null && knowledgeBaseId != null) {
-            return Promise.reject(new CpwbApiError("INVALID_SCOPE", "provide at most one session scope"));
-          }
+        list({ scopeKind, scopeId, archived, limit, offset, query } = {}, { signal } = {}) {
           return request({
             path: "/chat/sessions",
-            query: { projectId, knowledgeBaseId, limit, offset, query, context },
+            query: { scopeKind, scopeId, archived, limit, offset, query },
             signal,
           });
         },
-        create({ projectId, knowledgeBaseId, title, chatId, resumeSessionId }, { signal } = {}) {
-          return request({ method: "POST", path: "/chat/sessions", body: { projectId, knowledgeBaseId, title, chatId, resumeSessionId }, signal });
+        create({ scope, question, pinnedSources = [], oneShotSources = [] }, { signal } = {}) {
+          return request({ method: "POST", path: "/chat/sessions", body: { scope, question, pinnedSources, oneShotSources }, signal });
         },
-      },
-      prompts: {
-        submit({ sessionId, question, projectId, knowledgeBaseId }, { signal } = {}) {
-          return request({ method: "POST", path: "/chat/prompts", body: { sessionId, question, projectId, knowledgeBaseId }, signal });
+        open(sessionId, { signal } = {}) {
+          return request({ method: "POST", path: "/chat/sessions/" + encodeURIComponent(sessionId) + "/open", body: {}, signal });
+        },
+        retry({ sessionId, question, oneShotSources = [] }, { signal } = {}) {
+          return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "retryDraft", question, oneShotSources }, signal });
+        },
+        rename({ sessionId, title }, { signal } = {}) {
+          return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "rename", title }, signal });
+        },
+        move({ sessionId, scope }, { signal } = {}) {
+          return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "move", scope }, signal });
+        },
+        archive(sessionId, { signal } = {}) {
+          return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "archive" }, signal });
+        },
+        restore(sessionId, { signal } = {}) {
+          return request({ method: "PATCH", path: "/chat/sessions/" + encodeURIComponent(sessionId), body: { operation: "restore" }, signal });
+        },
+        remove(sessionId, { signal } = {}) {
+          return request({ method: "DELETE", path: "/chat/sessions/" + encodeURIComponent(sessionId), signal });
+        },
+        context: {
+          get(sessionId, { signal } = {}) {
+            return request({ path: "/chat/sessions/" + encodeURIComponent(sessionId) + "/context", signal });
+          },
+          set({ sessionId, source, mode }, { signal } = {}) {
+            return request({ method: "PUT", path: "/chat/sessions/" + encodeURIComponent(sessionId) + "/context", body: { source, mode }, signal });
+          },
+          remove({ sessionId, source }, { signal } = {}) {
+            return request({
+              method: "DELETE",
+              path: "/chat/sessions/" + encodeURIComponent(sessionId) + "/context",
+              query: { sourceKind: source.kind, sourceId: source.id },
+              signal,
+            });
+          },
         },
       },
     },

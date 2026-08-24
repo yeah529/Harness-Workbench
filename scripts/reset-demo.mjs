@@ -459,10 +459,8 @@ async function seedData(runtime, seed, stage) {
         deleteProjectSessions.run(row.id);
         db.prepare("DELETE FROM projects WHERE id = ?").run(row.id);
       }
-      const deleteChat = db.prepare("DELETE FROM knowledge_chats WHERE dsh_session_id = ?");
       const deleteWorkbenchSession = db.prepare("DELETE FROM workbench_sessions WHERE session_id = ?");
       for (const sessionId of runtime.targetSessionIds) {
-        deleteChat.run(sessionId);
         deleteWorkbenchSession.run(sessionId);
       }
 

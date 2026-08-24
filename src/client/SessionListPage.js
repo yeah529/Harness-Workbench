@@ -1,5 +1,5 @@
 import React from "react";
-import { ChatCircleText, MagnifyingGlass } from "@phosphor-icons/react";
+import { Archive, ArrowCounterClockwise, ChatCircleText, MagnifyingGlass } from "@phosphor-icons/react";
 
 function scopeLabel(row) {
   if (row.contextName) return row.contextName;
@@ -15,7 +15,7 @@ function activityLabel(value) {
   return date.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-export function SessionListPage({ store, onOpenSession }) {
+export function SessionListPage({ archived = false, store, onOpenSession }) {
   const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const [query, setQuery] = React.useState("");
   const [context, setContext] = React.useState("");
@@ -23,19 +23,26 @@ export function SessionListPage({ store, onOpenSession }) {
 
   const load = React.useCallback((offset = 0) => store.actions.loadAllSessions({
     query: query.trim(),
-    context: context || null,
+    scopeKind: context || null,
+    archived,
     offset,
     limit: page.limit || 20,
-  }), [context, page.limit, query, store]);
+  }), [archived, context, page.limit, query, store]);
 
-  React.useEffect(function () { load(0).catch(function () {}); }, []);
+  React.useEffect(function () { load(0).catch(function () {}); }, [archived]);
 
-  return React.createElement("main", { className: "cpwb-session-list-page cpwb-workbench-page", "data-page": "sessions" },
+  const mutate = async function (row) {
+    if (archived) await store.actions.restoreSession(row.sessionId);
+    else await store.actions.archiveSession(row.sessionId);
+    await load(0).catch(function () {});
+  };
+
+  return React.createElement("main", { className: "cpwb-session-list-page cpwb-workbench-page", "data-page": archived ? "archive" : "sessions" },
     React.createElement("header", { className: "cpwb-page-header" },
       React.createElement("div", { className: "cpwb-page-header-main" },
-        React.createElement("span", null, "03 / CONVERSATIONS"),
-        React.createElement("h1", null, "全部会话"),
-        React.createElement("p", null, "项目、知识库与独立会话统一归档。")),
+        React.createElement("span", null, archived ? "04 / ARCHIVE" : "03 / CONVERSATIONS"),
+        React.createElement("h1", null, archived ? "归档会话" : "全部会话"),
+        React.createElement("p", null, archived ? "已归档记录仍可查看，并可随时恢复到最近会话。" : "项目、知识库与独立会话统一管理。")),
       React.createElement("div", { className: "cpwb-page-header-stat" }, React.createElement("strong", null, page.total), React.createElement("span", null, "条会话"))),
     React.createElement("form", { className: "cpwb-session-filters", onSubmit: function (event) { event.preventDefault(); load(0).catch(function () {}); } },
       React.createElement("label", null,
@@ -52,17 +59,27 @@ export function SessionListPage({ store, onOpenSession }) {
       : null,
     page.items.length === 0
       ? React.createElement("div", { className: "cpwb-session-list-empty" }, React.createElement(ChatCircleText, { size: 28, weight: "regular" }), React.createElement("span", null, "暂无匹配会话"))
-      : React.createElement("div", { className: "cpwb-session-list" }, page.items.map((row) => React.createElement("button", {
-        type: "button",
+      : React.createElement("div", { className: "cpwb-session-list" }, page.items.map((row) => React.createElement("article", {
         key: row.sessionId,
-        className: "cpwb-session-list-row",
-        onClick: () => onOpenSession?.(row.sessionId),
+        className: "cpwb-session-list-row" + (archived ? " cpwb-session-list-row-archived" : ""),
       },
-      React.createElement(ChatCircleText, { size: 20, weight: "regular", "aria-hidden": true }),
-      React.createElement("span", null,
-        React.createElement("strong", null, row.title || row.displayTitle || row.contextName || "未命名会话"),
-        React.createElement("small", null, scopeLabel(row))),
-      React.createElement("time", null, activityLabel(row.updatedAt))))),
+      React.createElement("button", { type: "button", className: "cpwb-session-list-open", onClick: () => onOpenSession?.(row.sessionId) },
+        React.createElement(ChatCircleText, { size: 20, weight: "regular", "aria-hidden": true }),
+        React.createElement("span", null,
+          React.createElement("strong", null, row.title || row.displayTitle || row.contextName || "未命名会话"),
+          React.createElement("small", null, scopeLabel(row))),
+        React.createElement("time", null, archived ? "归档于 " + activityLabel(row.archivedAt) : activityLabel(row.updatedAt))),
+      React.createElement("button", {
+        type: "button",
+        className: "cpwb-session-list-action",
+        disabled: state.action?.status === "loading",
+        onClick: () => mutate(row).catch(function () {}),
+        "aria-label": (archived ? "恢复会话 " : "归档会话 ") + (row.title || "未命名会话"),
+        title: archived ? "恢复会话" : "归档会话",
+      }, archived
+        ? React.createElement(ArrowCounterClockwise, { size: 18, weight: "regular", "aria-hidden": true })
+        : React.createElement(Archive, { size: 18, weight: "regular", "aria-hidden": true }),
+      React.createElement("span", null, archived ? "恢复会话" : "归档会话"))))),
     React.createElement("footer", { className: "cpwb-session-pagination" },
       React.createElement("span", null, "共 " + page.total + " 条"),
       React.createElement("div", null,

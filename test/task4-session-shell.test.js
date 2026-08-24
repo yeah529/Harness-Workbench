@@ -33,7 +33,7 @@ function shellStore() {
     recentSessions: [],
     sessionPage: { items: [], total: 0, limit: 20, offset: 0 },
     workbenchSessions: {
-      "session-cpwb-i": { scope: { kind: "independent", scopeId: null }, chatId: null },
+      "session-cpwb-i": { scope: { kind: "independent", id: null } },
     },
   };
   return {
@@ -148,16 +148,16 @@ test("Workbench history is isolated to the active project or knowledge-base scop
     },
   };
   const scopes = {
-    "session-cpwb-a": { scope: { kind: "project", scopeId: 1 } },
-    "session-cpwb-b": { scope: { kind: "project", scopeId: 2 } },
-    "session-cpwb-c": { scope: { kind: "knowledge_base", scopeId: 3 } },
+    "session-cpwb-a": { scope: { kind: "project", id: 1 } },
+    "session-cpwb-b": { scope: { kind: "project", id: 2 } },
+    "session-cpwb-c": { scope: { kind: "knowledge_base", id: 3 } },
   };
   assert.deepEqual(
-    listWorkbenchSessions(snapshot, scopes, { kind: "project", scopeId: 1 }).map((row) => row.sessionId),
+    listWorkbenchSessions(snapshot, scopes, { kind: "project", id: 1 }).map((row) => row.sessionId),
     ["session-cpwb-a"],
   );
   assert.deepEqual(
-    listWorkbenchSessions(snapshot, scopes, { kind: "knowledge_base", scopeId: 3 }).map((row) => row.sessionId),
+    listWorkbenchSessions(snapshot, scopes, { kind: "knowledge_base", id: 3 }).map((row) => row.sessionId),
     ["session-cpwb-c"],
   );
 });
@@ -229,7 +229,7 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
     getSnapshot: () => ({
       projects: [{ id: 7, name: "Research" }],
       workbenchSessions: { "session-cpwb-project-7": {
-        scope: { kind: "project", scopeId: 7 },
+        scope: { kind: "project", id: 7 },
         selection: { model: "deepseek-v4-flash", reasoningEffort: "high" },
       } },
       activeProjectId: 7,
@@ -242,8 +242,7 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
   clearWorkbenchSessions();
   registerWorkbenchSession({
     sessionId: "session-cpwb-project-7",
-    scope: { kind: "project", scopeId: 7 },
-    chatId: null,
+    scope: { kind: "project", id: 7 },
   });
   setProjectHomeOpen(false);
   try {
@@ -277,20 +276,21 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
   }
 });
 
-test("knowledge-base and independent conversations never render project-owned tools", () => {
+test("knowledge-base and independent conversations render scoped tools without project-owned actions", () => {
   for (const kind of ["knowledge_base", "independent"]) {
     const sessionId = "session-cpwb-" + kind;
     const store = {
       getSnapshot: () => ({
         projects: [],
         knowledgeBases: kind === "knowledge_base" ? [{ id: 2, name: "Workbench Docs" }] : [],
-        workbenchSessions: { [sessionId]: { scope: { kind, scopeId: kind === "independent" ? null : 2 } } },
+        workbenchSessions: { [sessionId]: { scope: { kind, id: kind === "independent" ? null : 2 } } },
       }),
       subscribe: () => () => {},
       actions: {},
     };
     const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, { sessionId, open: true, store }));
-    assert.doesNotMatch(html, /cpwb-project-rail/);
+    assert.match(html, /cpwb-project-rail/);
+    assert.doesNotMatch(html, />待办<|>每日总结</);
     assert.match(html, /cpwb-session-context-bar/);
     if (kind === "knowledge_base") {
       assert.match(html, /知识库会话/);

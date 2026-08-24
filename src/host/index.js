@@ -25,6 +25,8 @@ import { createWorkbenchSettings } from "./settings.js";
 import { createEmbeddingAdapter } from "./embedding.js";
 import { localDateKey } from "./timezone.js";
 import { createCodexAuth } from "./codex-auth.js";
+import { createContextResolver } from "./context.js";
+import { createSessionIndexAdapter } from "./session-index.js";
 
 /**
  * Host plugin dependencies: the DSH web server, the LLM adapter registry, and
@@ -32,7 +34,7 @@ import { createCodexAuth } from "./codex-auth.js";
  * composes. Optional services are read from the injected context without
  * probing the DSH context accessor for names that may not be registered.
  */
-const inject = ["webServer", "agents", "sessions", "workspaceRegistry", "credentials"];
+const inject = ["webServer", "agents", "sessions", "workspaceRegistry", "credentials", "sessionQuery"];
 
 function optionalContextService(ctx, name) {
   // Cordis only exposes injected services as context properties. The `in`
@@ -47,10 +49,9 @@ export function createScheduledRunPrompt(sessionService) {
   return async function runScheduledPrompt({ kind = "schedule", projectId, prompt }) {
     let session = null;
     try {
-      session = await sessionService.createSession({ projectId, scheduled: true });
+      session = await sessionService.createSession({ scope: { kind: "project", id: projectId }, scheduled: true });
       let result = await sessionService.submitPrompt({
         sessionId: session.sessionId,
-        projectId,
         question: prompt,
       });
       if ((kind === "summary" || kind === "todo") && result.outcome?.reason?.kind !== "completed") {
@@ -61,7 +62,6 @@ export function createScheduledRunPrompt(sessionService) {
         const requestedOutput = kind === "summary" ? "最终中文总结正文" : "最终待办逐行清单";
         result = await sessionService.submitPrompt({
           sessionId: session.sessionId,
-          projectId,
           question: `上一条响应不是可展示的${requestedOutput}。不要调用任何工具，不要输出 DSML、XML、代码或分析过程；只依据上一条消息已提供的数据，直接输出${requestedOutput}。`,
         });
         if (result.outcome?.reason?.kind !== "completed") {
@@ -98,6 +98,7 @@ function apply(ctx, config = {}) {
     try {
       db = openDatabase({ dataDir });
       const repos = createRepositories(db);
+      const contextResolver = createContextResolver({ repos });
       const settings = createWorkbenchSettings({ repos, dshInitial: config.settings?.initial });
       const ollama = createOllamaClient();
       vectorIndex = createVectorIndex({ dataDir });
@@ -132,7 +133,11 @@ function apply(ctx, config = {}) {
         }
       };
       indexer = createDocumentIndexer({ repos, vectorIndex, embedding });
-      const retriever = createRetriever({ repos, vectorIndex, embedding });
+      const sessionQuery = optionalContextService(ctx, "sessionQuery");
+      const sessionIndex = sessionQuery && typeof sessionQuery.readSession === "function"
+        ? createSessionIndexAdapter({ sessionQuery, embedding, vectorStore: vectorIndex })
+        : null;
+      const retriever = createRetriever({ repos, vectorIndex, embedding, sessionIndex });
       void indexer.reconcileStale().catch(() => {});
       queue = createIndexQueue({ repos, indexer });
       const sessionWorkspace = async ({ kind, scopeId }) => {
@@ -147,7 +152,7 @@ function apply(ctx, config = {}) {
         const title = kind === "knowledge_base" ? "Workbench KB " + scopeId : "Workbench Independent";
         return existing ?? ctx.workspaceRegistry.create(path, title);
       };
-      sessionService = createSessionService({ ctx, repos, retriever, sessionWorkspace });
+      sessionService = createSessionService({ ctx, repos, retriever, sessionWorkspace, contextResolver, sessionIndex });
       const runPrompt = createScheduledRunPrompt(sessionService);
       scheduler = createScheduler({
         repos,
@@ -157,6 +162,38 @@ function apply(ctx, config = {}) {
         projectConversations: (input) => sessionService.readProjectDailyConversation(input),
       });
       scheduler.start();
+      const permanentSessionDeletion = sessionService.canDeleteNativeSessions();
+      const deleteContainer = async ({ kind, id, sessionPolicy }) => {
+        const repository = kind === "project" ? repos.projects : repos.knowledgeBases;
+        const plan = repository.deletionPlan(id);
+        if (!plan) return null;
+        const sourceScope = { kind, id };
+        const moved = [];
+        try {
+          for (const sessionId of plan.sessionIds) {
+            if (sessionPolicy === "delete") await sessionService.deleteSession(sessionId);
+            else {
+              await sessionService.moveSession({ sessionId, scope: { kind: "independent", id: null } });
+              moved.push(sessionId);
+            }
+          }
+          for (const document of plan.orphanDocuments) await vectorIndex.deleteDocument(document.id);
+          const removed = repository.removeContainer(id);
+          for (const document of plan.orphanDocuments) {
+            await unlink(join(dataDir, "files", document.sha256)).catch((error) => {
+              if (error?.code !== "ENOENT") throw error;
+            });
+          }
+          return removed;
+        } catch (error) {
+          if (sessionPolicy === "detach" && repository.get(id)) {
+            for (const sessionId of moved.reverse()) {
+              await sessionService.moveSession({ sessionId, scope: sourceScope }).catch(() => {});
+            }
+          }
+          throw error;
+        }
+      };
       const api = createApi({
         repos,
         queue,
@@ -171,32 +208,9 @@ function apply(ctx, config = {}) {
         codexAuth,
         dshAdapter: optionalContextService(ctx, "dshAdapter") ?? null,
         services: {
-          deleteProject: async (projectId) => {
-            const plan = repos.projects.deletionPlan(projectId);
-            if (!plan) return null;
-            for (const sessionId of plan.sessionIds) await sessionService.release(sessionId);
-            for (const document of plan.orphanDocuments) await vectorIndex.deleteDocument(document.id);
-            const removed = repos.projects.removeCascade(projectId);
-            for (const document of plan.orphanDocuments) {
-              await unlink(join(dataDir, "files", document.sha256)).catch((error) => {
-                if (error?.code !== "ENOENT") throw error;
-              });
-            }
-            return removed;
-          },
-          deleteKnowledgeBase: async (knowledgeBaseId) => {
-            const plan = repos.knowledgeBases.deletionPlan(knowledgeBaseId);
-            if (!plan) return null;
-            for (const sessionId of plan.sessionIds) await sessionService.release(sessionId);
-            for (const document of plan.orphanDocuments) await vectorIndex.deleteDocument(document.id);
-            const removed = repos.knowledgeBases.removeCascade(knowledgeBaseId);
-            for (const document of plan.orphanDocuments) {
-              await unlink(join(dataDir, "files", document.sha256)).catch((error) => {
-                if (error?.code !== "ENOENT") throw error;
-              });
-            }
-            return removed;
-          },
+          permanentSessionDeletion,
+          deleteProject: ({ projectId, sessionPolicy }) => deleteContainer({ kind: "project", id: projectId, sessionPolicy }),
+          deleteKnowledgeBase: ({ knowledgeBaseId, sessionPolicy }) => deleteContainer({ kind: "knowledge_base", id: knowledgeBaseId, sessionPolicy }),
           runSchedule: (schedule) => scheduler.runScheduleNow(schedule),
           runSummary: ({ projectId, summaryDate }) => scheduler.runSummary(
             { id: projectId },

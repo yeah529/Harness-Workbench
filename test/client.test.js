@@ -108,20 +108,29 @@ test("api: projects list/create use exact path, method, JSON body", async () => 
   await api.projects.create({ name: "P", path: "/p", workspaceId: "w1" });
 });
 
-test("api: projects rename/delete use the item route", async () => {
+test("api: projects expose deletion preview and session policy", async () => {
   const fetchImpl = makeFetch(({ url, init }, index) => {
-    assert.equal(parse(url).pathname, "/api/cpwb/projects/1");
+    const parsed = parse(url);
     if (index === 0) {
+      assert.equal(parsed.pathname, "/api/cpwb/projects/1");
       assert.equal(init.method, "PATCH");
       assert.deepEqual(JSON.parse(init.body), { name: "Renamed" });
       return jsonResponse(200, { ...project, name: "Renamed" });
     }
+    if (index === 1) {
+      assert.equal(parsed.pathname, "/api/cpwb/projects/1/deletion-plan");
+      assert.equal(init.method ?? "GET", "GET");
+      return jsonResponse(200, { kind: "project", id: 1, name: "P", sessionCount: 0, relationshipCount: 0, documentCount: 0, orphanDocumentCount: 0, permanentDeletionAvailable: false });
+    }
+    assert.equal(parsed.pathname, "/api/cpwb/projects/1");
+    assert.equal(parsed.searchParams.get("sessionPolicy"), "detach");
     assert.equal(init.method, "DELETE");
-    return jsonResponse(200, { removed: true, projectId: 1, orphanDocumentIds: [] });
+    return jsonResponse(200, { removed: true, projectId: 1, sessionPolicy: "detach", detachedSessionCount: 0, deletedSessionCount: 0, orphanDocumentIds: [] });
   });
   const api = createCpwbApi({ fetchImpl });
   assert.equal((await api.projects.update({ id: 1, name: "Renamed" })).name, "Renamed");
-  assert.equal((await api.projects.remove(1)).removed, true);
+  assert.equal((await api.projects.deletionPlan(1)).sessionCount, 0);
+  assert.equal((await api.projects.remove(1, { sessionPolicy: "detach" })).removed, true);
 });
 
 test("project card exposes rename and delete controls without replacing its open action", () => {
@@ -146,13 +155,21 @@ test("api: knowledge-bases create drops undefined description", async () => {
   await api.knowledgeBases.create({ name: "K" });
 });
 
-test("api: knowledge-base deletion uses the collection id route", async () => {
-  const fetchImpl = makeFetch(({ url, init }) => {
-    assert.equal(parse(url).pathname, "/api/cpwb/knowledge-bases/9");
+test("api: knowledge-base deletion exposes preview and policy", async () => {
+  const fetchImpl = makeFetch(({ url, init }, index) => {
+    const parsed = parse(url);
+    if (index === 0) {
+      assert.equal(parsed.pathname, "/api/cpwb/knowledge-bases/9/deletion-plan");
+      return jsonResponse(200, { kind: "knowledge_base", id: 9, sessionCount: 1 });
+    }
+    assert.equal(parsed.pathname, "/api/cpwb/knowledge-bases/9");
+    assert.equal(parsed.searchParams.get("sessionPolicy"), "delete");
     assert.equal(init.method, "DELETE");
     return jsonResponse(200, { removed: true, orphanDocumentIds: [3] });
   });
-  await createCpwbApi({ fetchImpl }).knowledgeBases.remove(9);
+  const api = createCpwbApi({ fetchImpl });
+  await api.knowledgeBases.deletionPlan(9);
+  await api.knowledgeBases.remove(9, { sessionPolicy: "delete" });
 });
 
 test("api: project knowledge-base link/unlink use exact nested paths", async () => {
@@ -175,6 +192,15 @@ test("api: project knowledge-base link/unlink use exact nested paths", async () 
   await api.projectKnowledgeBases.list(7);
   await api.projectKnowledgeBases.link(7, 9);
   await api.projectKnowledgeBases.unlink(7, 9);
+});
+
+test("api: knowledge-base projects use the inverse relationship route", async () => {
+  const fetchImpl = makeFetch(({ url }) => {
+    assert.equal(parse(url).pathname, "/api/cpwb/knowledge-bases/2/projects");
+    return jsonResponse(200, [project]);
+  });
+  const api = createCpwbApi({ fetchImpl });
+  assert.deepEqual(await api.knowledgeBaseProjects.list(2), [project]);
 });
 
 test("api: documents list encodes scope/scopeId query", async () => {
@@ -332,7 +358,7 @@ test("api: schedules create/update/delete/run/history use the modal contract", a
   assert.deepEqual(await api.schedules.runs(6), [{ status: "failed", sessionId: "sess", error: "boom" }]);
 });
 
-test("api: summaries list/run and knowledge-chats list/create paths", async () => {
+test("api: summaries list/run/delete paths", async () => {
   const fetchImpl = makeFetch(({ url, init }, i) => {
     const { pathname } = parse(url);
     if (i === 0) {
@@ -349,20 +375,12 @@ test("api: summaries list/run and knowledge-chats list/create paths", async () =
       assert.equal(init.method, "DELETE");
       return jsonResponse(200, { removed: true, id: 9 });
     }
-    if (i === 3) {
-      assert.equal(pathname, "/api/cpwb/knowledge-chats");
-      return jsonResponse(200, []);
-    }
-    assert.equal(pathname, "/api/cpwb/knowledge-chats");
-    assert.deepEqual(JSON.parse(init.body), { knowledgeBaseId: 2, title: "chat" });
-    return jsonResponse(201, { id: 7, knowledgeBaseId: 2, title: "chat" });
+    throw new Error("unexpected request " + pathname);
   });
   const api = createCpwbApi({ fetchImpl });
   await api.summaries.list({ projectId: 1 });
   await api.summaries.run({ projectId: 1 });
   await api.summaries.remove(9);
-  await api.knowledgeChats.list({ knowledgeBaseId: 2 });
-  await api.knowledgeChats.create({ knowledgeBaseId: 2, title: "chat" });
 });
 
 test("store: deleting a summary refreshes the active project's summary list", async () => {
@@ -619,8 +637,9 @@ test("store: project rename/delete refresh the authoritative project list", asyn
       return jsonResponse(200, rows[0]);
     }
     if (pathname === "/api/cpwb/projects/1" && method === "DELETE") {
+      assert.equal(parse(url).searchParams.get("sessionPolicy"), "detach");
       rows = [];
-      return jsonResponse(200, { removed: true, projectId: 1, orphanDocumentIds: [] });
+      return jsonResponse(200, { removed: true, projectId: 1, sessionPolicy: "detach", detachedSessionCount: 0, deletedSessionCount: 0, orphanDocumentIds: [] });
     }
     if (pathname === "/api/cpwb/projects" && method === "GET") return jsonResponse(200, rows);
     return jsonResponse(404, { error: { code: "NOT_FOUND", message: "not found" } });
@@ -628,7 +647,7 @@ test("store: project rename/delete refresh the authoritative project list", asyn
   const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
   await store.actions.renameProject({ id: 1, name: "Renamed" });
   assert.equal(store.getSnapshot().projects[0].name, "Renamed");
-  await store.actions.deleteProject(1);
+  await store.actions.deleteProject({ id: 1, sessionPolicy: "detach" });
   assert.deepEqual(store.getSnapshot().projects, []);
 });
 

@@ -402,7 +402,7 @@ function createScheduler({ repos, clock = () => new Date(), runPrompt, intervalM
     let previousContent = null;
     try {
       if (previous?.status === "completed") previousContent = assertAutomationText(previous.content, "summary");
-    } catch { /* legacy protocol/reasoning content is not a valid fallback */ }
+    } catch { /* protocol or reasoning content is not valid summary output */ }
     if (!force && (automationAttempts.has(key) || previous)) return null;
     automationAttempts.add(key);
     repos.summaries.upsert({ projectId: project.id, summaryDate, status: "pending", content: null, now });

@@ -30,6 +30,7 @@ import { EMBEDDING_DIMENSIONS, EMBEDDING_MODEL } from "./ollama.js";
 
 /** LanceDB table name inside <dataDir>/vectors. */
 export const VECTOR_TABLE_NAME = "chunks";
+export const SESSION_VECTOR_TABLE_NAME = "session_chunks";
 
 /** Default embedding dimensionality (matches qwen3-embedding:0.6b). */
 export const DEFAULT_VECTOR_DIMENSIONS = 1024;
@@ -144,6 +145,74 @@ function buildSchema(dimensions) {
   ]);
 }
 
+function buildSessionSchema(dimensions) {
+  return new Schema([
+    new Field("row_id", new Utf8(), false),
+    new Field("source_session_id", new Utf8(), false),
+    new Field("source_kind", new Utf8(), false),
+    new Field("ordinal", new Int32(), false),
+    new Field("message_id", new Utf8(), false),
+    new Field("text", new Utf8(), false),
+    new Field("vector", new FixedSizeList(dimensions, new Field("item", new Float32(), false)), false),
+    new Field("content_hash", new Utf8(), false),
+    new Field("embedding_model", new Utf8(), false),
+  ]);
+}
+
+function sqlString(value) {
+  return "'" + String(value).replace(/'/g, "''") + "'";
+}
+
+function assertSessionId(sessionId) {
+  if (typeof sessionId !== "string" || sessionId.trim() === "") {
+    throw new VectorIndexError(VECTOR_ERROR_CODES.INVALID_ROW, "sourceSessionId must be a non-empty string");
+  }
+}
+
+function prepareSessionRow(row, index, sourceSessionId, dimensions) {
+  const where = "session row " + index + ": ";
+  if (!row || typeof row !== "object") {
+    throw new VectorIndexError(VECTOR_ERROR_CODES.INVALID_ROW, where + "must be an object");
+  }
+  assertVector(row.vector, dimensions, where + "vector");
+  if (!Number.isSafeInteger(row.ordinal) || row.ordinal < 0) {
+    throw new VectorIndexError(VECTOR_ERROR_CODES.INVALID_ROW, where + "ordinal must be a non-negative integer");
+  }
+  for (const field of ["row_id", "message_id", "text", "content_hash", "embedding_model"]) {
+    if (typeof row[field] !== "string" || row[field] === "") {
+      throw new VectorIndexError(VECTOR_ERROR_CODES.INVALID_ROW, where + field + " must be a non-empty string");
+    }
+  }
+  if (row.source_kind !== "session") {
+    throw new VectorIndexError(VECTOR_ERROR_CODES.INVALID_ROW, where + "source_kind must be session");
+  }
+  return {
+    row_id: row.row_id,
+    source_session_id: sourceSessionId,
+    source_kind: "session",
+    ordinal: row.ordinal,
+    message_id: row.message_id,
+    text: row.text,
+    vector: row.vector,
+    content_hash: row.content_hash,
+    embedding_model: row.embedding_model,
+  };
+}
+
+function mapSessionSearchRow(row) {
+  return {
+    rowId: row.row_id,
+    sourceSessionId: row.source_session_id,
+    sourceKind: row.source_kind,
+    ordinal: row.ordinal,
+    messageId: row.message_id,
+    text: row.text,
+    contentHash: row.content_hash,
+    embeddingModel: row.embedding_model,
+    distance: row._distance,
+  };
+}
+
 /**
  * Validate and normalize one row before any write, so a bad batch fails fast
  * and never touches the table. document_id is forced to the argument so a
@@ -228,6 +297,8 @@ export function createVectorIndex(options = {}) {
   let db = null;
   let table = null;
   let tablePromise = null;
+  let sessionTable = null;
+  let sessionTablePromise = null;
   let closed = false;
 
   async function connectDb() {
@@ -279,6 +350,37 @@ export function createVectorIndex(options = {}) {
       })();
     }
     return tablePromise;
+  }
+
+  async function ensureSessionTable() {
+    if (closed) {
+      throw new VectorIndexError(VECTOR_ERROR_CODES.NOT_INITIALIZED, "vector index is closed");
+    }
+    if (sessionTable) return sessionTable;
+    if (!sessionTablePromise) {
+      sessionTablePromise = (async () => {
+        await ensureTable();
+        const names = await db.tableNames();
+        if (names.includes(SESSION_VECTOR_TABLE_NAME)) {
+          sessionTable = await db.openTable(SESSION_VECTOR_TABLE_NAME);
+          const actual = await readVectorDimension(sessionTable);
+          if (actual != null && actual !== dimensions) {
+            const opened = sessionTable;
+            sessionTable = null;
+            opened.close();
+            throw new VectorIndexError(
+              VECTOR_ERROR_CODES.INVALID_DIMENSIONS,
+              "existing session vector table has " + actual + " dimensions, expected " + dimensions,
+            );
+          }
+        } else {
+          sessionTable = await db.createEmptyTable(SESSION_VECTOR_TABLE_NAME, buildSessionSchema(dimensions), { mode: "create" });
+          await sessionTable.setUnenforcedPrimaryKey("row_id");
+        }
+        return sessionTable;
+      })();
+    }
+    return sessionTablePromise;
   }
 
   const index = {
@@ -348,9 +450,63 @@ export function createVectorIndex(options = {}) {
       return rows.map(mapSearchRow);
     },
 
+    async replaceSession(sourceSessionId, rows) {
+      assertSessionId(sourceSessionId);
+      const prepared = (Array.isArray(rows) ? rows : []).map((row, i) =>
+        prepareSessionRow(row, i, sourceSessionId, dimensions),
+      );
+      const tbl = await ensureSessionTable();
+      const where = "source_session_id = " + sqlString(sourceSessionId);
+      if (prepared.length === 0) {
+        const result = await tbl.delete(where);
+        return Number(result.numDeletedRows ?? 0);
+      }
+      try {
+        await tbl
+          .mergeInsert("row_id")
+          .whenMatchedUpdateAll()
+          .whenNotMatchedInsertAll()
+          .whenNotMatchedBySourceDelete({ where })
+          .execute(prepared);
+      } catch (err) {
+        throw new VectorIndexError(
+          VECTOR_ERROR_CODES.WRITE_FAILED,
+          "vector replace failed for session " + sourceSessionId + ": " + messageOf(err),
+          { cause: err },
+        );
+      }
+      return prepared.length;
+    },
+
+    async searchSession({ sourceSessionId, vector, limit = 8 } = {}) {
+      assertSessionId(sourceSessionId);
+      assertVector(vector, dimensions, "query vector");
+      if (!Number.isSafeInteger(limit) || limit <= 0) {
+        throw new VectorIndexError(VECTOR_ERROR_CODES.INVALID_LIMIT, "limit must be a positive safe integer");
+      }
+      const tbl = await ensureSessionTable();
+      const rows = await tbl.vectorSearch(vector)
+        .distanceType("cosine")
+        .where("source_session_id = " + sqlString(sourceSessionId))
+        .limit(limit)
+        .toArray();
+      return rows.map(mapSessionSearchRow);
+    },
+
+    async deleteSession(sourceSessionId) {
+      assertSessionId(sourceSessionId);
+      const tbl = await ensureSessionTable();
+      const result = await tbl.delete("source_session_id = " + sqlString(sourceSessionId));
+      return Number(result.numDeletedRows ?? 0);
+    },
+
     /** Close the LanceDB table and connection. */
     async close() {
       closed = true;
+      if (sessionTable) {
+        try { sessionTable.close(); } catch { /* ignore */ }
+        sessionTable = null;
+      }
       if (table) {
         try { table.close(); } catch { /* ignore */ }
         table = null;
@@ -360,6 +516,7 @@ export function createVectorIndex(options = {}) {
         db = null;
       }
       tablePromise = null;
+      sessionTablePromise = null;
     },
   };
 

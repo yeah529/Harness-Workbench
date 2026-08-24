@@ -120,7 +120,6 @@ test("reset-demo clears only session state, rebuilds data, and seeds an idempote
     assert.equal(count("knowledge_bases"), 0);
     assert.equal(count("documents"), 0);
     assert.equal(count("chunks"), 0);
-    assert.equal(count("knowledge_chats"), 0);
     assert.equal(count("workbench_sessions"), 0);
     assert.equal(count("todos"), 6);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM todos WHERE source='auto'").get().count, 1);
@@ -178,10 +177,9 @@ test("reset-demo preserves sibling workspaces, sessions, projects, and global se
       now: new Date("2026-08-21T04:00:00.000Z"),
     });
     repositories.settings.set("network", { mode: "direct" }, new Date("2026-08-21T04:00:00.000Z"));
-    repositories.workbenchSessions.upsert({
+    repositories.workbenchSessions.create({
       sessionId: "keep-session",
-      scopeKind: "project",
-      scopeId: sibling.id,
+      scope: { kind: "project", id: sibling.id },
       provider: "deepseek-official",
       model: "deepseek-v4-flash",
       now: new Date("2026-08-21T04:00:00.000Z"),

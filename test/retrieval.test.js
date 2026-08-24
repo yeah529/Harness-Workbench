@@ -137,6 +137,39 @@ test("deleteDocument removes every row of a document", async (t) => {
   assert.equal(hits2.length, 1, "document 2 rows remain");
 });
 
+test("session vectors share the configured LanceDB root but stay isolated by session id", async (t) => {
+  const dataDir = await createTempDir();
+  const idx = createVectorIndex({ dataDir, dimensions: DIM });
+  t.after(async () => {
+    await idx.close();
+    await removeTempDir(dataDir);
+  });
+
+  const sessionRow = (sessionId, ordinal, vectorIndex) => ({
+    row_id: sessionId + ":" + ordinal,
+    source_session_id: sessionId,
+    source_kind: "session",
+    ordinal,
+    message_id: "message-" + ordinal,
+    text: "session text " + ordinal,
+    vector: unit(DIM, vectorIndex),
+    content_hash: "session-hash-" + ordinal,
+    embedding_model: EMBEDDING_MODEL,
+  });
+
+  await idx.replaceSession("session-a", [sessionRow("session-a", 0, 7)]);
+  await idx.replaceSession("session-b", [sessionRow("session-b", 0, 7)]);
+  const hits = await idx.searchSession({ sourceSessionId: "session-a", vector: unit(DIM, 7), limit: 5 });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].sourceSessionId, "session-a");
+  assert.equal(hits[0].sourceKind, "session");
+  assert.equal(hits[0].text, "session text 0");
+
+  assert.equal(await idx.deleteSession("session-a"), 1);
+  assert.deepEqual(await idx.searchSession({ sourceSessionId: "session-a", vector: unit(DIM, 7), limit: 5 }), []);
+  assert.equal((await idx.searchSession({ sourceSessionId: "session-b", vector: unit(DIM, 7), limit: 5 })).length, 1);
+});
+
 test("scope documentIds filter is applied before topK", async (t) => {
   const dataDir = await createTempDir();
   const idx = createVectorIndex({ dataDir, dimensions: DIM });
@@ -616,6 +649,31 @@ test("retriever isolates project scope and expands knowledgeBase scope from live
     [cDirect.id],
     "project C sees only its own direct file",
   );
+});
+
+test("retriever can target one uploaded document without expanding its container links", async (t) => {
+  const h = await makeHarness(makeFixedOllama(unit(DIM, 0)));
+  t.after(h.dispose);
+  const first = await seedDocument({
+    repos: h.repos,
+    vectorIndex: h.vectorIndex,
+    sha256: "1".repeat(64),
+    originalName: "first.md",
+    chunks: [mkChunk(0, "needle first")],
+    vectors: [unit(DIM, 1)],
+  });
+  const second = await seedDocument({
+    repos: h.repos,
+    vectorIndex: h.vectorIndex,
+    sha256: "2".repeat(64),
+    originalName: "second.md",
+    chunks: [mkChunk(0, "needle second")],
+    vectors: [unit(DIM, 1)],
+  });
+
+  const result = await h.retriever.search({ query: "needle", scope: "document", scopeId: first.doc.id });
+  assert.deepEqual([...new Set(result.map((item) => item.documentId))], [first.doc.id]);
+  assert.ok(!result.some((item) => item.documentId === second.doc.id));
 });
 
 test("failed, stale, and parsing documents are invisible despite live chunks and vectors", async (t) => {
