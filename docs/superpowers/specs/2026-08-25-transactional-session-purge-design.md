@@ -2,7 +2,7 @@
 
 日期：2026-08-25
 
-状态：视觉方向已确认，等待书面规格复审
+状态：书面规格已确认，进入实施计划
 
 目标基线：DeepSeek Harness `0.1.1-rc.2`
 
@@ -304,7 +304,7 @@ queued
 
 1. Launcher 重新解析支持的存储身份并比较任务快照。
 2. 将 `workspace.json` 和 `session_projcache.json` 复制到任务备份目录，记录哈希。
-3. DSH 已完全停止后，对 Workbench SQLite 主文件及仍存在的 WAL/SHM 文件制作同文件系统任务快照并记录哈希。维护期间不接受其他 Workbench 写入，因此恢复整份快照不会覆盖并发用户变更。
+3. DSH 已完全停止后，对 Workbench SQLite 主文件及仍存在的 WAL/SHM 文件、共享 LanceDB 向量目录制作同文件系统任务快照并记录哈希。向量表同时保存目标和非目标行，首版使用文件克隆优先、普通复制回退的完整快照保证可恢复。维护期间不接受其他 Workbench 写入，因此恢复整份快照不会覆盖并发用户变更。
 4. 把每个精确 Session 目录原子移动到 `quarantine/`；跨文件系统移动不被允许。
 5. 在内存中删除 `workspace.json` 的以下精确引用：
    - `global.archivedSessionIds` 中的目标 ID。
@@ -324,7 +324,7 @@ queued
    - 待办、定时任务和每日总结。
    - 文档关联与独占向量索引。
 3. SQLite 清理在单一数据库事务内完成。失败时回滚 SQLite 事务。
-4. 向量文件先移动到任务隔离区；数据库提交成功后再作为待销毁目标处理。
+4. Host 通过现有 VectorIndex API 删除目标 Session 和孤立文档的精确向量行；启动器保留停机时的共享向量目录快照，直到整个任务验证成功。
 5. Host 完成初始化和清理后写入与启动代次匹配的 ready 标记。
 6. Launcher 验证子进程存活、ready 标记匹配且任务状态为 `verifying`。
 
