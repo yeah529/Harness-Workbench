@@ -106,6 +106,73 @@ test("projects detach owned sessions before deleting only Workbench-owned projec
   assert.equal(repos.projectKnowledgeBases.listByProject(project.id).length, 0);
 });
 
+test("maintenance purge removes one frozen project graph in one transaction", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+
+  const project = repos.projects.create({ name: "Research" });
+  const document = repos.documents.upsertBySha256({
+    sha256: "9".repeat(64),
+    originalName: "private.md",
+  });
+  repos.documents.link({ documentId: document.id, scope: "project", scopeId: project.id });
+  repos.workbenchSessions.create({
+    sessionId: "session-a",
+    scope: { kind: "project", id: project.id },
+  });
+  repos.todos.create({
+    projectId: project.id,
+    title: "Ship",
+    dueAt: "2026-08-26T10:00:00.000Z",
+  });
+
+  const removed = repos.maintenance.purgeContainer({
+    kind: "project",
+    id: project.id,
+    expectedSessionIds: ["session-a"],
+    expectedOrphanDocumentIds: [document.id],
+  });
+
+  assert.equal(removed.container.name, "Research");
+  assert.equal(repos.projects.get(project.id), null);
+  assert.equal(repos.workbenchSessions.get("session-a"), null);
+  assert.equal(repos.documents.get(document.id), null);
+  assert.deepEqual(repos.todos.list({ projectId: project.id }), []);
+});
+
+test("maintenance purge rejects a stale plan without deleting any row", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+
+  const project = repos.projects.create({ name: "Research" });
+  repos.workbenchSessions.create({
+    sessionId: "session-a",
+    scope: { kind: "project", id: project.id },
+  });
+  const frozen = repos.projects.deletionPlan(project.id);
+  repos.workbenchSessions.create({
+    sessionId: "session-b",
+    scope: { kind: "project", id: project.id },
+  });
+
+  assert.throws(
+    () => repos.maintenance.purgeContainer({
+      kind: "project",
+      id: project.id,
+      expectedSessionIds: frozen.sessionIds,
+      expectedOrphanDocumentIds: [],
+    }),
+    /stale purge plan/i,
+  );
+  assert.equal(repos.projects.get(project.id).name, "Research");
+  assert.equal(repos.workbenchSessions.get("session-a").sessionId, "session-a");
+  assert.equal(repos.workbenchSessions.get("session-b").sessionId, "session-b");
+});
+
 test("unlink keeps a file while another association exists", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
@@ -232,6 +299,31 @@ test("schedule run key is unique by scheduleId and scheduledAt", async (t) => {
   assert.equal(repos.schedules.listRuns(schedule.id).length, 2);
 });
 
+test("unfinished schedule runs are failed on process recovery without touching terminal runs", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+
+  const project = repos.projects.create({ name: "Recovery" });
+  const schedule = repos.schedules.create({ projectId: project.id, name: "Nightly", rule: "daily 21:00" });
+  const interrupted = repos.schedules.claimRun({ scheduleId: schedule.id, scheduledAt: "2026-08-24T13:00:00.000Z" });
+  const completed = repos.schedules.claimRun({ scheduleId: schedule.id, scheduledAt: "2026-08-23T13:00:00.000Z" });
+  repos.schedules.completeRun({ id: completed.id, sessionId: "session-complete", finishedAt: "2026-08-23T13:02:00.000Z" });
+
+  const changed = repos.schedules.failRunning({
+    error: "interrupted: Workbench restarted before the scheduled run completed",
+    finishedAt: "2026-08-25T08:00:00.000Z",
+  });
+
+  assert.equal(changed, 1);
+  const rows = repos.schedules.listRuns(schedule.id);
+  assert.deepEqual(rows.map(({ id, status, sessionId, finishedAt, error }) => ({ id, status, sessionId, finishedAt, error })), [
+    { id: interrupted.id, status: "failed", sessionId: null, finishedAt: "2026-08-25T08:00:00.000Z", error: "interrupted: Workbench restarted before the scheduled run completed" },
+    { id: completed.id, status: "completed", sessionId: "session-complete", finishedAt: "2026-08-23T13:02:00.000Z", error: null },
+  ]);
+});
+
 test("schedules persist modal metadata and support deletion with run cascade", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
@@ -254,6 +346,36 @@ test("schedules persist modal metadata and support deletion with run cascade", a
   assert.equal(repos.schedules.remove(schedule.id), true);
   assert.equal(repos.schedules.get(schedule.id), null);
   assert.deepEqual(repos.schedules.listRuns(schedule.id), []);
+});
+
+test("a schedule binds one durable project session and exposes its session type", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+
+  const project = repos.projects.create({ name: "Automation" });
+  const schedule = repos.schedules.create({
+    projectId: project.id,
+    name: "夜间接口审计",
+    prompt: "检查接口并汇报",
+    rule: "daily 21:00",
+  });
+  repos.workbenchSessions.create({
+    sessionId: "session-cpwb-schedule",
+    scope: { kind: "project", id: project.id },
+    title: schedule.name,
+  });
+
+  assert.equal(schedule.sessionId, null);
+  const bound = repos.schedules.bindSession({ id: schedule.id, sessionId: "session-cpwb-schedule" });
+  assert.equal(bound.sessionId, "session-cpwb-schedule");
+  const session = repos.workbenchSessions.get("session-cpwb-schedule");
+  assert.equal(session.sessionType, "schedule");
+  assert.equal(session.scheduleName, "夜间接口审计");
+
+  repos.workbenchSessions.remove("session-cpwb-schedule");
+  assert.equal(repos.schedules.get(schedule.id).sessionId, null, "native session removal clears the schedule binding");
 });
 
 test("knowledge-base deletion preserves detached sessions and only removes orphaned documents", async (t) => {
@@ -1082,6 +1204,10 @@ test("v6 databases preserve valid sessions while removing the knowledge chat ide
     CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT);
     CREATE TABLE knowledge_bases (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT);
     CREATE TABLE project_knowledge_bases (project_id INTEGER NOT NULL, knowledge_base_id INTEGER NOT NULL, PRIMARY KEY(project_id, knowledge_base_id));
+    CREATE TABLE schedules (
+      id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, name TEXT NOT NULL, prompt TEXT, rule TEXT NOT NULL,
+      recurrence TEXT, starts_at TEXT, enabled INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, next_run_at TEXT
+    );
     CREATE TABLE knowledge_chats (id INTEGER PRIMARY KEY, knowledge_base_id INTEGER NOT NULL, title TEXT, dsh_session_id TEXT, created_at TEXT, updated_at TEXT);
     CREATE TABLE workbench_sessions (
       session_id TEXT PRIMARY KEY,
@@ -1150,6 +1276,10 @@ test("v7 databases gain archive metadata without losing sessions", async (t) => 
   legacy.exec(`
     CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT);
     CREATE TABLE knowledge_bases (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE schedules (
+      id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, name TEXT NOT NULL, prompt TEXT, rule TEXT NOT NULL,
+      recurrence TEXT, starts_at TEXT, enabled INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, next_run_at TEXT
+    );
     CREATE TABLE workbench_sessions (
       session_id TEXT PRIMARY KEY,
       scope_kind TEXT NOT NULL,
@@ -1177,4 +1307,55 @@ test("v7 databases gain archive metadata without losing sessions", async (t) => 
   assert.equal(db.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
   assert.equal(repos.workbenchSessions.get("session-cpwb-v7").archivedAt, null);
   assert.equal(db.prepare("PRAGMA table_info(workbench_sessions)").all().some((column) => column.name === "archived_at"), true);
+});
+
+test("v8 databases gain persistent schedule session binding", async (t) => {
+  const dataDir = await createTempDir();
+  const legacy = new DatabaseSync(join(dataDir, "workbench.sqlite"));
+  legacy.exec(`
+    CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE knowledge_bases (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE workbench_sessions (
+      session_id TEXT PRIMARY KEY,
+      scope_kind TEXT NOT NULL,
+      scope_id INTEGER,
+      provider TEXT,
+      model TEXT,
+      reasoning_effort TEXT,
+      title TEXT,
+      title_locked INTEGER NOT NULL DEFAULT 0,
+      lifecycle_status TEXT NOT NULL DEFAULT 'active',
+      archived_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE schedules (
+      id INTEGER PRIMARY KEY,
+      project_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      prompt TEXT,
+      rule TEXT NOT NULL,
+      recurrence TEXT,
+      starts_at TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_run_at TEXT,
+      next_run_at TEXT
+    );
+    INSERT INTO projects VALUES (1, 'P', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    INSERT INTO workbench_sessions VALUES (
+      'session-cpwb-v8', 'project', 1, NULL, NULL, NULL, '旧会话', 0, 'active', NULL,
+      '2026-08-20T00:00:00.000Z', '2026-08-20T01:00:00.000Z'
+    );
+    INSERT INTO schedules VALUES (1, 1, '旧任务', 'run', 'daily 21:00', 'daily', NULL, 1, NULL, NULL);
+    PRAGMA user_version = 8;
+  `);
+  legacy.close();
+
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
+  assert.equal(repos.schedules.get(1).sessionId, null);
+  assert.equal(repos.schedules.bindSession({ id: 1, sessionId: "session-cpwb-v8" }).sessionId, "session-cpwb-v8");
+  assert.equal(repos.workbenchSessions.get("session-cpwb-v8").sessionType, "schedule");
 });

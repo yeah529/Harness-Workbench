@@ -27,6 +27,9 @@ import { localDateKey } from "./timezone.js";
 import { createCodexAuth } from "./codex-auth.js";
 import { createContextResolver } from "./context.js";
 import { createSessionIndexAdapter } from "./session-index.js";
+import { createMaintenanceService } from "./maintenance.js";
+import { createPurgeJobStore } from "../maintenance/purge-jobs.js";
+import { DEFAULT_DSH_HOME } from "./config.js";
 
 /**
  * Host plugin dependencies: the DSH web server, the LLM adapter registry, and
@@ -34,7 +37,7 @@ import { createSessionIndexAdapter } from "./session-index.js";
  * composes. Optional services are read from the injected context without
  * probing the DSH context accessor for names that may not be registered.
  */
-const inject = ["webServer", "agents", "sessions", "workspaceRegistry", "credentials", "sessionQuery", "subagents"];
+const inject = ["webServer", "agents", "sessions", "workspaceRegistry", "credentials", "sessionQuery"];
 
 function optionalContextService(ctx, name) {
   // Cordis only exposes injected services as context properties. The `in`
@@ -50,10 +53,12 @@ export function createScheduledRunPrompt(sessionService) {
     let session = null;
     try {
       if (kind === "schedule") {
-        const result = await sessionService.runScheduledSubagent({
+        const result = await sessionService.runScheduledSession({
           projectId,
+          scheduleId: schedule?.id ?? null,
           prompt,
           title: schedule?.name || "定时任务执行",
+          sessionId: schedule?.sessionId ?? null,
         });
         session = { sessionId: result.sessionId };
         return result;
@@ -97,6 +102,8 @@ export function createScheduledRunPrompt(sessionService) {
 /** Host plugin body — build the stack and own its lifecycle. */
 function apply(ctx, config = {}) {
   const dataDir = resolveDataRoot({ dataDir: config.dataDir });
+  const runtimeEnv = config.env ?? process.env;
+  const dshHome = config.dshHome ?? runtimeEnv.DSH_HOME ?? DEFAULT_DSH_HOME;
 
   ctx.effect(() => {
     let disposeRoute = null;
@@ -105,6 +112,7 @@ function apply(ctx, config = {}) {
     let queue = null;
     let sessionService = null;
     let scheduler = null;
+    let maintenanceStartup = null;
     try {
       db = openDatabase({ dataDir });
       const repos = createRepositories(db);
@@ -112,6 +120,15 @@ function apply(ctx, config = {}) {
       const settings = createWorkbenchSettings({ repos, dshInitial: config.settings?.initial });
       const ollama = createOllamaClient();
       vectorIndex = createVectorIndex({ dataDir });
+      const jobs = createPurgeJobStore({ dshHome });
+      const maintenance = createMaintenanceService({
+        env: runtimeEnv,
+        dshHome,
+        dataDir,
+        repos,
+        vectorIndex,
+        jobs,
+      });
       const credentials = optionalContextService(ctx, "credentials");
       const codexAuth = createCodexAuth({ credentials });
       const getCredential = async (ref) => {
@@ -148,7 +165,6 @@ function apply(ctx, config = {}) {
         ? createSessionIndexAdapter({ sessionQuery, embedding, vectorStore: vectorIndex })
         : null;
       const retriever = createRetriever({ repos, vectorIndex, embedding, sessionIndex });
-      void indexer.reconcileStale().catch(() => {});
       queue = createIndexQueue({ repos, indexer });
       const sessionWorkspace = async ({ kind, scopeId }) => {
         if (!ctx.workspaceRegistry || typeof ctx.workspaceRegistry.resolveByPath !== "function" || typeof ctx.workspaceRegistry.create !== "function") {
@@ -171,9 +187,10 @@ function apply(ctx, config = {}) {
         automationPrompts: () => settings.get("automationPrompts"),
         projectConversations: (input) => sessionService.readProjectDailyConversation(input),
       });
-      scheduler.start();
-      const permanentSessionDeletion = sessionService.canDeleteNativeSessions();
       const deleteContainer = async ({ kind, id, sessionPolicy }) => {
+        if (sessionPolicy !== "detach") {
+          throw new Error("permanent deletion requires a maintenance purge job");
+        }
         const repository = kind === "project" ? repos.projects : repos.knowledgeBases;
         const plan = repository.deletionPlan(id);
         if (!plan) return null;
@@ -181,11 +198,8 @@ function apply(ctx, config = {}) {
         const moved = [];
         try {
           for (const sessionId of plan.sessionIds) {
-            if (sessionPolicy === "delete") await sessionService.deleteSession(sessionId);
-            else {
-              await sessionService.moveSession({ sessionId, scope: { kind: "independent", id: null } });
-              moved.push(sessionId);
-            }
+            await sessionService.moveSession({ sessionId, scope: { kind: "independent", id: null } });
+            moved.push(sessionId);
           }
           for (const document of plan.orphanDocuments) await vectorIndex.deleteDocument(document.id);
           const removed = repository.removeContainer(id);
@@ -218,7 +232,7 @@ function apply(ctx, config = {}) {
         codexAuth,
         dshAdapter: optionalContextService(ctx, "dshAdapter") ?? null,
         services: {
-          permanentSessionDeletion,
+          maintenance,
           deleteProject: ({ projectId, sessionPolicy }) => deleteContainer({ kind: "project", id: projectId, sessionPolicy }),
           deleteKnowledgeBase: ({ knowledgeBaseId, sessionPolicy }) => deleteContainer({ kind: "knowledge_base", id: knowledgeBaseId, sessionPolicy }),
           runSchedule: (schedule) => scheduler.runScheduleNow(schedule),
@@ -232,6 +246,18 @@ function apply(ctx, config = {}) {
         },
       });
       disposeRoute = api.register(ctx.webServer);
+      const startOrdinaryServices = async () => {
+        scheduler.start();
+        await indexer.reconcileStale().catch(() => {});
+        await maintenance.markGenerationReady();
+      };
+      maintenanceStartup = maintenance.isLocked()
+        ? maintenance.finalizeStartupJob().then(startOrdinaryServices)
+        : startOrdinaryServices();
+      maintenanceStartup.catch(() => {
+        // The launcher observes the missing generation-ready marker plus the
+        // persisted restoring state, then owns rollback and recovery startup.
+      });
     } catch (err) {
       // Release whatever was created before the failure, in reverse order, so a
       // failed boot never leaks an adapter, route, or open resources.
@@ -249,6 +275,7 @@ function apply(ctx, config = {}) {
       // handle before closing the index/vector/database layers in order.
       disposeRoute();
       scheduler.stop();
+      await maintenanceStartup?.catch(() => {});
       await sessionService.dispose();
       await queue.close();
       await vectorIndex.close();

@@ -125,6 +125,7 @@ export function createWorkbenchStore(api) {
     contextBySession: {},
     globalSchedules: [],
     linkedProjects: [],
+    maintenanceJob: null,
   };
 
   const listeners = new Set();
@@ -377,6 +378,78 @@ export function createWorkbenchStore(api) {
     refreshProject,
     refreshDocuments,
     loadSettings,
+
+    startContainerPurge: async function startContainerPurge(input) {
+      if (typeof api.maintenance?.createPurgeJob !== "function") {
+        throw new Error("maintenance purge API is unavailable");
+      }
+      const job = await runAction(
+        "startContainerPurge",
+        () => api.maintenance.createPurgeJob(input),
+      );
+      setState({
+        maintenanceJob: {
+          ...job,
+          disconnected: false,
+          lastPollError: null,
+        },
+      });
+      return job;
+    },
+
+    refreshPurgeJob: async function refreshPurgeJob(jobId) {
+      if (typeof api.maintenance?.getPurgeJob !== "function") {
+        throw new Error("maintenance purge API is unavailable");
+      }
+      try {
+        const job = await api.maintenance.getPurgeJob(jobId);
+        setState({
+          maintenanceJob: {
+            ...(state.maintenanceJob?.jobId === jobId ? state.maintenanceJob : {}),
+            ...job,
+            disconnected: false,
+            lastPollError: null,
+          },
+        });
+        return job;
+      } catch (error) {
+        const lastConfirmed = state.maintenanceJob?.jobId === jobId
+          ? state.maintenanceJob
+          : { jobId };
+        setState({
+          maintenanceJob: {
+            ...lastConfirmed,
+            disconnected: true,
+            lastPollError: toError(error),
+          },
+        });
+        return null;
+      }
+    },
+
+    resumePurgeJob: async function resumePurgeJob(jobId) {
+      if (state.maintenanceJob?.jobId !== jobId) {
+        setState({
+          maintenanceJob: {
+            jobId,
+            state: "reconnecting",
+            disconnected: false,
+            lastPollError: null,
+          },
+        });
+      }
+      return actions.refreshPurgeJob(jobId);
+    },
+
+    clearPurgeJob: async function clearPurgeJob() {
+      const terminal = state.maintenanceJob?.state;
+      if (!terminal) return;
+      if (terminal !== "completed" && terminal !== "restored") {
+        throw new Error("maintenance job is not complete");
+      }
+      setState({ maintenanceJob: null });
+      await refresh();
+    },
 
     updateTimezone: async function updateTimezone(timezone) {
       const result = await runAction("updateTimezone", () => api.settings.updateTimezone(timezone));
@@ -731,7 +804,7 @@ export function createWorkbenchStore(api) {
       } finally {
         untrack(ac);
       }
-      await loadLinked.run(projectId);
+      await Promise.all([loadLinked.run(projectId), loadKnowledgeBases.run()]);
     },
 
     unlinkProjectKnowledgeBase: async function unlinkProjectKnowledgeBase(projectId, knowledgeBaseId) {
@@ -742,7 +815,7 @@ export function createWorkbenchStore(api) {
       } finally {
         untrack(ac);
       }
-      await loadLinked.run(projectId);
+      await Promise.all([loadLinked.run(projectId), loadKnowledgeBases.run()]);
     },
 
     uploadFiles: async function uploadFiles({ files, scope, scopeId }) {
@@ -882,13 +955,23 @@ export function createWorkbenchStore(api) {
 
     runSchedule: async function runSchedule(id) {
       const ac = track(new AbortController());
+      let result;
+      let failure = null;
       try {
-        await runAction("runSchedule", () => api.schedules.run(id, { signal: ac.signal }), { scheduleId: id });
+        result = await runAction("runSchedule", () => api.schedules.run(id, { signal: ac.signal }), { scheduleId: id });
+      } catch (error) {
+        failure = error;
       } finally {
         untrack(ac);
       }
       if (state.activeProjectId != null) await refreshProject(state.activeProjectId, lastToday ?? localDateKey());
       await loadRecent.run(RECENT_SESSION_LIMIT);
+      if (failure) {
+        setState({ action: { type: "runSchedule", scheduleId: id, status: "error", error: toError(failure) } });
+        throw failure;
+      }
+      setState({ action: { type: "runSchedule", scheduleId: id, status: "done", error: null, result } });
+      return result;
     },
 
     runSummary: async function runSummary({ projectId, summaryDate }) {

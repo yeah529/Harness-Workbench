@@ -7,6 +7,7 @@ import {
   GearSix,
   House,
   ListBullets,
+  ClockCountdown,
   Plus,
 } from "@phosphor-icons/react";
 import { HarnessWordmark, SidebarBrand, WorkbenchNodeMark } from "./SidebarBrand.js";
@@ -32,6 +33,7 @@ function sessionScope(session) {
 }
 
 function sessionType(session) {
+  if (session?.sessionType === "schedule") return { Icon: ClockCountdown, label: "定时任务会话", kind: "schedule" };
   const scope = sessionScope(session);
   if (scope.kind === "project") return { Icon: FolderOpen, label: "项目会话", kind: "project" };
   if (scope.kind === "knowledge_base") return { Icon: Books, label: "知识库会话", kind: "knowledge-base" };
@@ -104,7 +106,7 @@ function sessionButton(session, activeSessionId, onOpenSession, onArchiveSession
           role: "img",
           "aria-label": type.label,
         }),
-        React.createElement("span", null, contextLabel(session))))),
+        React.createElement("span", null, type.kind === "schedule" ? `定时任务 · ${contextLabel(session)}` : contextLabel(session))))),
   React.createElement("button", {
     type: "button",
     className: "cpwb-sidebar-session-action",
@@ -129,8 +131,7 @@ export function WorkbenchSidebar({
   const nav = [
     ["home", "首页", House],
     ["sessions", "全部会话", ListBullets],
-    ["archive", "归档会话", Archive],
-    ["knowledge", "知识库", Books],
+    ["knowledge", "知识芯片", Books],
   ];
   return React.createElement("aside", { className: "cpwb-global-sidebar", "aria-label": "Workbench 全局导航" },
     React.createElement("div", { className: "cpwb-sidebar-primary" },

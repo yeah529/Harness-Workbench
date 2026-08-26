@@ -238,7 +238,7 @@ export function ProjectHome(props) {
               React.createElement(Database, { size: 26, weight: "regular", "aria-hidden": true }),
               React.createElement("span", null,
                 React.createElement("small", null, "02 / KNOWLEDGE NODES"),
-                React.createElement("strong", null, "打开知识库中心"),
+                React.createElement("strong", null, "接入知识芯片"),
                 React.createElement("em", null, knowledgeBases.length + " 个知识库 · 上传、向量化、检索与会话")),
               React.createElement(ArrowUpRight, { size: 20, weight: "regular", "aria-hidden": true }))))),
     React.createElement("footer", { className: "cpwb-home-footer" }, "DEEPSEEK HARNESS / PROJECT INTELLIGENCE SYSTEM", React.createElement("span", null, "LOCAL-FIRST · VECTOR-READY")),

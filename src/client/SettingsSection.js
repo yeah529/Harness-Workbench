@@ -1,5 +1,7 @@
 import React from "react";
 import { Key, Plug, ShieldCheck, SpinnerGap, WarningCircle } from "@phosphor-icons/react";
+import { CyberSelect } from "./CyberSelect.js";
+import { SessionListPage } from "./SessionListPage.js";
 
 const WORKBENCH_SECTIONS = [
   ["workbench", "总览"],
@@ -8,6 +10,7 @@ const WORKBENCH_SECTIONS = [
   ["embedding", "向量模型"],
   ["network", "网络 / Proxy"],
   ["auth", "Codex"],
+  ["archive", "归档会话"],
 ];
 
 function ActionMessage({ message }) {
@@ -29,8 +32,12 @@ function TimezonePanel({ settings, store }) {
     React.createElement("span", { className: "cpwb-eyebrow" }, "WORKBENCH / GLOBAL TIMEZONE"),
     React.createElement("h2", null, "全局时区"),
     React.createElement("p", null, "所有待办、定时任务、总结与界面时间统一使用 Workbench 时区。"),
-    React.createElement("select", { value: draft, onChange: (event) => setDraft(event.target.value), "aria-label": "Workbench 时区" },
-      ...["Asia/Shanghai", "Asia/Tokyo", "Asia/Singapore", "Europe/London", "America/Los_Angeles", "America/New_York", "UTC"].map((zone) => React.createElement("option", { key: zone, value: zone }, zone))),
+    React.createElement(CyberSelect, {
+      value: draft,
+      onChange: setDraft,
+      ariaLabel: "Workbench 时区",
+      options: ["Asia/Shanghai", "Asia/Tokyo", "Asia/Singapore", "Europe/London", "America/Los_Angeles", "America/New_York", "UTC"].map((zone) => ({ value: zone, label: zone })),
+    }),
     React.createElement("input", { value: draft, onChange: (event) => setDraft(event.target.value), placeholder: "合法 IANA ID，例如 Europe/Berlin", "aria-label": "自定义 IANA 时区" }),
     React.createElement("button", { type: "button", onClick: save, disabled: saving }, saving ? "保存中…" : "保存时区"),
     React.createElement(ActionMessage, { message }),
@@ -91,7 +98,12 @@ function EmbeddingPanel({ settings, store }) {
   return React.createElement("div", { className: "cpwb-settings-panel" },
     React.createElement("span", { className: "cpwb-eyebrow" }, "KNOWLEDGE / EMBEDDING"),
     React.createElement("h2", null, "向量模型"),
-    React.createElement("label", null, "Provider", React.createElement("select", { value: draft.provider, onChange: patch("provider") }, React.createElement("option", { value: "ollama" }, "Ollama"), React.createElement("option", { value: "openai-compatible" }, "OpenAI-compatible"))),
+    React.createElement("label", null, "Provider", React.createElement(CyberSelect, {
+      value: draft.provider,
+      onChange: (provider) => setDraft((current) => ({ ...current, provider })),
+      ariaLabel: "Embedding Provider",
+      options: [{ value: "ollama", label: "Ollama" }, { value: "openai-compatible", label: "OpenAI-compatible" }],
+    })),
     React.createElement("label", null, "Base URL", React.createElement("input", { value: draft.baseUrl, onChange: patch("baseUrl"), "aria-label": "Embedding Base URL" })),
     React.createElement("label", null, "Model", React.createElement("input", { value: draft.model, onChange: patch("model"), "aria-label": "Embedding model" })),
     React.createElement("label", null, "Dimensions", React.createElement("input", { type: "number", value: draft.dimensions, onChange: patch("dimensions"), "aria-label": "Embedding dimensions" })),
@@ -132,7 +144,12 @@ function NetworkPanel({ settings, store }) {
   return React.createElement("div", { className: "cpwb-settings-panel" },
     React.createElement("span", { className: "cpwb-eyebrow" }, "RUNTIME / NETWORK"),
     React.createElement("h2", null, "网络 / Proxy"),
-    React.createElement("label", null, "模式", React.createElement("select", { value: draft.mode, onChange: (event) => setDraft({ ...draft, mode: event.target.value }) }, React.createElement("option", { value: "inherit" }, "继承 DSH"), React.createElement("option", { value: "direct" }, "直连"), React.createElement("option", { value: "custom" }, "自定义 Proxy"))),
+    React.createElement("label", null, "模式", React.createElement(CyberSelect, {
+      value: draft.mode,
+      onChange: (mode) => setDraft((current) => ({ ...current, mode })),
+      ariaLabel: "网络模式",
+      options: [{ value: "inherit", label: "继承 DSH" }, { value: "direct", label: "直连" }, { value: "custom", label: "自定义 Proxy" }],
+    })),
     React.createElement("label", null, "Proxy URL", React.createElement("input", { value: draft.proxyUrl, onChange: (event) => setDraft({ ...draft, proxyUrl: event.target.value }), "aria-label": "Proxy URL" })),
     React.createElement("label", null, "No Proxy", React.createElement("input", { value: draft.noProxy, onChange: (event) => setDraft({ ...draft, noProxy: event.target.value }), "aria-label": "No Proxy" })),
     React.createElement("div", { className: "cpwb-settings-actions" },
@@ -197,12 +214,21 @@ function AuthPanel({ settings, store }) {
   );
 }
 
-function WorkbenchPanel({ section, settings, store }) {
+function WorkbenchPanel({ section, settings, store, close, onOpenSession }) {
   if (section === "timezone") return React.createElement(TimezonePanel, { settings, store });
   if (section === "automation") return React.createElement(AutomationPromptsPanel, { settings, store });
   if (section === "embedding") return React.createElement(EmbeddingPanel, { settings, store });
   if (section === "network") return React.createElement(NetworkPanel, { settings, store });
   if (section === "auth") return React.createElement(AuthPanel, { settings, store });
+  if (section === "archive") return React.createElement(SessionListPage, {
+    archived: true,
+    embedded: true,
+    store,
+    onOpenSession: typeof onOpenSession === "function" ? async function (sessionId) {
+      await onOpenSession(sessionId);
+      close?.();
+    } : undefined,
+  });
   return React.createElement("div", { className: "cpwb-settings-panel" },
     React.createElement("span", { className: "cpwb-eyebrow" }, "HARNESS WORKBENCH"),
     React.createElement("h2", null, "Workbench 设置"),
@@ -211,7 +237,7 @@ function WorkbenchPanel({ section, settings, store }) {
 }
 
 /** A settings.section contribution rendered by rc.2's native SettingsRoot. */
-export function WorkbenchSettingsSection({ store, initialActive = "workbench" }) {
+export function WorkbenchSettingsSection({ store, initialActive = "workbench", close, onOpenSession }) {
   const [active, setActive] = React.useState(initialActive);
   const subscribe = store?.subscribe || (() => () => {});
   const getSnapshot = store?.getSnapshot || (() => ({}));
@@ -228,6 +254,6 @@ export function WorkbenchSettingsSection({ store, initialActive = "workbench" })
         React.createElement("p", null, "项目工作台扩展设置；模型、插件和 Agent 预设继续由左侧原生分类管理。"))),
     React.createElement("nav", { className: "cpwb-settings-nav", "aria-label": "Workbench 设置分类" },
       ...WORKBENCH_SECTIONS.map(([id, label]) => React.createElement("button", { key: id, type: "button", className: active === id ? "cpwb-active" : "", onClick: () => setActive(id) }, label))),
-    React.createElement("main", { className: "cpwb-settings-content" }, React.createElement(WorkbenchPanel, { section: active, settings, store })),
+    React.createElement("main", { className: "cpwb-settings-content" }, React.createElement(WorkbenchPanel, { section: active, settings, store, close, onOpenSession })),
   );
 }

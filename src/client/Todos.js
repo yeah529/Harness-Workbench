@@ -2,6 +2,7 @@ import React from "react";
 import { Check, PencilSimple, Plus, Trash } from "@phosphor-icons/react";
 import { glyph, ICONS, Empty } from "./icons.js";
 import { GlobalModal } from "./globalModal.js";
+import { useArrivalPulse } from "./arrivalPulse.js";
 import { addLocalDays, DEFAULT_TIME_ZONE, formatInstant, localDateKey, localDateTimeParts, zonedDateTimeToUtc } from "./timezone.js";
 
 function pad(value) { return String(value).padStart(2, "0"); }
@@ -87,6 +88,7 @@ export function Todos({ store, projectId, now, initialQuery = "" }) {
   const [query, setQuery] = React.useState(initialQuery);
   const action = state.action;
   const todos = Array.isArray(state.todos) ? state.todos : [];
+  const arrivingTodoIds = useArrivalPulse(todos);
   const timeZone = state.settings?.timezone || DEFAULT_TIME_ZONE;
   const error = action?.type === "todo" && action.status === "error" ? action.error : null;
   const save = (payload) => {
@@ -111,7 +113,7 @@ export function Todos({ store, projectId, now, initialQuery = "" }) {
     error ? React.createElement("div", { className: "cpwb-status cpwb-status-error", role: "alert" }, error.message || String(error)) : null,
     sections.length === 0 ? React.createElement(Empty, { glyph: glyph(ICONS.grid) }, view === "completed" ? "暂无已完成待办" : "暂无待处理待办，添加第一项") : React.createElement("div", { className: "cpwb-todo-sections" }, sections.map((section) => React.createElement("section", { key: section.key, className: "cpwb-todo-section cpwb-todo-section-" + section.status },
       React.createElement("h4", null, section.label),
-      React.createElement("div", { className: "cpwb-list" }, section.items.map((todo) => React.createElement("article", { key: todo.id, className: "cpwb-todo-row" + (todo.done ? " cpwb-item-done" : "") + (section.status === "overdue" ? " cpwb-todo-row-overdue" : "") },
+      React.createElement("div", { className: "cpwb-list" }, section.items.map((todo) => React.createElement("article", { key: todo.id, className: "cpwb-todo-row" + (todo.done ? " cpwb-item-done" : "") + (section.status === "overdue" ? " cpwb-todo-row-overdue" : "") + (arrivingTodoIds.has(String(todo.id)) ? " cpwb-entry-arrived" : "") },
         React.createElement("button", { type: "button", className: "cpwb-check" + (todo.done ? " cpwb-done" : ""), onClick: () => toggle(todo), "aria-label": todo.done ? "标记未完成" : "标记完成" }, todo.done ? React.createElement(Check, { size: 14, weight: "bold" }) : null),
         React.createElement("button", { type: "button", className: "cpwb-item-main cpwb-todo-details", onClick: () => setDialog({ todo }) },
           React.createElement("span", { className: "cpwb-item-title" }, todo.title),

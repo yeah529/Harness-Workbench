@@ -12,8 +12,8 @@ function nodeArtwork() {
   });
 }
 
-function wordmarkArtwork() {
-  return [
+function wordmarkArtwork(fractured = false) {
+  const artwork = [
     React.createElement("path", {
       key: "main",
       "data-logo-part": "wordmark-main",
@@ -50,6 +50,15 @@ function wordmarkArtwork() {
       ].join(" "),
     }),
   ];
+  if (fractured) {
+    artwork.push(React.createElement("path", {
+      key: "fractures",
+      "data-logo-part": "wordmark-fractures",
+      fill: "var(--cpwb-logo-cut, #080a10)",
+      d: "M-2 7h55l-6 4H-8Z M54 17h79l-7 4H48Z M10 30h61l-7 4H4Z M139 8h61l-6 4h-61Z M154 27h80l-8 5h-79Z M42 54h51l-4 2H38Z M126 59h78l-4 2h-78Z",
+    }));
+  }
+  return artwork;
 }
 
 export function WorkbenchNodeMark({ className = "cpwb-workbench-node-mark", ...props }) {
@@ -64,14 +73,14 @@ export function WorkbenchNodeMark({ className = "cpwb-workbench-node-mark", ...p
     nodeArtwork());
 }
 
-export function HarnessWordmark({ className = "cpwb-harness-wordmark", ...props }) {
+export function HarnessWordmark({ className = "cpwb-harness-wordmark", fractured = false, ...props }) {
   return React.createElement("svg", {
       ...props,
       className,
       viewBox: "0 0 236 66",
       "aria-hidden": props["aria-label"] ? undefined : true,
     },
-    ...wordmarkArtwork());
+    ...wordmarkArtwork(fractured));
 }
 
 export function HarnessWorkbenchLogo() {
@@ -101,5 +110,13 @@ export function SidebarBrand({ status = "DSH // LOCAL NODE" }) {
   return React.createElement("footer", { className: "cpwb-sidebar-brand-footer", "aria-label": "Harness Workbench" },
     React.createElement("div", { className: "cpwb-sidebar-status" }, status),
     React.createElement("div", { className: "cpwb-sidebar-wordmark" },
-      React.createElement(HarnessWordmark, { className: "cpwb-sidebar-footer-wordmark" })));
+      React.createElement(HarnessWordmark, { className: "cpwb-sidebar-footer-wordmark", fractured: true }),
+      React.createElement(HarnessWordmark, {
+        className: "cpwb-sidebar-footer-wordmark cpwb-sidebar-footer-wordmark-channel cpwb-sidebar-footer-wordmark-cyan",
+        "data-logo-channel": "cyan",
+      }),
+      React.createElement(HarnessWordmark, {
+        className: "cpwb-sidebar-footer-wordmark cpwb-sidebar-footer-wordmark-channel cpwb-sidebar-footer-wordmark-magenta",
+        "data-logo-channel": "magenta",
+      })));
 }

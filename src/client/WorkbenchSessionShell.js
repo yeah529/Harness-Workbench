@@ -1,5 +1,6 @@
 import React from "react";
-import { Books, CalendarCheck, Check, ClockCountdown, Copy, File, FolderOpen, MagnifyingGlass, Note, Paperclip, Plus, Robot, TreeStructure } from "@phosphor-icons/react";
+import { ArrowClockwise, Books, CalendarCheck, Check, ClockCountdown, Copy, File, FolderOpen, House, MagnifyingGlass, Note, Paperclip, Plus, Robot, TreeStructure, WarningCircle } from "@phosphor-icons/react";
+import { CyberSelect } from "./CyberSelect.js";
 import { getWorkbenchSession } from "./workbenchSessions.js";
 import { useHomeOpen } from "./ProjectHome.js";
 import { Todos } from "./Todos.js";
@@ -20,6 +21,7 @@ import { SubagentDrawer } from "./SubagentDrawer.js";
 import { DEFAULT_TIME_ZONE, localDateTimeParts } from "./timezone.js";
 
 export { parseNativeModelSelectionLabel } from "./ModelIndicator.js";
+export { KnowledgeSourcesTail } from "./KnowledgeSourcesTail.js";
 
 export function compactSessionId(sessionId) {
   const value = String(sessionId || "");
@@ -214,13 +216,18 @@ export function GlobalSchedulesPanel({ state, store, initialDialog = false }) {
       React.createElement(MagnifyingGlass, { size: 15, "aria-hidden": true }),
       React.createElement("input", { type: "search", value: query, onChange: (event) => setQuery(event.target.value), placeholder: "搜索任务名称或提示词", "aria-label": "搜索全局定时任务" })),
     React.createElement("div", { className: "cpwb-context-filters", "aria-label": "筛选全局定时任务" },
-      React.createElement("label", null, "项目", React.createElement("select", { value: projectFilter, onChange: (event) => setProjectFilter(event.target.value) },
-        React.createElement("option", { value: "all" }, "全部项目"),
-        (state.projects || []).map((project) => React.createElement("option", { key: project.id, value: String(project.id) }, project.name)))),
-      React.createElement("label", null, "状态", React.createElement("select", { value: statusFilter, onChange: (event) => setStatusFilter(event.target.value) },
-        React.createElement("option", { value: "all" }, "全部状态"),
-        React.createElement("option", { value: "enabled" }, "已启用"),
-        React.createElement("option", { value: "paused" }, "已暂停"))),
+      React.createElement("label", null, "项目", React.createElement(CyberSelect, {
+        value: projectFilter,
+        onChange: setProjectFilter,
+        ariaLabel: "筛选定时任务所属项目",
+        options: [{ value: "all", label: "全部项目" }, ...(state.projects || []).map((project) => ({ value: String(project.id), label: project.name }))],
+      })),
+      React.createElement("label", null, "状态", React.createElement(CyberSelect, {
+        value: statusFilter,
+        onChange: setStatusFilter,
+        ariaLabel: "筛选定时任务状态",
+        options: [{ value: "all", label: "全部状态" }, { value: "enabled", label: "已启用" }, { value: "paused", label: "已暂停" }],
+      })),
       React.createElement("label", null, "触发日期", React.createElement("input", { type: "date", value: dateFilter, onChange: (event) => setDateFilter(event.target.value) }))),
     React.createElement("div", { className: "cpwb-context-filter-count" }, "显示 " + visibleRows.length + " / " + rows.length + " 项"),
     visibleRows.length === 0 ? React.createElement("div", { className: "cpwb-context-empty" }, rows.length ? "没有符合筛选条件的定时任务" : "暂无全局定时任务") : null,
@@ -289,6 +296,8 @@ export function WorkbenchSessionShell(props) {
     props.sessions?.list?.getSnapshot || (() => readSessionSnapshot(props.sessions)),
   );
   const sessionId = props.sessionId ?? sessionSnapshot.current;
+  const opening = props.opening === true;
+  const openError = props.openError?.message ? props.openError : null;
   const runtimeEntry = getWorkbenchSession(sessionId);
   const persistedEntry = state.workbenchSessions?.[sessionId];
   const entry = persistedEntry ? { ...runtimeEntry, ...persistedEntry } : runtimeEntry;
@@ -314,10 +323,10 @@ export function WorkbenchSessionShell(props) {
 
   React.useEffect(function () {
     setSubagentOpen(false);
-    if (!visible || !sessionId || typeof props.sessions?.refreshSubagents !== "function") return undefined;
+    if (!visible || opening || openError || !sessionId || typeof props.sessions?.refreshSubagents !== "function") return undefined;
     props.sessions.refreshSubagents(sessionId).catch(function () {});
     return undefined;
-  }, [props.sessions, sessionId, visible]);
+  }, [openError, opening, props.sessions, sessionId, visible]);
 
   React.useEffect(function () {
     setActiveTool(scope?.kind === "project" ? "todos" : scope?.kind === "knowledge_base" ? "documents" : "context");
@@ -338,10 +347,10 @@ export function WorkbenchSessionShell(props) {
   }, [entry?.title, props.store, scope?.kind, sessionId]);
 
   React.useEffect(function () {
-    if (projectId != null && state.activeProjectId !== projectId) {
+    if (!opening && !openError && projectId != null && state.activeProjectId !== projectId) {
       props.store.actions.refreshProject(projectId).catch(function () {});
     }
-  }, [projectId, props.store, state.activeProjectId]);
+  }, [openError, opening, projectId, props.store, state.activeProjectId]);
 
   if (!visible || !sessionId || !String(sessionId).startsWith("session-cpwb-")) return null;
 
@@ -386,21 +395,26 @@ export function WorkbenchSessionShell(props) {
       React.createElement("div", { className: "cpwb-project-tool-body" }, body));
   };
 
-  const dockedContextRail = contextSeatAvailable && layoutMode === "desktop";
-  const drawerContextRail = contextSeatAvailable && layoutMode !== "desktop";
+  const transitioning = opening || Boolean(openError);
+  const dockedContextRail = !transitioning && contextSeatAvailable && layoutMode === "desktop";
+  const drawerContextRail = !transitioning && contextSeatAvailable && layoutMode !== "desktop";
   const contextType = projectId != null ? "项目会话" : knowledgeBaseId != null ? "知识库会话" : "独立会话";
   const contextName = projectId != null
     ? project?.name || "项目工作台"
     : knowledgeBaseId != null
       ? knowledgeBase?.name || entry?.contextName || "知识库"
       : entry?.title || entry?.displayTitle || "新独立会话";
-  const contextDetail = projectId != null
-    ? String(Array.isArray(state.linkedKnowledgeBases) ? state.linkedKnowledgeBases.length : 0) + " 个关联知识库"
-    : knowledgeBaseId != null
-      ? "向量检索已启用"
-      : "未关联项目 · 未启用知识库";
+  const contextDetail = opening
+    ? "正在恢复会话"
+    : openError
+      ? "恢复失败"
+      : projectId != null
+        ? String(Array.isArray(state.linkedKnowledgeBases) ? state.linkedKnowledgeBases.length : 0) + " 个关联知识库"
+        : knowledgeBaseId != null
+          ? "向量检索已启用"
+          : "未关联项目 · 未启用知识库";
   return React.createElement("div", {
-    className: "cpwb-session-chrome cpwb-workbench-overlay cpwb-has-context-rail " + (projectId != null ? "cpwb-project-context" : "cpwb-standalone-context"),
+    className: "cpwb-session-chrome cpwb-workbench-overlay " + (dockedContextRail ? "cpwb-has-context-rail " : "") + (projectId != null ? "cpwb-project-context" : "cpwb-standalone-context") + (transitioning ? " cpwb-session-transitioning" : ""),
     "data-session-context": scope?.kind || "unknown",
     "data-right-owner": dockedContextRail ? "context-tools" : !contextSeatAvailable ? "native-details" : undefined,
     "aria-label": "Workbench 会话框架",
@@ -419,6 +433,22 @@ export function WorkbenchSessionShell(props) {
         "aria-label": "打开子智能体活动，共 " + subagentCount + " 个",
         "aria-expanded": subagentOpen,
       }, React.createElement(Robot, { size: 16, weight: "duotone", "aria-hidden": true }), React.createElement("span", null, "SUBAGENT"), React.createElement("b", null, String(subagentCount).padStart(2, "0"))))),
+  transitioning ? React.createElement("div", {
+    className: "cpwb-session-transition",
+    role: opening ? "status" : "alert",
+    "aria-live": opening ? "polite" : "assertive",
+  }, React.createElement("div", { className: "cpwb-session-transition-panel" },
+    React.createElement("div", { className: "cpwb-session-transition-code" }, openError ? "SESSION RESTORE ERROR" : "SESSION HANDSHAKE"),
+    React.createElement("div", { className: "cpwb-session-transition-mark", "aria-hidden": true }, openError
+      ? React.createElement(WarningCircle, { size: 28, weight: "regular" })
+      : React.createElement(ArrowClockwise, { size: 28, weight: "regular" })),
+    React.createElement("strong", null, openError ? "会话恢复失败" : "正在恢复会话"),
+    React.createElement("p", null, openError ? openError.message : "正在同步 DSH 会话与 Workspace，请稍候。"),
+    opening ? React.createElement("div", { className: "cpwb-session-transition-signal", "aria-hidden": true },
+      React.createElement("i", null), React.createElement("i", null), React.createElement("i", null)) : null,
+    openError ? React.createElement("div", { className: "cpwb-session-transition-actions" },
+      React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-primary", onClick: props.onRetryOpen }, React.createElement(ArrowClockwise, { size: 15, "aria-hidden": true }), "重试"),
+      React.createElement("button", { type: "button", className: "cpwb-btn", onClick: props.onHome }, React.createElement(House, { size: 15, "aria-hidden": true }), "返回首页")) : null)) : null,
   dockedContextRail ? contextRail(false) : null,
   drawerContextRail ? React.createElement("button", {
     ref: projectTriggerRef,
@@ -435,11 +465,11 @@ export function WorkbenchSessionShell(props) {
     side: "right",
     triggerRef: projectTriggerRef,
   }, contextRail(true)) : null,
-  React.createElement(SubagentDrawer, {
+  !transitioning ? React.createElement(SubagentDrawer, {
     open: subagentOpen,
     parentSessionId: sessionId,
     connection: props.connection,
     sessions: props.sessions,
     onClose: () => setSubagentOpen(false),
-  }));
+  }) : null);
 }

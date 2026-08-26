@@ -5,7 +5,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { createWorkbenchStore } from "../src/client/store.js";
-import { DraftConversation, NewSessionDialog } from "../src/client/NewSessionDialog.js";
+import * as newSessionDialogModule from "../src/client/NewSessionDialog.js";
 import { ContainerDeleteDialog } from "../src/client/ContainerDeleteDialog.js";
 import {
   WorkbenchSidebar,
@@ -21,6 +21,8 @@ import {
   INDEPENDENT_TOOL_TABS,
   GlobalSchedulesPanel,
 } from "../src/client/WorkbenchSessionShell.js";
+
+const { DraftConversation, NewSessionDialog } = newSessionDialogModule;
 
 function sessionApi({ materializeError } = {}) {
   const calls = [];
@@ -160,6 +162,7 @@ test("new-session dialog exposes one owner choice and inherited-context preview"
   assert.match(html, /独立会话/);
   assert.match(html, /默认上下文/);
   assert.doesNotMatch(html, /会话标题/);
+  assert.doesNotMatch(html, /<select/);
 });
 
 test("zero-id draft uses the full conversation chrome with model and image controls", () => {
@@ -185,6 +188,29 @@ test("zero-id draft uses the full conversation chrome with model and image contr
   assert.match(html, /发送前不创建 Session/);
 });
 
+test("pending model menu dismisses only for pointers outside its root", () => {
+  assert.equal(typeof newSessionDialogModule.watchPendingModelDismiss, "function");
+  const listeners = new Map();
+  const documentObject = {
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    removeEventListener(type, listener) {
+      if (listeners.get(type) === listener) listeners.delete(type);
+    },
+  };
+  const inside = {};
+  const outside = {};
+  const root = { contains: (target) => target === inside };
+  let dismissals = 0;
+  const cleanup = newSessionDialogModule.watchPendingModelDismiss(documentObject, root, () => { dismissals += 1; });
+
+  listeners.get("pointerdown")({ target: inside });
+  assert.equal(dismissals, 0);
+  listeners.get("pointerdown")({ target: outside });
+  assert.equal(dismissals, 1);
+  cleanup();
+  assert.equal(listeners.has("pointerdown"), false);
+});
+
 test("sidebar stays on one fixed recent list when the active container changes", () => {
   const sessions = [
     { sessionId: "p-1", title: "项目一", scope: { kind: "project", id: 7 }, contextName: "Research" },
@@ -193,6 +219,7 @@ test("sidebar stays on one fixed recent list when the active container changes",
     { sessionId: "p-4", title: "项目四", scope: { kind: "project", id: 7 }, contextName: "Research" },
     { sessionId: "kb-1", title: "知识会话", scope: { kind: "knowledge_base", id: 2 }, contextName: "架构库" },
     { sessionId: "i-1", title: "独立会话", scope: { kind: "independent", id: null }, contextName: "独立" },
+    { sessionId: "schedule-1", title: "夜间接口审计", sessionType: "schedule", scope: { kind: "project", id: 7 }, contextName: "Research" },
   ];
 
   const html = renderToStaticMarkup(React.createElement(WorkbenchSidebar, {
@@ -205,7 +232,9 @@ test("sidebar stays on one fixed recent list when the active container changes",
     onArchiveSession() {},
   }));
   assert.match(html, /全部会话/);
-  assert.match(html, /归档会话/);
+  assert.doesNotMatch(html, /<span>归档会话<\/span>/);
+  assert.match(html, />知识芯片</);
+  assert.doesNotMatch(html, />知识库</);
   assert.match(html, /最近会话/);
   assert.match(html, /Research/);
   assert.doesNotMatch(html, /当前项目|其他最近会话|查看全部 4 个会话/);
@@ -215,6 +244,7 @@ test("sidebar stays on one fixed recent list when the active container changes",
   assert.match(html, /aria-label="项目会话"/);
   assert.match(html, /aria-label="知识库会话"/);
   assert.match(html, /aria-label="独立会话"/);
+  assert.match(html, /aria-label="定时任务会话"/);
   assert.match(html, /cpwb-sidebar-date-group/);
   assert.match(html, />更早</);
 });
@@ -224,6 +254,7 @@ test("sidebar separates the compact Workbench node from the footer wordmark", ()
     page: "home",
     recentSessions: [],
   }));
+  const footerStart = html.indexOf('class="cpwb-sidebar-footer-wordmark"');
 
   assert.match(html, /class="cpwb-sidebar-product-mark"/);
   assert.match(html, /class="cpwb-workbench-node-mark"/);
@@ -231,12 +262,40 @@ test("sidebar separates the compact Workbench node from the footer wordmark", ()
   assert.match(html, /class="cpwb-sidebar-product-copy"/);
   assert.match(html, /class="cpwb-sidebar-product-wordmark"/);
   assert.equal((html.match(/data-logo-part="approved-node-artwork"/g) || []).length, 1);
-  assert.equal((html.match(/data-logo-part="wordmark-main"/g) || []).length, 2);
+  assert.equal((html.slice(0, footerStart).match(/data-logo-part="wordmark-main"/g) || []).length, 1);
+  assert.equal((html.slice(footerStart).match(/data-logo-part="wordmark-main"/g) || []).length, 3);
   assert.match(html, /class="cpwb-sidebar-footer-wordmark"/);
   assert.doesNotMatch(html, /<text/);
   assert.doesNotMatch(html, /DEEPSEEK/);
   assert.match(html, /class="cpwb-sidebar-brand-footer"/);
   assert.match(html, /aria-label="Harness Workbench"/);
+});
+
+test("only the footer wordmark renders the static cyberpunk fracture layer", () => {
+  const html = renderToStaticMarkup(React.createElement(WorkbenchSidebar, {
+    page: "home",
+    recentSessions: [],
+  }));
+  const footerStart = html.indexOf('class="cpwb-sidebar-footer-wordmark"');
+
+  assert.notEqual(footerStart, -1);
+  assert.doesNotMatch(html.slice(0, footerStart), /data-logo-part="wordmark-fractures"/);
+  assert.equal((html.slice(footerStart).match(/data-logo-part="wordmark-fractures"/g) || []).length, 1);
+});
+
+test("only the footer wordmark renders two chromatic glitch channels", () => {
+  const html = renderToStaticMarkup(React.createElement(WorkbenchSidebar, {
+    page: "home",
+    recentSessions: [],
+  }));
+  const footerStart = html.indexOf('class="cpwb-sidebar-footer-wordmark"');
+  const footer = html.slice(footerStart);
+
+  assert.notEqual(footerStart, -1);
+  assert.doesNotMatch(html.slice(0, footerStart), /data-logo-channel=/);
+  assert.equal((footer.match(/data-logo-channel=/g) || []).length, 2);
+  assert.match(footer, /data-logo-channel="cyan"/);
+  assert.match(footer, /data-logo-channel="magenta"/);
 });
 
 test("compact Workbench node preserves the exact approved visual artwork", () => {
@@ -281,7 +340,7 @@ test("sidebar groups recent sessions by activity date in the Workbench timezone"
   ]);
 });
 
-test("archived session page exposes records and recovery without losing open access", () => {
+test("archived sessions are reserved for settings instead of a standalone Workbench route", () => {
   const row = {
     sessionId: "session-cpwb-archived",
     title: "历史架构讨论",
@@ -296,15 +355,14 @@ test("archived session page exposes records and recovery without losing open acc
     getSnapshot: () => state,
     actions: { loadAllSessions: async () => {}, restoreSession: async () => {} },
   };
-  const html = renderToStaticMarkup(React.createElement(SessionListPage, { archived: true, store }));
+  const html = renderToStaticMarkup(React.createElement(SessionListPage, { archived: true, embedded: true, store }));
   assert.match(html, /归档会话/);
+  assert.match(html, /搜索归档会话/);
   assert.match(html, /历史架构讨论/);
   assert.match(html, /恢复会话/);
   assert.match(html, /归档于/);
 
-  const navigation = createNavigationStore();
-  navigation.openArchive();
-  assert.deepEqual(navigation.getSnapshot(), { page: "archive", sessionId: null });
+  assert.throws(() => createNavigationStore({ initialPage: "archive" }), /unknown Workbench page/);
 });
 
 test("project session list keeps a visible locked project scope", () => {
@@ -384,4 +442,5 @@ test("global schedules identify their project and expose search, creation, statu
   assert.match(html, /选择所属项目/);
   assert.match(html, /Docs/);
   assert.match(html, /每日索引/);
+  assert.doesNotMatch(html, /<select/);
 });

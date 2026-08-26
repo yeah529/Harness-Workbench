@@ -105,7 +105,7 @@ test("unified shell renders one mutually exclusive center page and no duplicate 
     assert.equal((html.match(/class="cpwb-global-sidebar"/g) || []).length, 1);
     assert.doesNotMatch(html, /cpwb-home-identity/);
     if (page === "home") {
-      assert.match(html, /打开知识库中心/);
+      assert.match(html, /接入知识芯片/);
       assert.doesNotMatch(html, /cpwb-knowledge-grid/);
     }
   }
@@ -362,6 +362,94 @@ test("production composition does not claim conversation.session or filter nativ
   assert.match(indexSource, /cpwb-workbench-shell/);
   assert.doesNotMatch(indexSource, /cpwb-project-home|cpwb-session-shell/);
   assert.equal((indexSource.match(/slots\.inject\(["']shell\.overlay["']/g) || []).length, 1);
+});
+
+test("production composition adds knowledge sources to completed turns without replacing Chat or Trajectory", async () => {
+  const sessionAdapter = await import("../src/client/sessionAdapter.js");
+  assert.equal(typeof sessionAdapter.registerKnowledgeSources, "function");
+  const definitions = [];
+  const injections = [];
+  const ctx = {
+    effect() { return () => {}; },
+    inputTriggers: { registerSource() { return () => {}; } },
+    conversationEvents: { register(definition) { definitions.push(definition); return () => {}; } },
+    slots: {
+      inject(name) { injections.push(name); return () => {}; },
+      register() { return () => {}; },
+    },
+  };
+
+  sessionAdapter.registerKnowledgeSources(ctx, function KnowledgeSourcesFixture() { return null; });
+
+  assert.ok(definitions.some((definition) => definition.kind === "workbench-knowledge-sources"));
+  assert.ok(injections.includes("conversation.chat.turnTail"));
+  assert.equal(injections.includes("conversation.session"), false);
+  assert.equal(injections.includes("conversation.view"), false);
+});
+
+test("knowledge citation data is published only on the owning turn", async () => {
+  const sessionAdapter = await import("../src/client/sessionAdapter.js");
+  const event = {
+    seq: 17,
+    type: "user/message",
+    data: {
+      source: {
+        kind: "plugin",
+        plugin: "dsh-cyberpunk-workbench",
+        form: "recall",
+      },
+      content: [{
+        type: "text",
+        text: '<knowledge_context>\n[source id="44" document-id="8" file="agents.md" locator="lines:7-12"]\nreference\n[/source]\n</knowledge_context>\n',
+      }],
+    },
+  };
+  const definition = sessionAdapter.knowledgeSourcesDefinition;
+  assert.deepEqual(definition.match(event), { id: "17", role: "start" });
+  const state = definition.start({}, { event });
+  assert.deepEqual(state, {
+    version: 1,
+    passageCount: 1,
+    documentCount: 1,
+    citations: [{ documentId: 8, sourceId: "44", originalName: "agents.md", locator: "lines:7-12" }],
+  });
+  const value = definition.buildLocationData({
+    state,
+    start: { location: { kind: "turn", turn: { turn: 3 } } },
+  }, "turn");
+  assert.deepEqual(value, {
+    kind: "turn",
+    turn: 3,
+    key: "workbench-knowledge-sources",
+    value: state,
+  });
+  assert.equal(definition.buildLocationData({ state, start: { location: { kind: "session" } } }, "turn"), null);
+  assert.equal(sessionAdapter.selectKnowledgeSources({ turn: { data: { get: () => state } } }), state);
+});
+
+test("knowledge source footnote deduplicates documents and links original files", async () => {
+  const shell = await import("../src/client/WorkbenchSessionShell.js");
+  assert.equal(typeof shell.KnowledgeSourcesTail, "function");
+  const html = renderToStaticMarkup(React.createElement(shell.KnowledgeSourcesTail, {
+    matched: {
+      passageCount: 3,
+      documentCount: 2,
+      citations: [
+        { documentId: 7, sourceId: "31", originalName: "AI Agents.pdf", locator: "pages:12-14" },
+        { documentId: 7, sourceId: "32", originalName: "AI Agents.pdf", locator: "pages:19-20" },
+        { documentId: 9, sourceId: "48", originalName: "架构说明.md", locator: "lines:83-126", heading: "Agent loop" },
+      ],
+    },
+  }));
+
+  assert.match(html, /本轮知识来源/);
+  assert.match(html, /2 个文档/);
+  assert.match(html, /3 个片段/);
+  assert.equal((html.match(/AI Agents\.pdf/g) || []).length, 1);
+  assert.match(html, /pages:12-14/);
+  assert.match(html, /pages:19-20/);
+  assert.match(html, /href="\/api\/cpwb\/documents\/7\/content"/);
+  assert.match(html, /href="\/api\/cpwb\/documents\/9\/content"/);
 });
 
 test("rc.2 SlotCore composition keeps native Chat/Trajectory and a dynamic Workbench view switchable", () => {

@@ -94,7 +94,7 @@ class FakeDocument extends FakeNode {
   createComment(value) { const node = new FakeNode(this, 8, "#comment"); node.nodeValue = String(value); return node; }
 }
 
-test("WorkbenchSettingsSection rerenders settings after one store notification", async () => {
+function installFakeDom() {
   const document = new FakeDocument();
   const window = { document, event: undefined, addEventListener() {}, removeEventListener() {}, Node: FakeNode, Element: FakeElement, HTMLElement: FakeElement, HTMLIFrameElement: FakeElement, SVGElement: FakeElement };
   document.defaultView = window;
@@ -105,7 +105,11 @@ test("WorkbenchSettingsSection rerenders settings after one store notification",
   globalThis.HTMLElement = FakeElement;
   globalThis.HTMLIFrameElement = FakeElement;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  return document;
+}
 
+test("WorkbenchSettingsSection rerenders settings after one store notification", async () => {
+  const document = installFakeDom();
   const { createRoot } = await import("react-dom/client");
   const { act } = React;
   let snapshot = { settings: { network: { currentEffective: { mode: "direct" }, nextLaunch: { mode: "inherit" } } } };
@@ -127,5 +131,41 @@ test("WorkbenchSettingsSection rerenders settings after one store notification",
   await act(async () => { for (const listener of listeners) listener(); });
   assert.match(container.textContent, /当前生效：custom/);
   assert.doesNotMatch(container.textContent, /当前生效：direct/);
+  await act(async () => { root.unmount(); });
+});
+
+test("archived settings section requests only archived sessions on mount", async () => {
+  const document = installFakeDom();
+  const { createRoot } = await import("react-dom/client");
+  const { act } = React;
+  const calls = [];
+  const snapshot = {
+    settings: {},
+    sessionPage: { items: [], total: 0, limit: 20, offset: 0 },
+  };
+  const store = {
+    subscribe: () => () => {},
+    getSnapshot: () => snapshot,
+    actions: {
+      loadSettings: async () => {},
+      loadAllSessions: async (input) => { calls.push(input); },
+    },
+  };
+  const container = document.createElement("div");
+  const root = createRoot(container);
+
+  await act(async () => {
+    root.render(React.createElement(WorkbenchSettingsSection, { store, initialActive: "archive" }));
+  });
+
+  assert.deepEqual(calls, [{
+    query: "",
+    scopeKind: null,
+    scopeId: null,
+    archived: true,
+    offset: 0,
+    limit: 20,
+  }]);
+  assert.match(container.textContent, /归档会话/);
   await act(async () => { root.unmount(); });
 });

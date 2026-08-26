@@ -71,3 +71,99 @@ export function sessionRuntimeActions(session) {
     command(command) { return session.command(command); },
   };
 }
+
+const KNOWLEDGE_SOURCES_KEY = "workbench-knowledge-sources";
+const SOURCE_LINE = /^\[source id="([^"\r\n]*)" document-id="([^"\r\n]*)" file="([^"\r\n]*)" locator="([^"\r\n]*)"\]$/gm;
+
+function decodeXmlAttribute(value) {
+  const entities = {
+    quot: '"',
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    "#13": "\r",
+    "#10": "\n",
+    "#9": "\t",
+  };
+  return String(value).replace(/&(quot|amp|lt|gt|#13|#10|#9);/g, (match, entity) => entities[entity] ?? match);
+}
+
+function knowledgeContextFromEvent(event) {
+  if (event?.type !== "user/message") return null;
+  const source = event.data?.source;
+  if (source?.kind !== "plugin" || source.plugin !== "dsh-cyberpunk-workbench" || source.form !== "recall") return null;
+  const text = (Array.isArray(event.data?.content) ? event.data.content : [])
+    .filter((block) => block?.type === "text")
+    .map((block) => String(block.text ?? ""))
+    .join("\n");
+  const open = text.indexOf("<knowledge_context>\n");
+  const close = text.indexOf("</knowledge_context>", open + 1);
+  if (open === -1 || close === -1) return null;
+  const citations = [];
+  SOURCE_LINE.lastIndex = 0;
+  for (const match of text.slice(open, close).matchAll(SOURCE_LINE)) {
+    const documentId = Number(match[2]);
+    citations.push({
+      ...(Number.isSafeInteger(documentId) && documentId > 0 ? { documentId } : {}),
+      sourceId: decodeXmlAttribute(match[1]),
+      originalName: decodeXmlAttribute(match[3]),
+      locator: decodeXmlAttribute(match[4]),
+    });
+  }
+  if (citations.length === 0) return null;
+  const documents = new Set(citations.map((citation) => citation.documentId
+    ? "document:" + citation.documentId
+    : "file:" + citation.originalName));
+  return {
+    version: 1,
+    passageCount: citations.length,
+    documentCount: documents.size,
+    citations,
+  };
+}
+
+function locationTurn(location) {
+  if (location?.kind === "turn" || location?.kind === "step") return location.turn?.turn;
+  return undefined;
+}
+
+export const knowledgeSourcesDefinition = {
+  kind: KNOWLEDGE_SOURCES_KEY,
+  match(event) {
+    return knowledgeContextFromEvent(event) === null ? null : { id: String(event.seq), role: "start" };
+  },
+  start(_context, match) {
+    return knowledgeContextFromEvent(match.event);
+  },
+  update(context) {
+    return context.state;
+  },
+  buildLocationData(context, scope) {
+    if (scope !== "turn" || !context.state) return null;
+    const turn = locationTurn(context.start?.location);
+    return turn === undefined ? null : {
+      kind: "turn",
+      turn,
+      key: KNOWLEDGE_SOURCES_KEY,
+      value: context.state,
+    };
+  },
+};
+
+export function selectKnowledgeSources(owner) {
+  const value = owner?.turn?.data?.get?.(KNOWLEDGE_SOURCES_KEY);
+  return Array.isArray(value?.citations) && value.citations.length > 0 ? value : null;
+}
+
+export function registerKnowledgeSources(ctx, Component) {
+  if (!ctx?.conversationEvents?.register || !ctx?.slots?.inject || !ctx?.slots?.register) {
+    throw new TypeError("knowledge sources require DSH conversationEvents and slots services");
+  }
+  ctx.conversationEvents.register(knowledgeSourcesDefinition);
+  return ctx.slots.inject("conversation.chat.turnTail", function () {
+    return ctx.slots.register({
+      name: "conversation.chat.turnTail",
+      select: selectKnowledgeSources,
+    }, Component);
+  });
+}

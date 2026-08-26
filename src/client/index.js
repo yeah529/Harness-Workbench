@@ -4,12 +4,15 @@ import WORKBENCH_CSS from "./workbench.css";
 import { localDateKey } from "./store.js";
 import { getStore } from "./storeInstance.js";
 import { openWorkbenchSession } from "./workbenchSessions.js";
+import { openKnownWorkbenchSession } from "./sessionNavigation.js";
 import { createNavigationStore } from "./navigation.js";
 import { WorkbenchShell } from "./WorkbenchShell.js";
 import { registerWorkbenchSettingsSection as registerSettingsSection } from "./settingsSlot.js";
 import { registerKnowledgeBaseReferenceSource } from "./knowledgeReferences.js";
 import { registerModelIndicator } from "./ModelIndicator.js";
 import { registerImageAttachmentButton } from "./ImageAttachmentButton.js";
+import { registerKnowledgeSources } from "./sessionAdapter.js";
+import { KnowledgeSourcesTail } from "./KnowledgeSourcesTail.js";
 
 function injectCss(tagId, css) {
   if (typeof document === "undefined") return;
@@ -24,10 +27,10 @@ function injectCss(tagId, css) {
 const store = getStore();
 const navigation = createNavigationStore();
 
-const inject = ["slots", "layout", "workspaces", "sessions", "connection", "conversation", "inputTriggers"];
+const inject = ["slots", "layout", "workspaces", "sessions", "connection", "conversation", "conversationEvents", "inputTriggers"];
 
-function registerWorkbenchSettingsSection(ctx, settingsStore = store) {
-  return registerSettingsSection(ctx, settingsStore);
+function registerWorkbenchSettingsSection(ctx, settingsStore = store, options) {
+  return registerSettingsSection(ctx, settingsStore, options);
 }
 
 function apply(ctx) {
@@ -39,10 +42,21 @@ function apply(ctx) {
     return function () { store.dispose(); };
   });
 
-  registerWorkbenchSettingsSection(ctx);
+  const openKnownSession = async function (sessionId) {
+    return openKnownWorkbenchSession({
+      sessionId,
+      store,
+      sessions: ctx.sessions,
+      workspaces: ctx.workspaces,
+      navigation,
+    });
+  };
+
+  registerWorkbenchSettingsSection(ctx, store, { onOpenSession: openKnownSession });
   registerKnowledgeBaseReferenceSource(ctx, store);
   registerImageAttachmentButton(ctx);
   registerModelIndicator(ctx);
+  registerKnowledgeSources(ctx, KnowledgeSourcesTail);
 
   ctx.slots.inject("shell.overlay", function () {
     return ctx.slots.register({
@@ -56,12 +70,6 @@ function apply(ctx) {
             if (projectId != null) return store.actions.refreshProject(projectId, localDateKey());
             return result;
           });
-        };
-        const openKnownSession = async function (sessionId) {
-          const entry = store.getSnapshot().workbenchSessions?.[sessionId];
-          if (!entry?.scope) throw new Error("找不到会话上下文");
-          const result = await store.actions.openSession(sessionId);
-          return openResult(result, entry.scope.kind === "project" ? entry.scope.id : null);
         };
         const createProject = async function () {
           const path = await ctx.workspaces.pickDirectory();

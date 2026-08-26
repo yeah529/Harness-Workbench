@@ -8,21 +8,21 @@ import {
 
 test("pending model catalog uses the rc.2 host-scoped LLM directory", async () => {
   const connection = {
-    api: { llm: { async models(request) {
-      assert.deepEqual(request.payload, {});
-      return { rpcId: request.rpcId, result: { ok: true, value: {
+    api: { llm: { async models(payload) {
+      assert.deepEqual(payload, {});
+      return { rpcId: "rpc-models", result: { ok: true, value: {
         groups: [{ id: "deepseek-official", name: "DeepSeek", models: [{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", reasoning: { efforts: [{ id: "high", name: "High" }] } }] }],
         failures: [],
       } } };
     } } },
   };
-  const catalog = await loadPendingModelCatalog(connection, () => "rpc-models");
+  const catalog = await loadPendingModelCatalog(connection);
   assert.equal(catalog.groups[0].models[0].name, "DeepSeek V4 Flash");
 });
 
-test("first submit materializes, applies the selected model, admits natively, then confirms", async () => {
+test("knowledge-base first submit uses the payload-direct rc.2 model contract before native admission", async () => {
   const order = [];
-  let draft = { status: "pristine", sessionId: null, scope: { kind: "project", id: 3 } };
+  let draft = { status: "pristine", sessionId: null, scope: { kind: "knowledge_base", id: 3 } };
   const store = {
     getSnapshot: () => ({ draft }),
     actions: {
@@ -34,9 +34,15 @@ test("first submit materializes, applies the selected model, admits natively, th
   };
   const sessionFace = {};
   const sessions = { binding: () => ({ session: sessionFace }) };
-  const connection = { api: { sessions: { async selectModel(request) {
-    order.push(["model", request.payload.provider, request.payload.model, request.payload.reasoningEffort]);
-    return { rpcId: request.rpcId, result: { ok: true, value: { selected: request.payload } } };
+  const connection = { api: { sessions: { async selectModel(payload) {
+    assert.deepEqual(payload, {
+      sessionId: "session-cpwb-new",
+      provider: "deepseek-official",
+      model: "deepseek-v4-pro",
+      reasoningEffort: "high",
+    });
+    order.push(["model", payload.provider, payload.model, payload.reasoningEffort]);
+    return { rpcId: "rpc-select", result: { ok: true, value: { selected: payload } } };
   } } } };
   const conversation = { async sendSession(session, text, imageIds, mode) {
     order.push(["send", session === sessionFace, text, imageIds, mode]);
@@ -53,7 +59,6 @@ test("first submit materializes, applies the selected model, admits natively, th
     imageIds: ["image-1"],
     modelSelection: { provider: "deepseek-official", model: "deepseek-v4-pro", reasoningEffort: "high" },
     waitForReady: async () => order.push(["ready"]),
-    rpcId: () => "rpc-select",
   });
 
   assert.equal(result.sessionId, "session-cpwb-new");

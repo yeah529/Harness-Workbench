@@ -173,11 +173,11 @@ export function createWorkbenchRagPreStep({ retriever, scope, onQuestion, contex
       return true;
     });
     if (citations.length === 0) return decision;
-    const context = buildKnowledgePrompt(citations, { question });
-    if (!context) return decision;
+    const assembled = assembleKnowledgePrompt(citations, { question });
+    if (!assembled.text) return decision;
     const recall = createUserMessage({
-      content: [{ type: "text", text: context }],
-      source: { kind: "plugin", plugin: "dsh-cyberpunk-workbench", form: "recall" },
+      content: [{ type: "text", text: assembled.text }],
+      source: knowledgeRecallSource(),
     });
     return { kind: "enter", messages: [recall, ...decision.messages] };
   };
@@ -237,6 +237,14 @@ function truncateCodePoints(value, max) {
   return value;
 }
 
+function knowledgeRecallSource() {
+  return {
+    kind: "plugin",
+    plugin: "dsh-cyberpunk-workbench",
+    form: "recall",
+  };
+}
+
 // ---------------------------------------------------------- knowledge prompt
 
 const CONTEXT_OPEN = "<knowledge_context>\n";
@@ -259,8 +267,8 @@ const USER_QUESTION_PREFIX = "User question: ";
  * @param {{ question?: string, maxCodePoints?: number }} [options]
  * @returns {string} the context block, or "" when there are no citations.
  */
-export function buildKnowledgePrompt(citations, { question = "", maxCodePoints = MAX_CONTEXT_CODE_POINTS } = {}) {
-  if (!Array.isArray(citations) || citations.length === 0) return "";
+function assembleKnowledgePrompt(citations, { question = "", maxCodePoints = MAX_CONTEXT_CODE_POINTS } = {}) {
+  if (!Array.isArray(citations) || citations.length === 0) return { text: "", citations: [] };
 
   const q = question == null ? "" : String(question);
   const fixed =
@@ -271,12 +279,13 @@ export function buildKnowledgePrompt(citations, { question = "", maxCodePoints =
     countCodePoints(q);
   let budget = maxCodePoints - fixed;
   const body = [];
-
   for (const citation of citations) {
     if (budget <= 0) break;
 
+    const documentId = Number(citation.documentId);
     const sourceLine =
       '[source id="' + escapeXmlAttr(citation.sourceId ?? "") +
+      '" document-id="' + (Number.isSafeInteger(documentId) && documentId > 0 ? String(documentId) : "") +
       '" file="' + escapeXmlAttr(citation.originalName ?? "") +
       '" locator="' + escapeXmlAttr(citation.locator ?? "") + '"]\n';
     const closeLine = "[/source]\n";
@@ -301,7 +310,13 @@ export function buildKnowledgePrompt(citations, { question = "", maxCodePoints =
     if (truncated) break;
   }
 
-  return CONTEXT_OPEN + body.join("") + CONTEXT_CLOSE + UNTRUSTED_BANNER + USER_QUESTION_PREFIX + q;
+  return {
+    text: CONTEXT_OPEN + body.join("") + CONTEXT_CLOSE + UNTRUSTED_BANNER + USER_QUESTION_PREFIX + q,
+  };
+}
+
+export function buildKnowledgePrompt(citations, options) {
+  return assembleKnowledgePrompt(citations, options).text;
 }
 
 // ------------------------------------------------------------ turn outcome
@@ -480,13 +495,13 @@ export async function submitWorkbenchPrompt(ctx, { sessionId, question, citation
     );
   }
 
-  const knowledgePrompt = citations.length > 0 ? buildKnowledgePrompt(citations, { question }) : null;
+  const knowledge = citations.length > 0 ? assembleKnowledgePrompt(citations, { question }) : null;
   const firstSeq = agent.session.seq;
 
-  if (knowledgePrompt !== null) {
+  if (knowledge !== null) {
     agent.inject(createUserMessage({
-      content: [{ type: "text", text: knowledgePrompt }],
-      source: { kind: "plugin", plugin: "dsh-cyberpunk-workbench", form: "recall" },
+      content: [{ type: "text", text: knowledge.text }],
+      source: knowledgeRecallSource(),
     }));
   }
 
@@ -794,63 +809,68 @@ export function createSessionService({
     return createScopedSession({ scope, scheduled: true });
   }
 
-  async function runScheduledSubagent({ projectId, title, prompt }) {
+  async function runScheduledSession({ projectId, scheduleId = null, title, prompt, sessionId = null }) {
     const normalizedTitle = String(title || "定时任务执行").trim() || "定时任务执行";
     const normalizedPrompt = String(prompt || "").trim();
     if (!normalizedPrompt) {
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED, "scheduled subagent prompt must not be empty");
+      throw new WorkbenchSessionError(SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED, "scheduled task prompt must not be empty");
+    }
+    const schedule = scheduleId == null ? null : repos.schedules.get(scheduleId);
+    if (scheduleId != null && (!schedule || schedule.projectId !== Number(projectId))) {
+      throw new Error("scheduled task is missing or belongs to another project");
     }
 
-    const created = await createScopedSession({ scope: { kind: "project", id: projectId }, scheduled: true });
-    const entry = handles.get(created.sessionId);
-    await persistOwnedSession({
-      sessionId: created.sessionId,
-      scope: created.scope,
-      selection: { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
-      lifecycleStatus: "active",
-      title: normalizedTitle,
-      dispose: entry?.dispose,
-    });
-
-    let run = null;
+    let activeSessionId = sessionId;
     try {
-      const runtime = ctx.subagents;
-      if (!runtime || typeof runtime.list !== "function" || typeof runtime.start !== "function") {
-        throw new Error("DSH Subagent runtime is unavailable");
+      if (activeSessionId) {
+        const saved = repos.workbenchSessions.get(activeSessionId);
+        if (!saved || saved.scopeKind !== "project" || saved.scopeId !== Number(projectId)) {
+          throw new Error("scheduled task session is missing or belongs to another project");
+        }
+        await reopenScopedSession({ sessionId: activeSessionId });
+      } else {
+        const created = await createScopedSession({ scope: { kind: "project", id: projectId }, scheduled: false });
+        activeSessionId = created.sessionId;
+        const entry = handles.get(activeSessionId);
+        await persistOwnedSession({
+          sessionId: activeSessionId,
+          scope: created.scope,
+          selection: { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL },
+          lifecycleStatus: "active",
+          title: normalizedTitle,
+          dispose: entry?.dispose,
+        });
       }
-      const providers = runtime.list();
-      const ordered = ["spawn", "fork", ...providers.filter((name) => name !== "spawn" && name !== "fork")];
-      const providerName = ordered.find((name) => {
-        if (!providers.includes(name)) return false;
-        const provider = typeof runtime.getProvider === "function" ? runtime.getProvider(name) : null;
-        return provider?.capabilities?.toolFilter === true;
-      });
-      if (!providerName) throw new Error("no Subagent provider supports restricted scheduled execution");
 
-      run = await runtime.start(providerName, {
-        label: normalizedTitle,
-        prompt: [{ type: "text", text: normalizedPrompt }],
-        parent: entry?.agent,
-        signal: new AbortController().signal,
-        toolFilter: { allow: [] },
-      });
-      const result = await run.result;
-      const text = messageText({ content: result.output });
-      if (result.stopReason !== "completed") {
-        throw new Error(result.diagnostic || "scheduled Subagent ended with " + result.stopReason);
+      if (schedule) {
+        if (schedule.sessionId && schedule.sessionId !== activeSessionId) {
+          throw new Error("scheduled task is already bound to another session");
+        }
+        repos.schedules.bindSession({ id: schedule.id, sessionId: activeSessionId });
       }
-      repos.workbenchSessions.touch(created.sessionId);
-      return { sessionId: created.sessionId, childSessionId: String(run.id), text, stopReason: result.stopReason };
+
+      const result = await submitPrompt({
+        sessionId: activeSessionId,
+        question: normalizedPrompt,
+        unattended: true,
+      });
+      const stopReason = result.outcome?.reason?.kind;
+      const text = result.outcome?.text ?? "";
+      if (stopReason !== "completed") {
+        throw new Error("scheduled task did not complete: " + (stopReason || "missing turn result"));
+      }
+      if (text.trim() === "" || /DSML|<\/?tool_calls\b|<\/?invoke\b/i.test(text)) {
+        throw new Error("scheduled task did not produce a valid final response");
+      }
+      return { sessionId: activeSessionId, text, stopReason };
     } catch (error) {
       const wrapped = new Error(error instanceof Error ? error.message : String(error));
-      wrapped.sessionId = created.sessionId;
+      if (activeSessionId) wrapped.sessionId = activeSessionId;
       throw wrapped;
-    } finally {
-      if (run) await run.dispose().catch(() => {});
     }
   }
 
-  async function submitPrompt({ sessionId, question, oneShotSources = [] }) {
+  async function submitPrompt({ sessionId, question, oneShotSources = [], unattended = false }) {
     const entry = handles.get(sessionId);
     if (!entry) {
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_NOT_FOUND, "session not found: " + sessionId);
@@ -899,15 +919,41 @@ export function createSessionService({
         }
       }
 
-      const { outcome, userMessageId } = await submitWorkbenchPrompt(ctx, { sessionId, question, citations });
-      if (userMessageId && oneShotSources.length > 0) {
-        repos.messageContextRefs.addMany({ sessionId, messageId: userMessageId, sources: oneShotSources });
+      const policyDisposers = [];
+      if (unattended) {
+        const tools = entry.agent?.ctx?.tools;
+        if (typeof tools?.get === "function" && tools.get("ask_user_question") !== undefined) {
+          if (typeof tools.restrict !== "function") {
+            throw new Error("unattended scheduled runs require the rc.2 scoped tools.restrict seam");
+          }
+          const dispose = tools.restrict({ deny: ["ask_user_question"] });
+          if (typeof dispose === "function") policyDisposers.push(dispose);
+        }
+        if (typeof entry.agent?.ctx?.systemPrompt?.section === "function") {
+          const dispose = entry.agent.ctx.systemPrompt.section({
+            name: "workbench:unattended-schedule",
+            order: 1100,
+            text: "This is an unattended scheduled Workbench run. Execute the requested task autonomously. Never ask the user or wait for human input. If details are ambiguous, choose the safest reasonable interpretation, state the assumption in the final response, and continue. Return a concrete final result.",
+          });
+          if (typeof dispose === "function") policyDisposers.push(dispose);
+        }
       }
-      if (sessionIndex && typeof sessionIndex.reindex === "function") {
-        await sessionIndex.reindex(sessionId).catch(() => {});
+
+      try {
+        const { outcome, userMessageId } = await submitWorkbenchPrompt(ctx, { sessionId, question, citations });
+        if (userMessageId && oneShotSources.length > 0) {
+          repos.messageContextRefs.addMany({ sessionId, messageId: userMessageId, sources: oneShotSources });
+        }
+        if (sessionIndex && typeof sessionIndex.reindex === "function") {
+          await sessionIndex.reindex(sessionId).catch(() => {});
+        }
+        if (repos.workbenchSessions.get(sessionId)) repos.workbenchSessions.touch(sessionId);
+        return { sessionId, citations, outcome, userMessageId };
+      } finally {
+        while (policyDisposers.length > 0) {
+          try { policyDisposers.pop()(); } catch {}
+        }
       }
-      if (repos.workbenchSessions.get(sessionId)) repos.workbenchSessions.touch(sessionId);
-      return { sessionId, citations, outcome, userMessageId };
     };
 
     const result = entry.tail.then(work, work);
@@ -1127,7 +1173,7 @@ export function createSessionService({
 
   return {
     createSession,
-    runScheduledSubagent,
+    runScheduledSession,
     openSession,
     materializeDraft,
     confirmDraft,

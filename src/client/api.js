@@ -237,6 +237,23 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       },
     },
 
+    maintenance: {
+      createPurgeJob(input, { signal } = {}) {
+        return request({
+          method: "POST",
+          path: "/maintenance/purge-jobs",
+          body: input,
+          signal,
+        });
+      },
+      getPurgeJob(jobId, { signal } = {}) {
+        return request({
+          path: "/maintenance/purge-jobs/" + encodeURIComponent(jobId),
+          signal,
+        });
+      },
+    },
+
     chat: {
       sessions: {
         list({ scopeKind, scopeId, archived, limit, offset, query } = {}, { signal } = {}) {

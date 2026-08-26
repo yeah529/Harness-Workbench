@@ -453,9 +453,40 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     && typeof sessions?.removeContext === "function";
   const hasSessionArchive = typeof sessions?.archiveSession === "function"
     && typeof sessions?.restoreSession === "function";
-  const permanentSessionDeletion = services.permanentSessionDeletion === true;
+  const maintenance = services.maintenance ?? null;
   const logError = typeof logger?.error === "function" ? logger.error.bind(logger) : () => {};
   const configuredTimeZone = () => settings?.get?.("timezone") ?? DEFAULT_TIME_ZONE;
+
+  const permanentDeletionCapability = () => maintenance?.capability?.() ?? {
+    available: false,
+    requiresRestart: true,
+    backend: null,
+    reason: "Permanent deletion requires dsh-workbench supervised mode",
+  };
+
+  function publicMaintenanceJob(job) {
+    if (!job || typeof job !== "object") return job;
+    const output = {};
+    for (const key of [
+      "jobId",
+      "state",
+      "revision",
+      "armed",
+      "createdAt",
+      "completedAt",
+      "recoveryCommand",
+      "container",
+    ]) {
+      if (job[key] !== undefined) output[key] = job[key];
+    }
+    if (job.error && typeof job.error === "object") {
+      output.error = {
+        code: String(job.error.code ?? "PURGE_FAILED"),
+        message: String(job.error.message ?? "Maintenance failed"),
+      };
+    }
+    return output;
+  }
 
   // ----- documents -----
 
@@ -624,6 +655,14 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       throw new ApiError(501, "NOT_IMPLEMENTED", "schedule run service is not available");
     }
     const result = await services.runSchedule(schedule);
+    if (result?.status === "failed") {
+      throw new ApiError(
+        502,
+        "SCHEDULE_RUN_FAILED",
+        result.error || "定时任务执行失败",
+        { runId: result.id ?? null, sessionId: result.sessionId ?? null },
+      );
+    }
     ok(res, result);
   }
 
@@ -671,17 +710,19 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, repos.projects.update({ id, name }));
   }
 
-  function deletionPlanResponse(kind, plan) {
+  function deletionPlanResponse(kind, plan, extended = null) {
     const container = kind === "project" ? plan.project : plan.knowledgeBase;
     return {
       kind,
       id: container.id,
       name: container.name,
       sessionCount: plan.sessionIds.length,
+      ...(extended ? { descendantSessionCount: extended.descendantSessionIds?.length ?? 0 } : {}),
       relationshipCount: plan.relationshipCount,
       documentCount: plan.linkedDocuments.length,
       orphanDocumentCount: plan.orphanDocuments.length,
-      permanentDeletionAvailable: permanentSessionDeletion,
+      ...(extended ? { planVersion: extended.planVersion } : {}),
+      permanentDeletion: permanentDeletionCapability(),
     };
   }
 
@@ -695,9 +736,20 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
 
   async function handleProjectDeletionPlan(req, res, { params }) {
     const id = parseId(params.id);
-    const plan = repos.projects.deletionPlan(id);
+    const extended = maintenance?.containerPlan
+      ? await maintenance.containerPlan("project", id)
+      : null;
+    const plan = extended
+      ? {
+          project: extended.container ?? { id: extended.id, name: extended.name },
+          sessionIds: extended.sessionIds ?? [],
+          linkedDocuments: extended.linkedDocuments ?? [],
+          orphanDocuments: extended.orphanDocuments ?? [],
+          relationshipCount: extended.relationshipCount ?? 0,
+        }
+      : repos.projects.deletionPlan(id);
     if (!plan) throw new ApiError(404, "NOT_FOUND", "project not found: " + id);
-    ok(res, deletionPlanResponse("project", plan));
+    ok(res, deletionPlanResponse("project", plan, extended));
   }
 
   async function handleProjectDelete(req, res, { params, url }) {
@@ -705,8 +757,8 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     const preview = repos.projects.deletionPlan(id);
     if (!preview) throw new ApiError(404, "NOT_FOUND", "project not found: " + id);
     const sessionPolicy = deletionPolicy(url);
-    if (sessionPolicy === "delete" && preview.sessionIds.length > 0 && !permanentSessionDeletion) {
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_DELETE_UNAVAILABLE, "native DSH session deletion is unavailable");
+    if (sessionPolicy === "delete") {
+      throw new ApiError(409, "PURGE_JOB_REQUIRED", "permanent deletion requires a maintenance purge job");
     }
     const plan = typeof services.deleteProject === "function"
       ? await services.deleteProject({ projectId: id, sessionPolicy })
@@ -783,9 +835,20 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
 
   async function handleKnowledgeBaseDeletionPlan(req, res, { params }) {
     const id = parseId(params.id);
-    const plan = repos.knowledgeBases.deletionPlan(id);
+    const extended = maintenance?.containerPlan
+      ? await maintenance.containerPlan("knowledge_base", id)
+      : null;
+    const plan = extended
+      ? {
+          knowledgeBase: extended.container ?? { id: extended.id, name: extended.name },
+          sessionIds: extended.sessionIds ?? [],
+          linkedDocuments: extended.linkedDocuments ?? [],
+          orphanDocuments: extended.orphanDocuments ?? [],
+          relationshipCount: extended.relationshipCount ?? 0,
+        }
+      : repos.knowledgeBases.deletionPlan(id);
     if (!plan) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + id);
-    ok(res, deletionPlanResponse("knowledge_base", plan));
+    ok(res, deletionPlanResponse("knowledge_base", plan, extended));
   }
 
   async function handleKnowledgeBaseDelete(req, res, { params, url }) {
@@ -793,8 +856,8 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     const preview = repos.knowledgeBases.deletionPlan(id);
     if (!preview) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + id);
     const sessionPolicy = deletionPolicy(url);
-    if (sessionPolicy === "delete" && preview.sessionIds.length > 0 && !permanentSessionDeletion) {
-      throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_DELETE_UNAVAILABLE, "native DSH session deletion is unavailable");
+    if (sessionPolicy === "delete") {
+      throw new ApiError(409, "PURGE_JOB_REQUIRED", "permanent deletion requires a maintenance purge job");
     }
     const plan = typeof services.deleteKnowledgeBase === "function"
       ? await services.deleteKnowledgeBase({ knowledgeBaseId: id, sessionPolicy })
@@ -1292,10 +1355,68 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     });
   }
 
+  async function handlePurgeJobCreate(req, res) {
+    if (!maintenance?.createPurgeJob || !maintenance?.armPurgeJob) {
+      throw new ApiError(501, "PURGE_UNAVAILABLE", "maintenance purge service is unavailable");
+    }
+    const body = await readJsonBody(req);
+    const allowedFields = new Set([
+      "kind",
+      "id",
+      "planVersion",
+      "confirmation",
+      "restartConfirmed",
+    ]);
+    const unknownField = Object.keys(body).find((field) => !allowedFields.has(field));
+    if (unknownField) throw new ApiError(422, "INVALID_FIELD", "unknown field: " + unknownField);
+    const kind = requireString(body, "kind");
+    if (!["project", "knowledge_base"].includes(kind)) {
+      throw new ApiError(422, "INVALID_FIELD", "kind must be project or knowledge_base");
+    }
+    const id = requirePositiveInt(body, "id");
+    const planVersion = requireString(body, "planVersion");
+    const confirmation = requireString(body, "confirmation");
+    if (body.restartConfirmed !== true) {
+      throw new ApiError(422, "INVALID_FIELD", "restartConfirmed must be true");
+    }
+    let job;
+    try {
+      job = await maintenance.createPurgeJob({
+        kind,
+        id,
+        planVersion,
+        name: confirmation,
+        restartConfirmed: true,
+      });
+    } catch (error) {
+      throw new ApiError(409, "PURGE_PLAN_REJECTED", error?.message ?? "purge job rejected");
+    }
+    res.once?.("finish", () => {
+      void maintenance.armPurgeJob(job.jobId).catch(logError);
+    });
+    ok(res, publicMaintenanceJob(job), 202);
+  }
+
+  async function handlePurgeJobGet(req, res, { params }) {
+    if (!maintenance?.getJob) {
+      throw new ApiError(501, "PURGE_UNAVAILABLE", "maintenance purge service is unavailable");
+    }
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?$/.test(params.jobId)) {
+      throw new ApiError(422, "INVALID_ID", "invalid purge job id");
+    }
+    try {
+      ok(res, publicMaintenanceJob(await maintenance.getJob(params.jobId)));
+    } catch {
+      throw new ApiError(404, "NOT_FOUND", "purge job not found");
+    }
+  }
+
   // ----- dispatcher (single source of truth for the approved surface) -----
 
   const routes = [
     { pattern: "/health", methods: { GET: handleHealth } },
+    { pattern: "/maintenance/purge-jobs", methods: { POST: handlePurgeJobCreate } },
+    { pattern: "/maintenance/purge-jobs/:jobId", methods: { GET: handlePurgeJobGet } },
     { pattern: "/chat/sessions", methods: { GET: handleChatSessionList, POST: handleChatSessionCreate } },
     { pattern: "/chat/sessions/:sessionId/context", methods: { GET: handleChatSessionContextGet, PUT: handleChatSessionContextPut, DELETE: handleChatSessionContextDelete } },
     { pattern: "/chat/sessions/:sessionId/open", methods: { POST: handleChatSessionOpen } },
@@ -1343,6 +1464,16 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
   async function dispatch(req, res, url) {
     const path = subPath(url.pathname);
     const method = req.method.toUpperCase();
+    if (
+      maintenance?.isLocked?.() === true &&
+      !["GET", "HEAD", "OPTIONS"].includes(method)
+    ) {
+      throw new ApiError(
+        503,
+        "PURGE_MAINTENANCE_ACTIVE",
+        "Workbench maintenance is active; retry after restart",
+      );
+    }
     const allowed = [];
     for (const route of routes) {
       const params = matchParams(path, route.pattern);

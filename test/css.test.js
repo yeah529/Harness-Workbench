@@ -58,6 +58,14 @@ test("workbench CSS has balanced comment/string-aware braces", () => {
   assert.deepEqual(scanCssBraces(source), { depth: 0, unclosedAt: [] });
 });
 
+test("open Workbench selects escape the settings card clip path", () => {
+  const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
+  const source = fs.readFileSync(path.resolve(filename), "utf8");
+  const rule = source.match(/\.cpwb-settings-panel:has\(\.cpwb-cyber-select-trigger\[aria-expanded="true"\]\)\s*\{([^}]*)\}/)?.[1] ?? "";
+  assert.match(rule, /clip-path:\s*none/);
+  assert.match(rule, /overflow:\s*visible/);
+});
+
 test("home overlay is column-constrained instead of viewport-fixed", () => {
   const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
   const source = fs.readFileSync(path.resolve(filename), "utf8");
@@ -115,6 +123,35 @@ test("global sidebar keeps recents scrollable while settings and the approved lo
   assert.doesNotMatch(logo, /<text|font-family|font-weight/);
 });
 
+test("footer wordmark glitch motion exposes chromatic channels and honors reduced motion", () => {
+  const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
+  const source = fs.readFileSync(path.resolve(filename), "utf8");
+  const reduced = source.match(/@media \(prefers-reduced-motion:\s*reduce\)\s*\{([\s\S]*?)\n\}/g)?.join("\n") ?? "";
+
+  assert.match(source, /\.cpwb-sidebar-footer-wordmark-channel\s*\{[^}]*position:\s*absolute/);
+  assert.match(source, /@keyframes\s+cpwb-wordmark-glitch/);
+  assert.match(source, /@keyframes\s+cpwb-wordmark-cyan/);
+  assert.match(source, /@keyframes\s+cpwb-wordmark-magenta/);
+  assert.match(source, /animation:\s*cpwb-wordmark-glitch\s+2\.6s\s+steps\(1,\s*end\)\s+infinite/);
+  assert.match(reduced, /cpwb-sidebar-footer-wordmark/);
+  assert.match(reduced, /animation:\s*none\s*!important/);
+  assert.match(reduced, /cpwb-sidebar-footer-wordmark-channel[^}]*display:\s*none/);
+});
+
+test("generation feedback uses a cyber pulse rail and one-shot arrival wave with reduced-motion fallback", () => {
+  const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
+  const source = fs.readFileSync(path.resolve(filename), "utf8");
+  const reduced = source.match(/@media \(prefers-reduced-motion:\s*reduce\)\s*\{([\s\S]*?)\n\}/g)?.join("\n") ?? "";
+
+  assert.match(source, /\.cpwb-generation-wave\s*\{/);
+  assert.match(source, /@keyframes\s+cpwb-generation-wave/);
+  assert.match(source, /\.cpwb-entry-arrived::after/);
+  assert.match(source, /@keyframes\s+cpwb-entry-arrival-wave/);
+  assert.match(reduced, /cpwb-generation-wave/);
+  assert.match(reduced, /cpwb-entry-arrived/);
+  assert.match(reduced, /animation:\s*none\s*!important/);
+});
+
 test("top-layer Workbench dialogs remain interactive above the pointer-isolated shell", () => {
   const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
   const source = fs.readFileSync(path.resolve(filename), "utf8");
@@ -150,6 +187,33 @@ test("modal width includes padding so project dialogs fit narrow viewports", () 
   const source = fs.readFileSync(path.resolve(filename), "utf8");
   assert.match(source, /\.cpwb-modal\s*\{[^}]*box-sizing:\s*border-box[^}]*\}/);
   assert.match(source, /\.cpwb-modal\s*\{[^}]*width:\s*min\(100%,\s*480px\)[^}]*\}/);
+});
+
+test("maintenance screen owns the full dynamic viewport and cannot leak horizontal overflow", () => {
+  const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
+  const source = fs.readFileSync(path.resolve(filename), "utf8");
+  const screen = source.match(/\.cpwb-maintenance-screen\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+  assert.match(screen, /position:\s*fixed/);
+  assert.match(screen, /inset:\s*0/);
+  assert.match(screen, /min-height:\s*100dvh/);
+  assert.match(screen, /overflow-x:\s*hidden/);
+  assert.doesNotMatch(screen, /height:\s*100vh/);
+});
+
+test("maintenance screen lets mobile content push the footer below the card", () => {
+  const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
+  const source = fs.readFileSync(path.resolve(filename), "utf8");
+  const mobile = source.match(/@media \(max-width:\s*720px\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+  assert.match(mobile, /\.cpwb-maintenance-screen\s*\{[^}]*grid-template-rows:\s*auto\s+auto\s+auto/);
+});
+
+test("maintenance motion is disabled for reduced-motion users", () => {
+  const filename = fileURLToPath(new URL("../src/client/workbench.css", import.meta.url));
+  const source = fs.readFileSync(path.resolve(filename), "utf8");
+  const reduced = source.match(/@media \(prefers-reduced-motion:\s*reduce\)\s*\{([\s\S]*?)\n\}/g)?.join("\n") ?? "";
+  assert.match(reduced, /cpwb-maintenance/);
+  assert.match(reduced, /animation:\s*none\s*!important/);
+  assert.match(reduced, /transition-duration:\s*\.01ms\s*!important/);
 });
 
 test("pending composer does not clip the model menu outside its bounds", () => {

@@ -6,6 +6,7 @@ import { WorkbenchSidebar } from "./WorkbenchSidebar.js";
 import { KnowledgeCenterPage } from "./KnowledgeCenterPage.js";
 import { SessionListPage } from "./SessionListPage.js";
 import { DraftConversation, NewSessionDialog } from "./NewSessionDialog.js";
+import { MaintenanceScreen, readStoredMaintenanceJob } from "./MaintenanceScreen.js";
 import { DrawerDialog, nextDrawerOwner, useWorkbenchLayoutMode } from "./responsive.js";
 import { DEFAULT_TIME_ZONE } from "./timezone.js";
 
@@ -23,11 +24,16 @@ export function WorkbenchShell(props) {
   const [sessionListScope, setSessionListScope] = React.useState(null);
   const navigationTriggerRef = React.useRef(null);
 
+  React.useEffect(function () {
+    if (state.maintenanceJob || typeof props.store.actions.resumePurgeJob !== "function") return;
+    const stored = readStoredMaintenanceJob();
+    if (stored?.jobId) void props.store.actions.resumePurgeJob(stored.jobId);
+  }, [props.store, state.maintenanceJob]);
+
   const navigate = function (page) {
     if (page === "home") navigation.openHome();
     else if (page === "knowledge") navigation.openKnowledge();
     else if (page === "sessions") { setSessionListScope(null); navigation.openSessions(); }
-    else if (page === "archive") navigation.openArchive();
     if (layoutMode === "mobile") setDrawerOwner(null);
   };
   const openDrawer = function (owner) { setDrawerOwner((current) => nextDrawerOwner(current, owner)); };
@@ -42,7 +48,7 @@ export function WorkbenchShell(props) {
   };
   const archiveSession = async function (sessionId) {
     await props.store.actions.archiveSession(sessionId);
-    if (view.sessionId === sessionId) navigation.openArchive();
+    if (view.sessionId === sessionId) navigation.openSessions();
   };
   const openNativeSettings = function () {
     closeDrawer();
@@ -69,6 +75,9 @@ export function WorkbenchShell(props) {
       open: true,
       globalSidebar: true,
       sessionId: view.sessionId,
+      opening: view.opening === true,
+      openError: view.error || null,
+      onRetryOpen: () => props.openSession?.(view.sessionId),
       onHome: navigation.openHome,
       layoutMode,
       projectDrawerOpen: drawerOwner === "project",
@@ -90,15 +99,10 @@ export function WorkbenchShell(props) {
   } else if (view.page === "knowledge") {
     center = React.createElement(KnowledgeCenterPage, {
       store: props.store,
-      sessions: props.sessions,
-      workspaces: props.workspaces,
-      onConversationOpen: navigation.openConversation,
       onDraftOpen: navigation.openDraft,
     });
   } else if (view.page === "sessions") {
     center = React.createElement(SessionListPage, { store: props.store, onOpenSession: openSession, initialScope: sessionListScope });
-  } else if (view.page === "archive") {
-    center = React.createElement(SessionListPage, { archived: true, store: props.store, onOpenSession: openSession });
   } else {
     center = React.createElement(ProjectHome, {
       ...props,
@@ -159,5 +163,15 @@ export function WorkbenchShell(props) {
         setNewSessionOpen(false);
         navigation.openDraft();
       },
-    }));
+    }),
+    state.maintenanceJob
+      ? React.createElement(MaintenanceScreen, {
+          store: props.store,
+          job: state.maintenanceJob,
+          onFinished() {
+            setSessionListScope(null);
+            navigation.openHome();
+          },
+        })
+      : null);
 }

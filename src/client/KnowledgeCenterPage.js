@@ -13,13 +13,13 @@ import {
 } from "@phosphor-icons/react";
 
 import { cpwbApi } from "./api.js";
+import { GlobalModal } from "./globalModal.js";
 import { ACCEPT, formatBytes, needsDocumentPolling, statusMeta } from "./KnowledgeBase.js";
 import {
   activeKnowledgeBaseId,
   nextKnowledgePreviewAfterLeave,
   useKnowledgeBackplaneLink,
 } from "./knowledgeBackplane.js";
-import { openWorkbenchSession } from "./workbenchSessions.js";
 
 const h = React.createElement;
 
@@ -39,6 +39,13 @@ function overviewOf(knowledgeBase) {
     latestIndexedAt: null,
     ...(knowledgeBase?.overview || {}),
   };
+}
+
+export function startKnowledgeChatDraft({ store, knowledgeBaseId, onDraftOpen }) {
+  if (knowledgeBaseId == null) return false;
+  store.actions.startDraft({ scope: { kind: "knowledge_base", id: knowledgeBaseId } });
+  onDraftOpen?.();
+  return true;
 }
 
 export function knowledgeStateLabel(overview) {
@@ -99,7 +106,7 @@ function KnowledgeHeader({ mode, knowledgeBase, onBack, onCreate, onSettings, on
           : "管理原始文件、向量索引和项目连接；会话继续复用 Workbench 的 RC.2 原生能力。")),
     h("div", { className: "cpwb-knowledge-head-actions" },
       board ? h("button", { type: "button", className: "cpwb-kb-action cpwb-kb-action-ghost", onClick: onSettings }, h(GearSix, { size: 16 }), "向量模型") : null,
-      board ? h("button", { type: "button", className: "cpwb-kb-action cpwb-kb-action-primary", onClick: onCreate }, h(Plus, { size: 16 }), "新建知识库") : null,
+      board ? h("button", { type: "button", className: "cpwb-kb-action cpwb-kb-action-primary", onClick: onCreate }, h(Plus, { size: 16 }), "新建芯片") : null,
       !board ? h("button", { type: "button", className: "cpwb-kb-action cpwb-kb-action-ghost", onClick: onBack }, h(ArrowLeft, { size: 16 }), "返回知识库") : null,
       mode === "detail" ? h("button", { type: "button", className: "cpwb-kb-action", onClick: onUpload }, h(UploadSimple, { size: 16 }), "上传文件") : null,
       mode === "detail" ? h("button", { type: "button", className: "cpwb-kb-action cpwb-kb-action-primary", onClick: onChat }, h(ChatCircleDots, { size: 16 }), "新建知识库会话") : null));
@@ -183,7 +190,7 @@ function KnowledgeBoard({ knowledgeBases, pinnedId, previewId, onPin, onPreview,
       h("span", { className: "cpwb-knowledge-eyebrow" }, "NO INTELLIGENCE MODULES"),
       h("h2", null, "尚未接入知识芯片"),
       h("p", null, "创建知识库并上传文件，Workbench 会在本地向量节点完成解析与索引。"),
-      h("button", { type: "button", className: "cpwb-kb-action cpwb-kb-action-primary", onClick: onCreate }, h(Plus, { size: 16 }), "初始化第一个知识库"));
+      h("button", { type: "button", className: "cpwb-kb-action cpwb-kb-action-primary", onClick: onCreate }, h(Plus, { size: 16 }), "初始化第一个芯片"));
   }
   return h("div", { ref: boardRef, className: "cpwb-knowledge-board" },
     link ? h("svg", { className: "cpwb-knowledge-link" + (previewId != null ? " cpwb-previewing" : ""), viewBox: link.viewBox, "aria-hidden": true },
@@ -289,25 +296,29 @@ function KnowledgeDetail({ knowledgeBase, documents, action, settings, onFileInp
         h("button", { type: "button", className: "cpwb-kb-action cpwb-kb-action-danger cpwb-kb-core-action", onClick: onDelete }, h(Trash, { size: 15 }), "删除知识库"))));
 }
 
-function ProjectLinkDialog({ knowledgeBase, projects, busy, onToggle, onClose }) {
+export function ProjectLinkDialog({ knowledgeBase, projects, busyProjectId = null, error = null, onToggle, onClose }) {
   if (!knowledgeBase) return null;
   const linked = new Set((knowledgeBase.linkedProjects || []).map((project) => project.id));
-  return h("div", { className: "cpwb-modal-backdrop", onMouseDown: (event) => { if (event.target === event.currentTarget) onClose(); } },
-    h("section", { className: "cpwb-modal cpwb-knowledge-link-dialog", role: "dialog", "aria-modal": true, "aria-labelledby": "cpwb-kb-link-title" },
+  return h(GlobalModal, { className: "cpwb-knowledge-link-host", onClose, labelledBy: "cpwb-kb-link-title" },
+    h("section", { className: "cpwb-modal cpwb-knowledge-link-dialog" },
       h("div", { className: "cpwb-modal-kicker" }, "BACKPLANE / PROJECT LINKS"),
       h("h3", { id: "cpwb-kb-link-title" }, `管理「${knowledgeBase.name}」的项目连接`),
       h("div", { className: "cpwb-knowledge-project-options" }, projects.length
-        ? projects.map((project) => h("button", { type: "button", key: project.id, disabled: busy, "aria-pressed": linked.has(project.id), onClick: () => onToggle(project, linked.has(project.id)) },
-            h("i", null, linked.has(project.id) ? "ON" : "--"), h("span", null, h("strong", null, project.name), h("small", null, linked.has(project.id) ? "已接入知识上下文" : "尚未连接")), h("em", null, linked.has(project.id) ? "UNLINK" : "LINK")))
+        ? projects.map((project) => {
+            const pending = busyProjectId === project.id;
+            return h("button", { type: "button", key: project.id, disabled: busyProjectId != null, "aria-busy": pending ? "true" : undefined, "aria-pressed": linked.has(project.id), onClick: () => onToggle(project, linked.has(project.id)) },
+              h("i", null, pending ? ".." : linked.has(project.id) ? "ON" : "--"),
+              h("span", null, h("strong", null, project.name), h("small", null, pending ? "正在同步项目上下文" : linked.has(project.id) ? "已接入知识上下文" : "尚未连接")),
+              h("em", null, pending ? "SYNCING" : linked.has(project.id) ? "UNLINK" : "LINK"));
+          })
         : h("p", null, "暂无可连接项目")),
+      error ? h("p", { className: "cpwb-knowledge-local-error", role: "alert" }, error) : null,
       h("div", { className: "cpwb-modal-actions" }, h("button", { type: "button", className: "cpwb-kb-action", onClick: onClose }, "完成"))));
 }
 
 export function KnowledgeCenterPage({
   store,
-  sessions,
-  workspaces,
-  onConversationOpen,
+  onDraftOpen,
   initialMode = "board",
   initialKnowledgeBaseId = null,
 }) {
@@ -324,7 +335,8 @@ export function KnowledgeCenterPage({
   const [createFiles, setCreateFiles] = React.useState([]);
   const [saving, setSaving] = React.useState(false);
   const [localError, setLocalError] = React.useState(null);
-  const [linking, setLinking] = React.useState(false);
+  const [linkingProjectId, setLinkingProjectId] = React.useState(null);
+  const [linkError, setLinkError] = React.useState(null);
   const [showLinks, setShowLinks] = React.useState(false);
   const [deleteTarget, setDeleteTarget] = React.useState(null);
   const selected = knowledgeBases.find((item) => item.id === pinnedId) || null;
@@ -374,22 +386,18 @@ export function KnowledgeCenterPage({
     setPinnedId(id);
     setPreviewId(null);
     store.actions.selectKnowledgeBase(id).catch(() => {});
+    setLinkError(null);
     setShowLinks(true);
   };
 
-  const openChat = async function () {
+  const openChat = function () {
     const id = activeKnowledgeBaseId({ previewId, pinnedId });
     if (id == null || saving) return;
-    setSaving(true);
     setLocalError(null);
     try {
-      const result = await store.actions.openKnowledgeChat({ knowledgeBaseId: id });
-      if (sessions) await openWorkbenchSession(sessions, result.sessionId, { workspaces });
-      onConversationOpen?.(result.sessionId);
+      startKnowledgeChatDraft({ store, knowledgeBaseId: id, onDraftOpen });
     } catch (error) {
       setLocalError(error?.message || "打开知识库会话失败");
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -423,15 +431,16 @@ export function KnowledgeCenterPage({
   };
 
   const toggleProject = async function (project, isLinked) {
-    if (!selected || linking) return;
-    setLinking(true);
+    if (!selected || linkingProjectId != null) return;
+    setLinkingProjectId(project.id);
+    setLinkError(null);
     try {
       if (isLinked) await store.actions.unlinkProjectKnowledgeBase(project.id, selected.id);
       else await store.actions.linkProjectKnowledgeBase(project.id, selected.id);
-      await store.actions.refresh();
-      if (mode === "detail") await store.actions.selectKnowledgeBase(selected.id);
+    } catch (error) {
+      setLinkError(error?.message || "项目连接更新失败");
     } finally {
-      setLinking(false);
+      setLinkingProjectId(null);
     }
   };
 
@@ -499,7 +508,7 @@ export function KnowledgeCenterPage({
         onReindex: (document) => store.actions.reindexDocument(document.id).catch(() => {}),
         onUnlink: (document) => store.actions.unlinkDocument({ id: document.id, scope: "knowledgeBase", scopeId: selected.id }).then(() => store.actions.refresh()).then(() => store.actions.selectKnowledgeBase(selected.id)).catch(() => {}),
       })) : null,
-    showLinks ? h(ProjectLinkDialog, { knowledgeBase: selected, projects, busy: linking, onToggle: toggleProject, onClose: () => setShowLinks(false) }) : null,
+    showLinks ? h(ProjectLinkDialog, { knowledgeBase: selected, projects, busyProjectId: linkingProjectId, error: linkError, onToggle: toggleProject, onClose: () => setShowLinks(false) }) : null,
     deleteTarget ? h("div", { className: "cpwb-modal-backdrop", onMouseDown: (event) => { if (event.target === event.currentTarget) setDeleteTarget(null); } },
       h("section", { className: "cpwb-modal cpwb-danger-modal", role: "dialog", "aria-modal": true, "aria-labelledby": "cpwb-delete-kb-center-title" },
         h("div", { className: "cpwb-modal-kicker" }, "KNOWLEDGE / DELETE"),

@@ -48,6 +48,7 @@ async function fetch(input, init = {}) {
   let responseHeaders = {};
   let responseBody = Buffer.alloc(0);
   let destroyed = false;
+  const finishListeners = [];
   const res = {
     headersSent: false,
     writeHead(nextStatus, nextHeaders) {
@@ -57,6 +58,11 @@ async function fetch(input, init = {}) {
     },
     end(value = "") {
       responseBody = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
+      for (const listener of finishListeners.splice(0)) listener();
+    },
+    once(event, listener) {
+      if (event === "finish") finishListeners.push(listener);
+      return this;
     },
     destroy() {
       destroyed = true;
@@ -518,7 +524,12 @@ test("project deletion plan defaults to detaching sessions and never touches wor
     relationshipCount: 0,
     documentCount: 0,
     orphanDocumentCount: 0,
-    permanentDeletionAvailable: false,
+    permanentDeletion: {
+      available: false,
+      requiresRestart: true,
+      backend: null,
+      reason: "Permanent deletion requires dsh-workbench supervised mode",
+    },
   });
 
   response = await fetch(base + "/projects/" + project.id, { method: "DELETE" });
@@ -537,10 +548,71 @@ test("permanent project deletion fails closed before any data changes when nativ
   const project = repos.projects.create({ name: "Keep until supported" });
   repos.workbenchSessions.create({ sessionId: "session-cpwb-keep", scope: { kind: "project", id: project.id } });
   const response = await fetch(base + "/projects/" + project.id + "?sessionPolicy=delete", { method: "DELETE" });
-  assert.equal(response.status, 501);
-  assert.equal((await response.json()).error.code, "ESESSION_DELETE_UNAVAILABLE");
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "PURGE_JOB_REQUIRED");
   assert.equal(repos.projects.get(project.id).name, "Keep until supported");
   assert.deepEqual(repos.workbenchSessions.get("session-cpwb-keep").scope, { kind: "project", id: project.id });
+});
+
+test("purge API returns restart capability, arms after response, and hides server paths", async (t) => {
+  const calls = [];
+  const maintenance = {
+    capability: () => ({
+      available: true,
+      requiresRestart: true,
+      backend: "rc2-jsonl-zstd",
+      reason: null,
+    }),
+    async containerPlan() {
+      return {
+        kind: "project",
+        id: 4,
+        name: "Research",
+        sessionIds: ["session-parent"],
+        descendantSessionIds: ["session-child"],
+        relationshipCount: 0,
+        linkedDocuments: [],
+        orphanDocuments: [],
+        planVersion: "plan-hash",
+      };
+    },
+    async createPurgeJob(input) {
+      calls.push(input);
+      return {
+        jobId: "purge-api",
+        state: "queued",
+        revision: 1,
+        recoveryCommand: "dsh-workbench web",
+        backupRoot: "/Users/private/backup",
+      };
+    },
+    async armPurgeJob(jobId) { calls.push({ armed: jobId }); },
+    async getJob() { return { jobId: "purge-api", state: "queued", revision: 1 }; },
+    isLocked: () => false,
+  };
+  const { base } = await startApi(t, { services: { maintenance } });
+
+  const plan = await fetch(base + "/projects/4/deletion-plan").then((response) => response.json());
+  assert.equal(plan.permanentDeletion.available, true);
+  assert.equal(plan.descendantSessionCount, 1);
+  const response = await fetch(base + "/maintenance/purge-jobs", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({
+      kind: "project",
+      id: 4,
+      planVersion: "plan-hash",
+      confirmation: "Research",
+      restartConfirmed: true,
+    }),
+  });
+  assert.equal(response.status, 202);
+  const body = await response.json();
+  assert.equal(body.recoveryCommand, "dsh-workbench web");
+  assert.equal("backupRoot" in body, false);
+  assert.doesNotMatch(JSON.stringify(body), /Users|access_token|Authorization/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.at(-1), { armed: "purge-api" });
 });
 
 test("knowledge-bases CRUD", async (t) => {
@@ -989,6 +1061,28 @@ test("schedule run delegates to injected service; 501 without it", async (t) => 
   const body = await res.json();
   assert.equal(body.sessionId, "sess-1");
   assert.deepEqual(runCalls, [s.id]);
+});
+
+test("manual schedule run reports a persisted failed execution as an API error", async (t) => {
+  const { base, repos } = await startApi(t, {
+    services: { runSchedule: async (schedule) => ({
+      id: 9,
+      scheduleId: schedule.id,
+      sessionId: "session-scheduled-failed",
+      status: "failed",
+      error: "provider unavailable",
+    }) },
+  });
+  const project = repos.projects.create({ name: "P" });
+  const schedule = repos.schedules.create({ projectId: project.id, name: "s", rule: "daily" });
+
+  const response = await fetch(base + `/schedules/${schedule.id}/run`, { method: "POST" });
+  assert.equal(response.status, 502);
+  assert.deepEqual((await response.json()).error, {
+    code: "SCHEDULE_RUN_FAILED",
+    message: "provider unavailable",
+    details: { runId: 9, sessionId: "session-scheduled-failed" },
+  });
 });
 
 test("schedule run returns 501 when no service is provided", async (t) => {

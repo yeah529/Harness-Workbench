@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS summaries (
 CREATE TABLE IF NOT EXISTS schedules (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  session_id TEXT REFERENCES workbench_sessions(session_id) ON DELETE SET NULL,
   name TEXT NOT NULL,
   prompt TEXT,
   rule TEXT NOT NULL,
@@ -168,6 +169,9 @@ CREATE TABLE IF NOT EXISTS schedules (
   last_run_at TEXT,
   next_run_at TEXT
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS schedules_session_id_unique
+  ON schedules(session_id) WHERE session_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS schedule_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -400,6 +404,12 @@ CREATE INDEX workbench_sessions_archive_activity
   ON workbench_sessions(archived_at, updated_at DESC);
 `;
 
+const V8_TO_V9_MIGRATION_SQL = `
+ALTER TABLE schedules ADD COLUMN session_id TEXT REFERENCES workbench_sessions(session_id) ON DELETE SET NULL;
+CREATE UNIQUE INDEX schedules_session_id_unique
+  ON schedules(session_id) WHERE session_id IS NOT NULL;
+`;
+
 /**
  * Apply one schema migration atomically.
  *
@@ -446,6 +456,7 @@ function migrate(db) {
       db.exec(V5_TO_V6_MIGRATION_SQL);
       db.exec(V6_TO_V7_MIGRATION_SQL);
       db.exec(V7_TO_V8_MIGRATION_SQL);
+      db.exec(V8_TO_V9_MIGRATION_SQL);
     } else if (current === 2) {
       db.exec(V2_TO_V3_MIGRATION_SQL);
       db.exec(V3_TO_V4_MIGRATION_SQL);
@@ -453,26 +464,34 @@ function migrate(db) {
       db.exec(V5_TO_V6_MIGRATION_SQL);
       db.exec(V6_TO_V7_MIGRATION_SQL);
       db.exec(V7_TO_V8_MIGRATION_SQL);
+      db.exec(V8_TO_V9_MIGRATION_SQL);
     } else if (current === 3) {
       db.exec(V3_TO_V4_MIGRATION_SQL);
       db.exec(V4_TO_V5_MIGRATION_SQL);
       db.exec(V5_TO_V6_MIGRATION_SQL);
       db.exec(V6_TO_V7_MIGRATION_SQL);
       db.exec(V7_TO_V8_MIGRATION_SQL);
+      db.exec(V8_TO_V9_MIGRATION_SQL);
     } else if (current === 4) {
       db.exec(V4_TO_V5_MIGRATION_SQL);
       db.exec(V5_TO_V6_MIGRATION_SQL);
       db.exec(V6_TO_V7_MIGRATION_SQL);
       db.exec(V7_TO_V8_MIGRATION_SQL);
+      db.exec(V8_TO_V9_MIGRATION_SQL);
     } else if (current === 5) {
       db.exec(V5_TO_V6_MIGRATION_SQL);
       db.exec(V6_TO_V7_MIGRATION_SQL);
       db.exec(V7_TO_V8_MIGRATION_SQL);
+      db.exec(V8_TO_V9_MIGRATION_SQL);
     } else if (current === 6) {
       db.exec(V6_TO_V7_MIGRATION_SQL);
       db.exec(V7_TO_V8_MIGRATION_SQL);
+      db.exec(V8_TO_V9_MIGRATION_SQL);
     } else if (current === 7) {
       db.exec(V7_TO_V8_MIGRATION_SQL);
+      db.exec(V8_TO_V9_MIGRATION_SQL);
+    } else if (current === 8) {
+      db.exec(V8_TO_V9_MIGRATION_SQL);
     } else {
       db.exec(SCHEMA_SQL);
     }

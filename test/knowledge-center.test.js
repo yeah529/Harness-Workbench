@@ -8,7 +8,9 @@ import {
   KnowledgeCenterPage,
   knowledgeActivityRows,
   knowledgeStateLabel,
+  startKnowledgeChatDraft,
 } from "../src/client/KnowledgeCenterPage.js";
+import { createWorkbenchStore } from "../src/client/store.js";
 
 const kb = {
   id: 7,
@@ -68,7 +70,31 @@ test("knowledge board renders the approved chip/backplane hierarchy with only re
   assert.match(html, /Workbench Core/);
   assert.match(html, /6 个项目会话/);
   assert.match(html, /使用此芯片新建会话/);
+  assert.match(html, />新建芯片</);
+  assert.doesNotMatch(html, />新建知识库</);
   assert.doesNotMatch(html, /DSH 架构说明/);
+});
+
+test("using an existing knowledge chip starts a lazy knowledge-scoped draft", () => {
+  const store = createWorkbenchStore({ health: async () => ({ ok: true }) });
+  let draftOpenCount = 0;
+
+  const started = startKnowledgeChatDraft({
+    store,
+    knowledgeBaseId: 7,
+    onDraftOpen() { draftOpenCount += 1; },
+  });
+
+  assert.equal(started, true);
+  assert.deepEqual(store.getSnapshot().draft, {
+    scope: { kind: "knowledge_base", id: 7 },
+    pinnedSources: [],
+    text: "",
+    status: "pristine",
+    sessionId: null,
+    error: null,
+  });
+  assert.equal(draftOpenCount, 1);
 });
 
 test("knowledge create screen is full-width and initializes name, description, and multiple files", () => {
@@ -96,7 +122,7 @@ test("knowledge detail exposes real files, index progress, project links, open, 
 test("empty knowledge board has a deliberate module initialization state", () => {
   const html = render({ state: { knowledgeBases: [], activeKnowledgeBaseId: null, documents: [] } });
   assert.match(html, /尚未接入知识芯片/);
-  assert.match(html, /初始化第一个知识库/);
+  assert.match(html, /初始化第一个芯片/);
   assert.doesNotMatch(html, /cpwb-knowledge-link-path/);
 });
 

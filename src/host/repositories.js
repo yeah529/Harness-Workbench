@@ -69,6 +69,7 @@ function mapSchedule(row) {
   return {
     id: row.id,
     projectId: row.project_id,
+    sessionId: row.session_id ?? null,
     name: row.name,
     prompt: row.prompt ?? null,
     rule: row.rule,
@@ -142,6 +143,8 @@ function mapWorkbenchSession(row) {
     titleLocked: row.title_locked !== 0,
     lifecycleStatus: row.lifecycle_status,
     archivedAt: row.archived_at ?? null,
+    sessionType: row.session_type ?? "chat",
+    scheduleName: row.schedule_name ?? null,
     selection: {
       provider: row.provider ?? null,
       model: row.model ?? null,
@@ -153,13 +156,16 @@ function mapWorkbenchSession(row) {
 }
 
 const WORKBENCH_SESSION_SELECT =
-  "SELECT ws.*, CASE ws.scope_kind " +
+  "SELECT ws.*, sch.name AS schedule_name, " +
+  "CASE WHEN sch.id IS NULL THEN 'chat' ELSE 'schedule' END AS session_type, " +
+  "CASE ws.scope_kind " +
   "WHEN 'project' THEN p.name " +
   "WHEN 'knowledge_base' THEN kb.name " +
   "ELSE '独立' END AS context_name " +
   "FROM workbench_sessions ws " +
   "LEFT JOIN projects p ON ws.scope_kind = 'project' AND p.id = ws.scope_id " +
-  "LEFT JOIN knowledge_bases kb ON ws.scope_kind = 'knowledge_base' AND kb.id = ws.scope_id ";
+  "LEFT JOIN knowledge_bases kb ON ws.scope_kind = 'knowledge_base' AND kb.id = ws.scope_id " +
+  "LEFT JOIN schedules sch ON sch.session_id = ws.session_id ";
 
 const SESSION_SCOPE_KINDS = new Set(["project", "knowledge_base", "independent"]);
 const CONTEXT_SOURCE_KINDS = new Set(["knowledge_base", "workspace_file", "uploaded_file", "session"]);
@@ -1063,6 +1069,18 @@ export function createRepositories(db) {
       return this.get(id);
     },
 
+    bindSession({ id, sessionId }) {
+      const schedule = this.get(id);
+      if (!schedule) return null;
+      const session = workbenchSessions.get(sessionId);
+      if (!session) throw new Error("scheduled session does not exist");
+      if (session.scopeKind !== "project" || session.scopeId !== schedule.projectId) {
+        throw new Error("scheduled session must belong to the schedule project");
+      }
+      db.prepare("UPDATE schedules SET session_id = ? WHERE id = ?").run(sessionId, id);
+      return this.get(id);
+    },
+
     remove(id) {
       const info = db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
       return Number(info.changes) === 1;
@@ -1099,6 +1117,13 @@ export function createRepositories(db) {
       ).run(sessionId, error, iso, id);
       const row = db.prepare("SELECT * FROM schedule_runs WHERE id = ?").get(id);
       return row ? mapRun(row) : null;
+    },
+
+    failRunning({ error = "interrupted", finishedAt = new Date() } = {}) {
+      const info = db.prepare(
+        "UPDATE schedule_runs SET status = 'failed', error = ?, finished_at = ? WHERE status = 'running'",
+      ).run(error, nowIso(finishedAt));
+      return Number(info.changes);
     },
 
     missRun({ id, error = "missed", finishedAt = new Date() }) {
@@ -1175,6 +1200,69 @@ export function createRepositories(db) {
     },
   };
 
+  const maintenance = {
+    purgeContainer({
+      kind,
+      id,
+      expectedSessionIds,
+      expectedOrphanDocumentIds,
+    }) {
+      if (kind !== "project" && kind !== "knowledge_base") {
+        throw new TypeError("maintenance purge requires a project or knowledge base");
+      }
+      const containerId = Number(id);
+      if (!Number.isInteger(containerId) || containerId <= 0) {
+        throw new TypeError("maintenance purge requires a positive container id");
+      }
+      const normalizeIds = (values, label) => {
+        if (!Array.isArray(values)) throw new TypeError(`${label} must be an array`);
+        return [...new Set(values)].sort((left, right) =>
+          typeof left === "number" && typeof right === "number"
+            ? left - right
+            : String(left).localeCompare(String(right)),
+        );
+      };
+      const expectedSessions = normalizeIds(expectedSessionIds, "expectedSessionIds");
+      const expectedDocuments = normalizeIds(
+        expectedOrphanDocumentIds,
+        "expectedOrphanDocumentIds",
+      );
+
+      return transaction(db, () => {
+        const repository = kind === "project" ? projects : knowledgeBases;
+        const plan = repository.deletionPlan(containerId);
+        if (!plan) throw new Error("maintenance purge container not found");
+        const currentSessions = normalizeIds(plan.sessionIds, "current session ids");
+        const currentDocuments = normalizeIds(
+          plan.orphanDocuments.map((document) => document.id),
+          "current orphan document ids",
+        );
+        if (
+          JSON.stringify(currentSessions) !== JSON.stringify(expectedSessions) ||
+          JSON.stringify(currentDocuments) !== JSON.stringify(expectedDocuments)
+        ) {
+          throw new Error("stale purge plan: container graph changed after confirmation");
+        }
+
+        const removeSession = db.prepare(
+          "DELETE FROM workbench_sessions WHERE session_id = ?",
+        );
+        for (const sessionId of expectedSessions) removeSession.run(sessionId);
+        if (kind === "project") {
+          db.prepare("DELETE FROM projects WHERE id = ?").run(containerId);
+        } else {
+          db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(containerId);
+        }
+        const removeDocument = db.prepare("DELETE FROM documents WHERE id = ?");
+        for (const documentId of expectedDocuments) removeDocument.run(documentId);
+        return {
+          ...plan,
+          container: kind === "project" ? plan.project : plan.knowledgeBase,
+        };
+      });
+    },
+  };
+
   return {
     projects,
     knowledgeBases,
@@ -1190,5 +1278,6 @@ export function createRepositories(db) {
     messageContextRefs,
     workbenchSessions,
     schedules,
+    maintenance,
   };
 }

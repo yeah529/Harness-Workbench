@@ -1,6 +1,7 @@
 import React from "react";
 import { ArrowRight, Books, CaretDown, FolderOpen, Image, PaperPlaneTilt, Sparkle, UserCircle, X } from "@phosphor-icons/react";
 
+import { CyberSelect } from "./CyberSelect.js";
 import { GlobalModal } from "./globalModal.js";
 import { loadPendingModelCatalog, submitPendingDraft } from "./pendingSession.js";
 
@@ -78,10 +79,13 @@ export function NewSessionDialog({ open, store, initialScope, onClose, onStart }
         React.createElement("span", null, label)))),
       kind !== "independent" ? React.createElement("label", { className: "cpwb-owner-select" },
         React.createElement("span", null, kind === "project" ? "选择项目" : "选择知识库"),
-        React.createElement("select", {
+        React.createElement(CyberSelect, {
           value: ownerId || String(owners[0]?.id ?? ""),
-          onChange: (event) => setOwnerId(event.target.value),
-        }, owners.map((item) => React.createElement("option", { key: item.id, value: item.id }, item.name)))) : null,
+          onChange: setOwnerId,
+          ariaLabel: kind === "project" ? "选择项目" : "选择知识库",
+          placeholder: kind === "project" ? "请选择项目" : "请选择知识库",
+          options: owners.map((item) => ({ value: String(item.id), label: item.name })),
+        })) : null,
       React.createElement("section", { className: "cpwb-context-preview", "aria-label": "默认上下文" },
         React.createElement("div", null, React.createElement(Sparkle, { size: 18, "aria-hidden": true }), React.createElement("strong", null, "默认上下文")),
         React.createElement("ul", null, sourcePreview(scope, state).map((text) => React.createElement("li", { key: text }, text)))),
@@ -105,6 +109,15 @@ function pendingScopeName(draft, state) {
   return "独立会话";
 }
 
+export function watchPendingModelDismiss(documentObject, root, onDismiss) {
+  const dismiss = function (event) {
+    if (root?.contains?.(event.target)) return;
+    onDismiss();
+  };
+  documentObject.addEventListener("pointerdown", dismiss);
+  return function () { documentObject.removeEventListener("pointerdown", dismiss); };
+}
+
 export function DraftConversation({ store, sessions, workspaces, connection, conversation, onActivated, onCancel }) {
   const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const draft = state.draft;
@@ -116,6 +129,7 @@ export function DraftConversation({ store, sessions, workspaces, connection, con
   const [submitting, setSubmitting] = React.useState(false);
   const [localError, setLocalError] = React.useState(null);
   const fileInput = React.useRef(null);
+  const modelRoot = React.useRef(null);
 
   React.useEffect(function () { setText(draft?.text || ""); }, [draft?.sessionId, draft?.status]);
   React.useEffect(function () {
@@ -123,6 +137,10 @@ export function DraftConversation({ store, sessions, workspaces, connection, con
     loadPendingModelCatalog(connection).then((value) => { if (active) setCatalog(value); }).catch((error) => { if (active) setLocalError(error.message); });
     return function () { active = false; };
   }, [connection]);
+  React.useEffect(function () {
+    if (!modelOpen || typeof document === "undefined") return undefined;
+    return watchPendingModelDismiss(document, modelRoot.current, () => setModelOpen(false));
+  }, [modelOpen]);
   if (!draft) return null;
   const busy = submitting || draft.status === "materializing";
   const chosen = modelOption(catalog.groups || [], selection);
@@ -201,7 +219,7 @@ export function DraftConversation({ store, sessions, workspaces, connection, con
         React.createElement("div", { className: "cpwb-pending-composer-tools" },
           React.createElement("input", { ref: fileInput, type: "file", accept: "image/*", multiple: true, hidden: true, onChange: chooseFiles }),
           React.createElement("button", { type: "button", className: "cpwb-pending-tool", onClick: () => fileInput.current?.click(), "aria-label": "添加图片", title: "添加图片" }, React.createElement(Image, { size: 20, "aria-hidden": true })),
-          React.createElement("div", { className: "cpwb-pending-model" },
+          React.createElement("div", { ref: modelRoot, className: "cpwb-pending-model" },
             React.createElement("button", { type: "button", className: "cpwb-pending-model-trigger", onClick: () => setModelOpen((value) => !value), "aria-expanded": modelOpen, "aria-label": "选择模型与推理强度" },
               React.createElement("span", null, modelLabel), React.createElement(CaretDown, { size: 15, "aria-hidden": true })),
             modelOpen ? React.createElement("div", { className: "cpwb-pending-model-menu", role: "dialog", "aria-label": "模型与推理强度" },

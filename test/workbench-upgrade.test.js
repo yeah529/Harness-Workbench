@@ -17,6 +17,7 @@ import {
 } from "../src/client/knowledgeReferences.js";
 import { createWorkbenchRagPreStep, deriveSessionTitle } from "../src/host/sessions.js";
 import { Automation, buildSummaryMarkdown, filterSchedules } from "../src/client/Automation.js";
+import { getNewRecordIds } from "../src/client/arrivalPulse.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
 import { Todos, filterTodos, organizeTodos } from "../src/client/Todos.js";
 
@@ -166,15 +167,16 @@ test("todo UI separates completed items and groups pending items by local date s
   assert.deepEqual(filterTodos(todos, "今天").map((row) => row.id), [2]);
 });
 
-test("summary UI exposes generation feedback plus download and delete actions", () => {
+test("summary generation uses a quiet pulse rail and keeps failure feedback explicit", () => {
   const summary = { id: 9, projectId: 1, summaryDate: "2026-08-22", status: "completed", content: "今日完成接口联调。" };
   const running = renderToStaticMarkup(React.createElement(Automation, {
     store: staticStore({ projects: [{ id: 1, name: "智能陪练" }], summaries: [summary], action: { type: "runSummary", status: "running" } }),
     projectId: 1,
     view: "summary",
   }));
-  assert.match(running, /生成中/);
-  assert.match(running, /执行中/);
+  assert.match(running, /cpwb-generation-wave/);
+  assert.match(running, /aria-label="正在生成每日总结"/);
+  assert.doesNotMatch(running, /执行中|生成中|已完成/);
   assert.match(running, /aria-label="下载 2026-08-22 每日总结"/);
   assert.match(running, /aria-label="删除 2026-08-22 每日总结"/);
 
@@ -184,6 +186,29 @@ test("summary UI exposes generation feedback plus download and delete actions", 
     view: "summary",
   }));
   assert.match(failed, /模型不可用/);
+});
+
+test("summary and todo deletion success removes the row without a completion notice", () => {
+  const summaryHtml = renderToStaticMarkup(React.createElement(Automation, {
+    store: staticStore({ summaries: [], action: { type: "deleteSummary", status: "done" } }),
+    projectId: 1,
+    view: "summary",
+  }));
+  assert.doesNotMatch(summaryHtml, /cpwb-status-success/);
+  assert.doesNotMatch(summaryHtml, />已完成</);
+
+  const todoStore = staticStore({ todos: [], action: { type: "todo", status: "done" } });
+  todoStore.actions.updateTodo = async () => {};
+  todoStore.actions.createTodo = async () => {};
+  todoStore.actions.deleteTodo = async () => {};
+  const todoHtml = renderToStaticMarkup(React.createElement(Todos, { store: todoStore, projectId: 1 }));
+  assert.doesNotMatch(todoHtml, /cpwb-status-success/);
+});
+
+test("arrival pulse ignores initial records and selects only newly inserted record ids", () => {
+  assert.deepEqual(getNewRecordIds(null, [1, 2]), []);
+  assert.deepEqual(getNewRecordIds(new Set(["1", "2"]), [2, 3, 4]), ["3", "4"]);
+  assert.deepEqual(getNewRecordIds(new Set(["1", "2"]), [2, 1]), []);
 });
 
 test("summary Markdown download content is UTF-8 friendly and filename-safe", () => {

@@ -56,8 +56,9 @@ test("sidebar renders the approved hierarchy with one Workbench-styled settings 
   const html = renderToStaticMarkup(React.createElement(WorkbenchSidebar, { page: "home", recentSessions }));
   assert.match(html, /新建会话/);
   assert.match(html, /首页/);
-  assert.match(html, /知识库/);
+  assert.match(html, /知识芯片/);
   assert.match(html, /查看全部会话/);
+  assert.doesNotMatch(html, /<span>归档会话<\/span>/);
   assert.match(html, /<button[^>]+cpwb-sidebar-settings/);
   assert.match(html, />设置</);
   assert.doesNotMatch(html, /cpwb-sidebar-settings-seat/);
@@ -67,7 +68,8 @@ test("sidebar renders the approved hierarchy with one Workbench-styled settings 
   assert.equal((html.match(/data-logo-part="approved-node-artwork"/g) || []).length, 1);
   assert.match(html, /class="cpwb-sidebar-footer-wordmark"/);
   assert.doesNotMatch(html, /data-logo-part="harness-core"/);
-  assert.equal((html.match(/data-logo-part="wordmark-main"/g) || []).length, 2);
+  assert.equal((html.match(/data-logo-part="wordmark-main"/g) || []).length, 4);
+  assert.equal((html.match(/data-logo-channel=/g) || []).length, 2);
   assert.doesNotMatch(html, /<text/);
 });
 
@@ -437,6 +439,47 @@ test("store: a failed summary generation refreshes the failed row and keeps the 
   assert.equal(store.getSnapshot().action.error.code, "SUMMARY_GENERATION_FAILED");
 });
 
+test("store: a failed schedule run refreshes its diagnostic session and keeps the action error visible", async () => {
+  const schedule = { id: 6, projectId: 1, name: "夜间接口审计", enabled: true, sessionId: "session-schedule-6" };
+  const diagnosticSession = {
+    sessionId: "session-schedule-6",
+    title: "夜间接口审计",
+    sessionType: "schedule",
+    scheduleName: "夜间接口审计",
+    scope: { kind: "project", id: 1 },
+  };
+  const fetchImpl = makeFetch(({ url, init }) => {
+    const { pathname } = parse(url);
+    const method = init.method ?? "GET";
+    if (pathname === "/api/cpwb/schedules/6/run" && method === "POST") {
+      return jsonResponse(502, { error: { code: "SCHEDULE_RUN_FAILED", message: "定时任务执行失败" } });
+    }
+    if (pathname === "/api/cpwb/todos" && method === "GET") return jsonResponse(200, []);
+    if (pathname === "/api/cpwb/schedules" && method === "GET") return jsonResponse(200, [schedule]);
+    if (pathname === "/api/cpwb/schedules/6/runs" && method === "GET") {
+      return jsonResponse(200, [{ status: "failed", sessionId: diagnosticSession.sessionId, error: "agent failed" }]);
+    }
+    if (pathname === "/api/cpwb/summaries" && method === "GET") return jsonResponse(200, []);
+    if (pathname === "/api/cpwb/chat/sessions" && method === "GET") {
+      return jsonResponse(200, { items: [diagnosticSession], total: 1, limit: 20, offset: 0 });
+    }
+    return jsonResponse(404, { error: { code: "NOT_FOUND", message: "not found" } });
+  });
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
+  await store.actions.refreshProject(1, "2026-08-25");
+
+  await assert.rejects(
+    () => store.actions.runSchedule(6),
+    /定时任务执行失败/,
+  );
+
+  assert.deepEqual(store.getSnapshot().recentSessions, [diagnosticSession]);
+  assert.equal(store.getSnapshot().scheduleRuns["6"][0].sessionId, diagnosticSession.sessionId);
+  assert.equal(store.getSnapshot().action.type, "runSchedule");
+  assert.equal(store.getSnapshot().action.status, "error");
+  assert.equal(store.getSnapshot().action.error.code, "SCHEDULE_RUN_FAILED");
+});
+
 test("api: non-ok JSON error envelope becomes Error with code/status", async () => {
   const fetchImpl = makeFetch(() => jsonResponse(422, { error: { code: "INVALID_FIELD", message: "bad field" } }));
   const api = createCpwbApi({ fetchImpl });
@@ -540,6 +583,47 @@ test("store: refresh pulls health/projects/knowledgeBases/documents and reaches 
   assert.equal(s.citations.length, 0);
   const recentRequest = fetchImpl.calls.find(({ url }) => parse(url).pathname === "/api/cpwb/chat/sessions");
   assert.equal(parse(recentRequest.url).searchParams.get("limit"), "20");
+});
+
+test("api and store keep purge state across a temporary status disconnect", async () => {
+  let reads = 0;
+  const fetchImpl = makeFetch(({ url, init }) => {
+    const { pathname } = parse(url);
+    if (pathname === "/api/cpwb/maintenance/purge-jobs" && init.method === "POST") {
+      return jsonResponse(202, {
+        jobId: "purge-client",
+        state: "queued",
+        revision: 1,
+        recoveryCommand: "dsh-workbench web",
+      });
+    }
+    if (pathname === "/api/cpwb/maintenance/purge-jobs/purge-client") {
+      reads += 1;
+      if (reads === 1) throw new Error("fetch failed");
+      return jsonResponse(200, {
+        jobId: "purge-client",
+        state: "restarting",
+        revision: 5,
+      });
+    }
+    throw new Error("unexpected request: " + pathname);
+  });
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
+
+  await store.actions.startContainerPurge({
+    kind: "project",
+    id: 4,
+    planVersion: "plan-hash",
+    confirmation: "Research",
+    restartConfirmed: true,
+  });
+  await store.actions.refreshPurgeJob("purge-client");
+  assert.equal(store.getSnapshot().maintenanceJob.jobId, "purge-client");
+  assert.equal(store.getSnapshot().maintenanceJob.state, "queued");
+  assert.equal(store.getSnapshot().maintenanceJob.disconnected, true);
+  await store.actions.refreshPurgeJob("purge-client");
+  assert.equal(store.getSnapshot().maintenanceJob.state, "restarting");
+  assert.equal(store.getSnapshot().maintenanceJob.disconnected, false);
 });
 
 test("store: automation prompt settings load and update the visible snapshot", async () => {
@@ -657,6 +741,42 @@ test("store: project rename/delete refresh the authoritative project list", asyn
   assert.equal(store.getSnapshot().projects[0].name, "Renamed");
   await store.actions.deleteProject({ id: 1, sessionPolicy: "detach" });
   assert.deepEqual(store.getSnapshot().projects, []);
+});
+
+test("store: linking a knowledge base refreshes both project links and knowledge cards", async () => {
+  const linkedKnowledgeBase = {
+    ...kb,
+    linkedProjects: [{ ...project, sessionCount: 0 }],
+    overview: { linkedProjectCount: 1 },
+  };
+  const fetchImpl = makeFetch(({ url, init }) => {
+    const { pathname } = parse(url);
+    const method = init.method ?? "GET";
+    if (pathname === "/api/cpwb/projects/1/knowledge-bases/2" && method === "POST") {
+      return jsonResponse(201, { projectId: 1, knowledgeBaseId: 2 });
+    }
+    if (pathname === "/api/cpwb/projects/1/knowledge-bases" && method === "GET") {
+      return jsonResponse(200, [linkedKnowledgeBase]);
+    }
+    if (pathname === "/api/cpwb/knowledge-bases" && method === "GET") {
+      return jsonResponse(200, [linkedKnowledgeBase]);
+    }
+    return jsonResponse(404, { error: { code: "NOT_FOUND", message: "not found" } });
+  });
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
+
+  await store.actions.linkProjectKnowledgeBase(1, 2);
+
+  assert.equal(store.getSnapshot().linkedKnowledgeBases[0].id, 2);
+  assert.equal(store.getSnapshot().knowledgeBases[0].overview.linkedProjectCount, 1);
+  assert.deepEqual(
+    fetchImpl.calls.map(({ url, init }) => [parse(url).pathname, init.method ?? "GET"]),
+    [
+      ["/api/cpwb/projects/1/knowledge-bases/2", "POST"],
+      ["/api/cpwb/projects/1/knowledge-bases", "GET"],
+      ["/api/cpwb/knowledge-bases", "GET"],
+    ],
+  );
 });
 
 test("store: stale refresh response never overwrites a newer refresh", async () => {
