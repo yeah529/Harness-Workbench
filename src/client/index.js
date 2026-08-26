@@ -3,13 +3,16 @@ import THEME_CSS from "./theme.css";
 import WORKBENCH_CSS from "./workbench.css";
 import { localDateKey } from "./store.js";
 import { getStore } from "./storeInstance.js";
-import { getWorkbenchSession, openWorkbenchSession } from "./workbenchSessions.js";
+import { openWorkbenchSession } from "./workbenchSessions.js";
+import { openKnownWorkbenchSession } from "./sessionNavigation.js";
 import { createNavigationStore } from "./navigation.js";
 import { WorkbenchShell } from "./WorkbenchShell.js";
 import { registerWorkbenchSettingsSection as registerSettingsSection } from "./settingsSlot.js";
 import { registerKnowledgeBaseReferenceSource } from "./knowledgeReferences.js";
 import { registerModelIndicator } from "./ModelIndicator.js";
 import { registerImageAttachmentButton } from "./ImageAttachmentButton.js";
+import { registerKnowledgeSources } from "./sessionAdapter.js";
+import { KnowledgeSourcesTail } from "./KnowledgeSourcesTail.js";
 
 function injectCss(tagId, css) {
   if (typeof document === "undefined") return;
@@ -24,10 +27,10 @@ function injectCss(tagId, css) {
 const store = getStore();
 const navigation = createNavigationStore();
 
-const inject = ["slots", "layout", "workspaces", "sessions", "connection", "inputTriggers"];
+const inject = ["slots", "layout", "workspaces", "sessions", "connection", "conversation", "conversationEvents", "inputTriggers"];
 
-function registerWorkbenchSettingsSection(ctx, settingsStore = store) {
-  return registerSettingsSection(ctx, settingsStore);
+function registerWorkbenchSettingsSection(ctx, settingsStore = store, options) {
+  return registerSettingsSection(ctx, settingsStore, options);
 }
 
 function apply(ctx) {
@@ -39,10 +42,21 @@ function apply(ctx) {
     return function () { store.dispose(); };
   });
 
-  registerWorkbenchSettingsSection(ctx);
+  const openKnownSession = async function (sessionId) {
+    return openKnownWorkbenchSession({
+      sessionId,
+      store,
+      sessions: ctx.sessions,
+      workspaces: ctx.workspaces,
+      navigation,
+    });
+  };
+
+  registerWorkbenchSettingsSection(ctx, store, { onOpenSession: openKnownSession });
   registerKnowledgeBaseReferenceSource(ctx, store);
   registerImageAttachmentButton(ctx);
   registerModelIndicator(ctx);
+  registerKnowledgeSources(ctx, KnowledgeSourcesTail);
 
   ctx.slots.inject("shell.overlay", function () {
     return ctx.slots.register({
@@ -56,23 +70,6 @@ function apply(ctx) {
             if (projectId != null) return store.actions.refreshProject(projectId, localDateKey());
             return result;
           });
-        };
-        const openKnownSession = async function (sessionId) {
-          const entry = store.getSnapshot().workbenchSessions?.[sessionId];
-          if (!entry?.scope) throw new Error("找不到会话上下文");
-          let result;
-          if (entry.scope.kind === "project") {
-            result = await store.actions.openProjectChat({ projectId: entry.scope.scopeId, resumeSessionId: sessionId });
-          } else if (entry.scope.kind === "knowledge_base") {
-            result = await store.actions.openKnowledgeChat({ knowledgeBaseId: entry.scope.scopeId, chatId: entry.chatId });
-          } else {
-            result = await store.actions.openIndependentSession({ resumeSessionId: sessionId });
-          }
-          return openResult(result, entry.scope.kind === "project" ? entry.scope.scopeId : null);
-        };
-        const createSession = async function () {
-          const result = await store.actions.openIndependentSession();
-          return openResult(result, null);
         };
         const createProject = async function () {
           const path = await ctx.workspaces.pickDirectory();
@@ -93,25 +90,29 @@ function apply(ctx) {
           navigation,
           sessions: ctx.sessions,
           connection: ctx.connection,
+          conversation: ctx.conversation,
           workspaces: ctx.workspaces,
           createProject,
-          createSession,
+          openActivatedSession(result) {
+            const projectId = result.scope?.kind === "project" ? result.scope.id : null;
+            return openResult(result, projectId);
+          },
           openSession: openKnownSession,
           openKnowledge: navigation.openKnowledge,
           openSessions: navigation.openSessions,
           enterProject(projectId, options = {}) {
             if (projectId == null) return Promise.reject(new Error("项目缺少 projectId"));
-            return store.actions.openProjectChat({
-              projectId,
-              resumeSessionId: options.newSession ? undefined : options.resumeSessionId,
-            }).then(function (result) { return openResult(result, projectId); });
+            if (!options.newSession && options.resumeSessionId) return openKnownSession(options.resumeSessionId);
+            store.actions.startDraft({ scope: { kind: "project", id: projectId } });
+            navigation.openDraft();
+            return Promise.resolve({ draft: true, scope: { kind: "project", id: projectId } });
           },
           enterKnowledgeBase(knowledgeBaseId, options = {}) {
             if (knowledgeBaseId == null) return Promise.reject(new Error("知识库缺少 knowledgeBaseId"));
-            return store.actions.openKnowledgeChat({
-              knowledgeBaseId,
-              chatId: options.newSession ? undefined : options.chatId,
-            }).then(function (result) { return openResult(result, null); });
+            if (!options.newSession && options.sessionId) return openKnownSession(options.sessionId);
+            store.actions.startDraft({ scope: { kind: "knowledge_base", id: knowledgeBaseId } });
+            navigation.openDraft();
+            return Promise.resolve({ draft: true, scope: { kind: "knowledge_base", id: knowledgeBaseId } });
           },
         };
       },

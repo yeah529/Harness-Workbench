@@ -7,8 +7,8 @@
  * status (uploading/queued/parsing/embedding/ready/failed/stale) plus n/total
  * progress, reindexes failed/stale documents, unlinks documents from the
  * current scope, and runs pure retrieval returning real citations. It does not
- * generate an answer (that is Task 8) and never fakes upload success: the host
- * remains the authority on format and the 50 MB limit.
+ * keeps retrieval separate from generation and never fakes upload success: the
+ * host remains the authority on format and the 50 MB limit.
  *
  * While the selected knowledge base still has in-flight documents, a single
  * 1500ms setTimeout re-fetches document statuses (cleanup clears the timer);
@@ -20,6 +20,7 @@ import React from "react";
 import { Trash } from "@phosphor-icons/react";
 import { glyph, ICONS, Badge, Empty } from "./icons.js";
 import { openWorkbenchSession } from "./workbenchSessions.js";
+import { ContainerDeleteDialog } from "./ContainerDeleteDialog.js";
 
 /** Mirrors files.js ALLOWED_EXTENSIONS — the host remains the real authority. */
 const ACCEPT_EXTENSIONS = [
@@ -100,7 +101,7 @@ export function renderCitation(c, i) {
     React.createElement("div", { className: "cpwb-citation-text" }, c.text));
 }
 
-export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, workspaces, onConversationOpen, view = "all" }) {
+export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, workspaces, onConversationOpen, onDraftOpen, view = "all" }) {
   const standalone = knowledgeBaseId != null;
   const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const newKbState = React.useState("");
@@ -133,12 +134,14 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
   }, []);
 
   const knowledgeBases = Array.isArray(state.knowledgeBases) ? state.knowledgeBases : [];
-  const knowledgeChats = !standalone || scopeReady ? (Array.isArray(state.knowledgeChats) ? state.knowledgeChats : []) : [];
+  const selectedId = standalone ? knowledgeBaseId : state.activeKnowledgeBaseId;
+  const knowledgeSessions = selectedId == null ? [] : (state.sessionPage?.items || []).filter(function (session) {
+    return session.scope?.kind === "knowledge_base" && session.scope.id === selectedId;
+  });
   const linked = Array.isArray(state.linkedKnowledgeBases) ? state.linkedKnowledgeBases : [];
   const documents = !standalone || scopeReady ? (Array.isArray(state.documents) ? state.documents : []) : [];
   const citations = Array.isArray(state.citations) ? state.citations : [];
   const action = state.action;
-  const selectedId = standalone ? knowledgeBaseId : state.activeKnowledgeBaseId;
   const showDirectory = !standalone && (view === "all" || view === "project" || view === "linked");
   const showDocuments = view === "all" || view === "project" || view === "documents";
   const showRetrieval = view === "all" || view === "retrieval";
@@ -153,7 +156,6 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
   const unlinkingKb = !!(action && action.type === "unlinkProjectKnowledgeBase" && action.status === "running");
   const reindexing = !!(action && action.type === "reindexDocument" && action.status === "running");
   const unlinkingDoc = !!(action && action.type === "unlinkDocument" && action.status === "running");
-  const deletingKb = !!(action && action.type === "deleteKnowledgeBase" && action.status === "running");
 
   React.useEffect(function () {
     if (projectId == null) return;
@@ -170,7 +172,7 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
     setScopeReady(false);
     Promise.all([
       store.actions.selectKnowledgeBase(knowledgeBaseId),
-      store.actions.loadKnowledgeChats(knowledgeBaseId),
+      store.actions.loadAllSessions({ scopeKind: "knowledge_base", scopeId: knowledgeBaseId, limit: 100 }),
     ]).then(function () {
       if (current) setScopeReady(true);
     }).catch(function () {
@@ -192,7 +194,7 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
   }, [documents, selectedId, store]);
 
   React.useEffect(function () {
-    if (!standalone && selectedId != null) store.actions.loadKnowledgeChats(selectedId).catch(function () {});
+    if (!standalone && selectedId != null) store.actions.loadAllSessions({ scopeKind: "knowledge_base", scopeId: selectedId, limit: 100 }).catch(function () {});
   }, [standalone, selectedId, store]);
 
   const linkedIds = new Set(linked.map(function (kb) { return kb.id; }));
@@ -250,14 +252,16 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
     store.actions.search({ scope: "knowledgeBase", scopeId: selectedId, query: q, limit: 8 }).catch(function () {});
   };
 
-  // KB-only chat: create (chatId undefined) or reopen (chatId set) a chat
-  // session through POST /chat/sessions {knowledgeBaseId, chatId?}; never a
-  // workspace. The host persists dsh_session_id so reopen restores history.
-  const openChat = function (chatId) {
+  const openChat = function (sessionId) {
     if (selectedId == null || openingChat) return;
+    if (sessionId == null) {
+      store.actions.startDraft({ scope: { kind: "knowledge_base", id: selectedId } });
+      onDraftOpen?.();
+      return;
+    }
     setOpeningChat(true);
     setChatError(null);
-    store.actions.openKnowledgeChat({ knowledgeBaseId: selectedId, chatId: chatId == null ? undefined : chatId }).then(function (result) {
+    store.actions.openSession(sessionId).then(function (result) {
       if (!mountedRef.current) return result;
       if (!sessions) return result;
       return openWorkbenchSession(sessions, result.sessionId, { workspaces }).then(function () {
@@ -267,7 +271,7 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
     }).then(function (result) {
       if (!mountedRef.current) return result;
       setOpeningChat(false);
-      store.actions.loadKnowledgeChats(selectedId).catch(function () {});
+      store.actions.loadAllSessions({ scopeKind: "knowledge_base", scopeId: selectedId, limit: 100 }).catch(function () {});
       return result;
     }).catch(function (err) {
       if (!mountedRef.current) return;
@@ -358,31 +362,13 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
           chatError
             ? React.createElement("div", { className: "cpwb-error-msg" }, chatError)
             : null,
-          knowledgeChats.length === 0
-            ? React.createElement(Empty, { glyph: glyph(ICONS.book, 18) }, "选择知识库后新建聊天")
-            : React.createElement("div", { className: "cpwb-kb-list" }, knowledgeChats.map(function (c) {
-              return React.createElement("div", { key: c.id, className: "cpwb-kb-row" },
-                React.createElement("button", { type: "button", className: "cpwb-kb-name", onClick: function () { openChat(c.id); }, title: "打开聊天" },
-                  glyph(ICONS.book), " " + (c.title || ("聊天 #" + c.id))));
+          knowledgeSessions.length === 0
+            ? React.createElement(Empty, { glyph: glyph(ICONS.book, 18) }, "选择知识库后新建会话")
+            : React.createElement("div", { className: "cpwb-kb-list" }, knowledgeSessions.map(function (session) {
+              return React.createElement("div", { key: session.sessionId, className: "cpwb-kb-row" },
+                React.createElement("button", { type: "button", className: "cpwb-kb-name", onClick: function () { openChat(session.sessionId); }, title: "打开会话" },
+                  glyph(ICONS.book), " " + (session.title || "未命名会话")));
             })))
       : null,
-    deleteTarget ? React.createElement("div", { className: "cpwb-modal-backdrop", onMouseDown: (event) => { if (event.target === event.currentTarget) setDeleteTarget(null); } },
-      React.createElement("section", { className: "cpwb-modal cpwb-danger-modal", role: "dialog", "aria-modal": true, "aria-labelledby": "cpwb-delete-kb-title" },
-        React.createElement("div", { className: "cpwb-modal-kicker" }, "KNOWLEDGE / DELETE"),
-        React.createElement("h3", { id: "cpwb-delete-kb-title" }, "删除「" + deleteTarget.name + "」？"),
-        React.createElement("p", null, "知识库、会话和仅属于它的文档/向量将永久删除；仍被其他项目或知识库使用的共享文档会保留。"),
-        React.createElement("div", { className: "cpwb-modal-actions" },
-          React.createElement("button", { type: "button", className: "cpwb-btn", onClick: () => setDeleteTarget(null) }, "取消"),
-          React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-danger cpwb-button-content", disabled: deletingKb, onClick: () => store.actions.deleteKnowledgeBase(deleteTarget.id).then(() => setDeleteTarget(null)).catch(() => {}) }, React.createElement(Trash, { size: 14 }), React.createElement("span", null, deletingKb ? "删除中…" : "永久删除"))))) : null);
-}
-
-export function KnowledgeCenterPage(props) {
-  return React.createElement("main", { className: "cpwb-knowledge-center cpwb-workbench-page", "data-page": "knowledge" },
-    React.createElement("header", { className: "cpwb-page-header" },
-      React.createElement("div", null,
-        React.createElement("span", null, "02 / KNOWLEDGE NODES"),
-        React.createElement("h1", null, "知识库中心"),
-        React.createElement("p", null, "上传、向量化、检索，并从任意知识库发起独立会话。"))),
-    React.createElement("section", { className: "cpwb-knowledge-center-body" },
-      React.createElement(KnowledgeBase, { ...props, view: "all" })));
+    deleteTarget ? React.createElement(ContainerDeleteDialog, { kind: "knowledge_base", target: deleteTarget, store, onClose: () => setDeleteTarget(null) }) : null);
 }

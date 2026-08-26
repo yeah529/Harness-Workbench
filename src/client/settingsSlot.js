@@ -5,7 +5,7 @@ import { WorkbenchSettingsSection } from "./SettingsSection.js";
  * The DSH settings plugin owns sidebar.settings and its child declarations;
  * this module deliberately contributes no children and no replacement shell.
  */
-export function registerWorkbenchSettingsSection(ctx, store) {
+export function registerWorkbenchSettingsSection(ctx, store, { onOpenSession } = {}) {
   if (!ctx?.slots?.inject || !ctx?.slots?.register) {
     throw new TypeError("settings section registration requires the DSH slots service");
   }
@@ -16,7 +16,7 @@ export function registerWorkbenchSettingsSection(ctx, store) {
       order: 20,
       label: "Workbench",
       inject: function () {
-        return { store };
+        return { store, onOpenSession };
       },
     }, WorkbenchSettingsSection);
   });

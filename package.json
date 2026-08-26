@@ -10,12 +10,18 @@
   "files": [
     "bin",
     "lib",
+    "src/client/assets/harness-workbench-logo.svg",
     "src/host",
+    "src/launcher",
+    "src/maintenance",
     "scripts/build.mjs",
+    "scripts/dev-worktree.mjs",
     "scripts/install.sh",
     "scripts/reset-demo.mjs",
     "dsh-codex.patch.yml",
     "README.md",
+    "README.zh-CN.md",
+    "docs/images/readme",
     "LICENSE",
     "package.json"
   ],
@@ -48,6 +54,9 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "dev:doctor": "node scripts/dev-worktree.mjs doctor",
+    "dev:activate": "node scripts/dev-worktree.mjs activate",
+    "premerge": "node scripts/dev-worktree.mjs premerge",
     "reset:demo": "node scripts/reset-demo.mjs",
     "test": "node --test test/*.test.js && node scripts/verify.cjs",
     "check": "npm run build && npm test && node --check lib/index.js && node --check lib/client.js"

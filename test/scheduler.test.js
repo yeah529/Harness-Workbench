@@ -7,7 +7,7 @@ import { localDateKey, localDateTimeParts } from "../src/host/timezone.js";
 const at = (value) => new Date(value);
 
 function makeRepos({ schedules = [], projects = [], automation = {}, runRows = new Map(), todos = [], summary = null, scheduleRuns = {}, knowledgeBases = [], knowledgeDocuments = {}, knowledgeChunks = {} } = {}) {
-  const calls = { claims: [], complete: [], failed: [], missed: [], summaries: [], todos: [] };
+  const calls = { claims: [], complete: [], failed: [], missed: [], bound: [], reconciled: [], summaries: [], todos: [] };
   return {
     calls,
     projects: { list: () => projects },
@@ -26,6 +26,8 @@ function makeRepos({ schedules = [], projects = [], automation = {}, runRows = n
       completeRun(input) { calls.complete.push(input); return { ...input, status: "completed" }; },
       failRun(input) { calls.failed.push(input); return { ...input, status: "failed" }; },
       missRun(input) { calls.missed.push(input); return { ...input, status: "missed" }; },
+      bindSession(input) { calls.bound.push(input); return { ...schedules.find((row) => row.id === input.id), sessionId: input.sessionId }; },
+      failRunning(input) { calls.reconciled.push(input); return 0; },
     },
     summaries: {
       getByProjectDate() { return summary; },
@@ -40,6 +42,20 @@ function makeRepos({ schedules = [], projects = [], automation = {}, runRows = n
     chunks: { listByDocument: (documentId) => knowledgeChunks[documentId] ?? [] },
   };
 }
+
+test("scheduler startup closes runs orphaned by an earlier process", () => {
+  const repos = makeRepos();
+  const now = at("2026-08-25T16:00:00.000+08:00");
+  const scheduler = createScheduler({ repos, clock: () => now, runPrompt: async () => ({}) });
+
+  scheduler.start();
+  scheduler.stop();
+
+  assert.deepEqual(repos.calls.reconciled, [{
+    error: "interrupted: Workbench restarted before the scheduled run completed",
+    finishedAt: now,
+  }]);
+});
 
 test("scheduler executes a due daily rule once and ignores a not-due rule", async () => {
   const repos = makeRepos({ schedules: [
@@ -84,10 +100,17 @@ test("21:00 summary and next-day todo toggles are independent", async () => {
     },
   });
   const prompts = [];
-  const scheduler = createScheduler({ repos, clock: () => at("2026-08-20T21:00:00.000+08:00"), runPrompt: async (input) => {
-    prompts.push(input);
-    return { sessionId: "session-" + prompts.length, text: "Plan item one\nPlan item two" };
-  } });
+  const scheduler = createScheduler({
+    repos,
+    clock: () => at("2026-08-20T21:00:00.000+08:00"),
+    projectConversations: async ({ projectId }) => projectId === 2
+      ? [{ sessionId: "session-project-2", messages: [{ role: "user", text: "Tomorrow follow up both items" }] }]
+      : [],
+    runPrompt: async (input) => {
+      prompts.push(input);
+      return { sessionId: "session-" + prompts.length, text: input.kind === "todo" ? "- Plan item one\n- Plan item two" : "Summary" };
+    },
+  });
 
   await scheduler.tick();
 
@@ -177,7 +200,8 @@ test("daily automations render the latest custom prompts and keep runtime projec
   const scheduler = createScheduler({
     repos,
     automationPrompts: () => configured,
-    runPrompt: async (input) => { prompts.push(input); return { text: input.kind === "todo" ? "Follow up" : "ok" }; },
+    projectConversations: async () => [{ sessionId: "session-project-7", messages: [{ role: "user", text: "Follow up tomorrow" }] }],
+    runPrompt: async (input) => { prompts.push(input); return { text: input.kind === "todo" ? "- Follow up" : "ok" }; },
   });
 
   await scheduler.runSummary({ id: 7 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-20");
@@ -187,7 +211,7 @@ test("daily automations render the latest custom prompts and keep runtime projec
   assert.match(prompts[0].prompt, /^CUSTOM SUMMARY 7 2026-08-20/);
   assert.match(prompts[0].prompt, /待办完成情况：.*Ship patch/);
   assert.match(prompts[1].prompt, /^UPDATED TODO 7 2026-08-20 2026-08-21/);
-  assert.match(prompts[1].prompt, /待办：.*Ship patch/);
+  assert.match(prompts[1].prompt, /已有未完成待办（仅用于去重，禁止重复输出）：.*Ship patch/);
 });
 
 test("daily summary never persists leaked DSML as completed content", async () => {
@@ -270,9 +294,10 @@ test("scheduled summary failure does not stop next-day todo generation", async (
   const scheduler = createScheduler({
     repos,
     clock: () => at("2026-08-20T21:00:00.000+08:00"),
+    projectConversations: async () => [{ sessionId: "session-project-1", messages: [{ role: "user", text: "明日继续联调" }] }],
     runPrompt: async ({ kind }) => {
       if (kind === "summary") throw new Error("provider failed summary");
-      return { text: "明日继续联调" };
+      return { text: "- 明日继续联调" };
     },
   });
 
@@ -304,6 +329,137 @@ test("manual summary generation can replace an existing summary for the same day
   ]);
 });
 
+test("next-day todo generation skips the model when the project has no conversation or new knowledge", async () => {
+  const repos = makeRepos({
+    projects: [{ id: 1 }],
+    todos: [{ projectId: 1, title: "Existing todo", done: false, source: "manual" }],
+  });
+  let promptCalls = 0;
+  const scheduler = createScheduler({
+    repos,
+    projectConversations: async () => [],
+    runPrompt: async () => {
+      promptCalls += 1;
+      return { text: "- Should not be created" };
+    },
+  });
+
+  const result = await scheduler.runAutoTodos({ id: 1 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-21");
+
+  assert.deepEqual(result, []);
+  assert.equal(promptCalls, 0);
+  assert.deepEqual(repos.calls.todos, []);
+});
+
+test("next-day todo prompt uses project conversations and new knowledge while existing todos are exclusions only", async () => {
+  const repos = makeRepos({
+    projects: [{ id: 1 }],
+    todos: [{ projectId: 1, title: "已有待办", done: false, dueAt: "2026-08-21T10:00:00.000Z", source: "manual" }],
+    knowledgeBases: [{ id: 2, name: "今日知识芯片", createdAt: "2026-08-20T02:00:00.000Z" }],
+    knowledgeDocuments: {
+      2: [{ id: 8, originalName: "验收标准.md", status: "ready", createdAt: "2026-08-20T03:00:00.000Z", indexedAt: "2026-08-20T03:01:00.000Z" }],
+    },
+    knowledgeChunks: {
+      8: [{ locator: "lines:1-2", heading: "验收", text: "需要补充移动端验收。" }],
+    },
+  });
+  let prompt;
+  const scheduler = createScheduler({
+    repos,
+    projectConversations: async () => [{
+      sessionId: "session-project-1",
+      title: "今日讨论",
+      messages: [
+        { role: "user", text: "移动端还有一个布局问题", time: Date.parse("2026-08-20T04:00:00.000Z") },
+        { role: "assistant", text: "需要在明天补测窄屏布局", time: Date.parse("2026-08-20T04:01:00.000Z") },
+      ],
+    }],
+    runPrompt: async (input) => {
+      prompt = input.prompt;
+      return { text: "NONE" };
+    },
+  });
+
+  const result = await scheduler.runAutoTodos({ id: 1 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-21");
+
+  assert.deepEqual(result, []);
+  assert.match(prompt, /项目会话正文：/);
+  assert.match(prompt, /移动端还有一个布局问题/);
+  assert.match(prompt, /需要在明天补测窄屏布局/);
+  assert.match(prompt, /知识库新增内容：/);
+  assert.match(prompt, /验收标准\.md/);
+  assert.match(prompt, /需要补充移动端验收/);
+  assert.match(prompt, /已有未完成待办（仅用于去重，禁止重复输出）：/);
+  assert.match(prompt, /已有待办/);
+  assert.match(prompt, /没有明确待办时只输出 NONE/);
+  assert.match(prompt, /每行只输出一项并以“- ”开头/);
+});
+
+test("next-day todo generation rejects a legacy todos array without final assistant text", async () => {
+  const repos = makeRepos({ projects: [{ id: 1 }] });
+  const scheduler = createScheduler({
+    repos,
+    projectConversations: async () => [{ sessionId: "session-project-1", messages: [{ role: "user", text: "明天处理问题" }] }],
+    runPrompt: async () => ({ todos: ["Should never persist"] }),
+  });
+
+  const result = await scheduler.runAutoTodos({ id: 1 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-21");
+
+  assert.equal(result.status, "failed");
+  assert.match(result.error, /最终待办内容/);
+  assert.deepEqual(repos.calls.todos, []);
+});
+
+test("next-day todo generation rejects prose or headings instead of persisting them as todos", async () => {
+  const repos = makeRepos({ projects: [{ id: 1 }] });
+  const scheduler = createScheduler({
+    repos,
+    projectConversations: async () => [{ sessionId: "session-project-1", messages: [{ role: "user", text: "明天完成验收" }] }],
+    runPrompt: async () => ({ text: "待办如下：\n- 完成验收" }),
+  });
+
+  const result = await scheduler.runAutoTodos({ id: 1 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-21");
+
+  assert.equal(result.status, "failed");
+  assert.match(result.error, /待办清单格式/);
+  assert.deepEqual(repos.calls.todos, []);
+});
+
+test("next-day todo generation rejects tool protocol and thinking text", async () => {
+  for (const text of [
+    '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="bash"></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>',
+    "思考：先分析项目。\n- 明天完成验收",
+  ]) {
+    const repos = makeRepos({ projects: [{ id: 1 }] });
+    const scheduler = createScheduler({
+      repos,
+      projectConversations: async () => [{ sessionId: "session-project-1", messages: [{ role: "user", text: "明天完成验收" }] }],
+      runPrompt: async () => ({ text }),
+    });
+
+    const result = await scheduler.runAutoTodos({ id: 1 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-21");
+
+    assert.equal(result.status, "failed");
+    assert.deepEqual(repos.calls.todos, []);
+  }
+});
+
+test("next-day todo generation deduplicates all open todos including timestamp suffix variants", async () => {
+  const repos = makeRepos({
+    projects: [{ id: 1 }],
+    todos: [{ projectId: 1, title: "Polish session navigation", done: false, source: "manual" }],
+  });
+  const scheduler = createScheduler({
+    repos,
+    projectConversations: async () => [{ sessionId: "session-project-1", messages: [{ role: "user", text: "明天继续修复实际错误" }] }],
+    runPrompt: async () => ({ text: "- Polish session navigation (2026-08-23 10:00)\n- 修复实际错误" }),
+  });
+
+  await scheduler.runAutoTodos({ id: 1 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-21");
+
+  assert.deepEqual(repos.calls.todos.map((todo) => todo.title), ["修复实际错误"]);
+});
+
 test("next-day todos compare normalized titles and create only missing unique items", async () => {
   const repos = makeRepos({
     projects: [{ id: 1 }],
@@ -311,7 +467,8 @@ test("next-day todos compare normalized titles and create only missing unique it
   });
   const scheduler = createScheduler({
     repos,
-    runPrompt: async () => ({ todos: [" Keep existing ", "New item", "New   item", "New item"] }),
+    projectConversations: async () => [{ sessionId: "session-project-1", messages: [{ role: "user", text: "Create the missing item" }] }],
+    runPrompt: async () => ({ text: "- Keep existing\n- New item\n- New   item\n- New item" }),
   });
 
   await scheduler.runAutoTodos({ id: 1 }, at("2026-08-20T21:00:00.000+08:00"), "2026-08-21");
@@ -333,7 +490,8 @@ test("daily auto todos use the configured timezone for 21:00 and 18:00", async (
     repos,
     timeZone: () => "America/Los_Angeles",
     clock: () => at("2026-08-20T04:00:00.000Z"),
-    runPrompt: async () => ({ todos: ["Los Angeles item"] }),
+    projectConversations: async () => [{ sessionId: "session-project-1", messages: [{ role: "user", text: "Create a Los Angeles item" }] }],
+    runPrompt: async () => ({ text: "- Los Angeles item" }),
   });
   await scheduler.tick();
   assert.equal(repos.calls.todos[0].dueAt, "2026-08-21T01:00:00.000Z");
@@ -365,7 +523,12 @@ test("start immediately catches up the current 21:00 automation once and does no
   const run = async (now) => {
     const repos = makeRepos({ projects: [{ id: 1 }] });
     const prompts = [];
-    const scheduler = createScheduler({ repos, clock: () => now, runPrompt: async (input) => { prompts.push(input); return { text: "New item" }; } });
+    const scheduler = createScheduler({
+      repos,
+      clock: () => now,
+      projectConversations: async () => [{ sessionId: "session-project-1", messages: [{ role: "user", text: "Create the next item" }] }],
+      runPrompt: async (input) => { prompts.push(input); return { text: input.kind === "todo" ? "- New item" : "Summary" }; },
+    });
     scheduler.start();
     await new Promise((resolve) => setImmediate(resolve));
     scheduler.stop();
@@ -400,7 +563,27 @@ test("a failed scheduled DeepSeek run persists session id and error without retr
   assert.equal(attempts, 1);
   assert.equal(repos.calls.failed.length, 1);
   assert.equal(repos.calls.failed[0].sessionId, "session-scheduled-failed");
+  assert.deepEqual(repos.calls.bound, [{ id: 1, sessionId: "session-scheduled-failed" }]);
   assert.match(repos.calls.failed[0].error, /DSH DeepSeek provider unavailable/);
+});
+
+test("successful scheduled runs bind the first session and pass it back on later runs", async () => {
+  const schedule = { id: 4, projectId: 7, name: "nightly", prompt: "audit", rule: "daily 21:00", enabled: true, sessionId: null };
+  const repos = makeRepos({ schedules: [schedule] });
+  const inputs = [];
+  const scheduler = createScheduler({ repos, runPrompt: async (input) => {
+    inputs.push(input);
+    return { sessionId: input.schedule.sessionId || "session-scheduled-stable", text: "done" };
+  } });
+
+  await scheduler.runScheduleNow(schedule, at("2026-08-20T12:00:00.000Z"));
+  assert.deepEqual(repos.calls.bound, [{ id: 4, sessionId: "session-scheduled-stable" }]);
+  schedule.sessionId = "session-scheduled-stable";
+  await scheduler.runScheduleNow(schedule, at("2026-08-21T12:00:00.000Z"));
+
+  assert.equal(inputs.length, 2);
+  assert.equal(inputs[1].schedule.sessionId, "session-scheduled-stable");
+  assert.deepEqual(repos.calls.complete.map((row) => row.sessionId), ["session-scheduled-stable", "session-scheduled-stable"]);
 });
 
 test("weekly rules execute at the configured local weekday and time", async () => {

@@ -48,7 +48,7 @@ function parse(url) {
 }
 
 test("sidebar renders the approved hierarchy with one Workbench-styled settings action", () => {
-  const recentSessions = Array.from({ length: 10 }, (_, index) => ({
+  const recentSessions = Array.from({ length: 25 }, (_, index) => ({
     sessionId: "session-cpwb-" + index,
     title: "会话 " + index,
     scope: { kind: "independent", scopeId: null },
@@ -56,15 +56,21 @@ test("sidebar renders the approved hierarchy with one Workbench-styled settings 
   const html = renderToStaticMarkup(React.createElement(WorkbenchSidebar, { page: "home", recentSessions }));
   assert.match(html, /新建会话/);
   assert.match(html, /首页/);
-  assert.match(html, /知识库/);
+  assert.match(html, /知识芯片/);
   assert.match(html, /查看全部会话/);
+  assert.doesNotMatch(html, /<span>归档会话<\/span>/);
   assert.match(html, /<button[^>]+cpwb-sidebar-settings/);
   assert.match(html, />设置</);
   assert.doesNotMatch(html, /cpwb-sidebar-settings-seat/);
-  assert.equal((html.match(/class="cpwb-sidebar-recent"/g) || []).length, 8);
-  assert.match(html, /viewBox="0 0 190 74"/);
-  assert.match(html, /HARNESS/);
-  assert.match(html, /WORKBENCH/);
+  assert.equal((html.match(/class="cpwb-sidebar-recent"/g) || []).length, 20);
+  assert.match(html, /最近会话/);
+  assert.doesNotMatch(html, /其他最近会话|当前项目|当前知识库|当前会话/);
+  assert.equal((html.match(/data-logo-part="approved-node-artwork"/g) || []).length, 1);
+  assert.match(html, /class="cpwb-sidebar-footer-wordmark"/);
+  assert.doesNotMatch(html, /data-logo-part="harness-core"/);
+  assert.equal((html.match(/data-logo-part="wordmark-main"/g) || []).length, 4);
+  assert.equal((html.match(/data-logo-channel=/g) || []).length, 2);
+  assert.doesNotMatch(html, /<text/);
 });
 
 const ISO = "2026-08-17T00:00:00.000Z";
@@ -108,20 +114,29 @@ test("api: projects list/create use exact path, method, JSON body", async () => 
   await api.projects.create({ name: "P", path: "/p", workspaceId: "w1" });
 });
 
-test("api: projects rename/delete use the item route", async () => {
+test("api: projects expose deletion preview and session policy", async () => {
   const fetchImpl = makeFetch(({ url, init }, index) => {
-    assert.equal(parse(url).pathname, "/api/cpwb/projects/1");
+    const parsed = parse(url);
     if (index === 0) {
+      assert.equal(parsed.pathname, "/api/cpwb/projects/1");
       assert.equal(init.method, "PATCH");
       assert.deepEqual(JSON.parse(init.body), { name: "Renamed" });
       return jsonResponse(200, { ...project, name: "Renamed" });
     }
+    if (index === 1) {
+      assert.equal(parsed.pathname, "/api/cpwb/projects/1/deletion-plan");
+      assert.equal(init.method ?? "GET", "GET");
+      return jsonResponse(200, { kind: "project", id: 1, name: "P", sessionCount: 0, relationshipCount: 0, documentCount: 0, orphanDocumentCount: 0, permanentDeletionAvailable: false });
+    }
+    assert.equal(parsed.pathname, "/api/cpwb/projects/1");
+    assert.equal(parsed.searchParams.get("sessionPolicy"), "detach");
     assert.equal(init.method, "DELETE");
-    return jsonResponse(200, { removed: true, projectId: 1, orphanDocumentIds: [] });
+    return jsonResponse(200, { removed: true, projectId: 1, sessionPolicy: "detach", detachedSessionCount: 0, deletedSessionCount: 0, orphanDocumentIds: [] });
   });
   const api = createCpwbApi({ fetchImpl });
   assert.equal((await api.projects.update({ id: 1, name: "Renamed" })).name, "Renamed");
-  assert.equal((await api.projects.remove(1)).removed, true);
+  assert.equal((await api.projects.deletionPlan(1)).sessionCount, 0);
+  assert.equal((await api.projects.remove(1, { sessionPolicy: "detach" })).removed, true);
 });
 
 test("project card exposes rename and delete controls without replacing its open action", () => {
@@ -133,6 +148,7 @@ test("project card exposes rename and delete controls without replacing its open
   assert.match(html, /aria-label="重命名项目 P"/);
   assert.match(html, /aria-label="删除项目 P"/);
   assert.match(html, /aria-label="打开项目 P"/);
+  assert.match(html, /aria-label="查看项目 P 的全部会话"/);
 });
 
 test("api: knowledge-bases create drops undefined description", async () => {
@@ -146,13 +162,21 @@ test("api: knowledge-bases create drops undefined description", async () => {
   await api.knowledgeBases.create({ name: "K" });
 });
 
-test("api: knowledge-base deletion uses the collection id route", async () => {
-  const fetchImpl = makeFetch(({ url, init }) => {
-    assert.equal(parse(url).pathname, "/api/cpwb/knowledge-bases/9");
+test("api: knowledge-base deletion exposes preview and policy", async () => {
+  const fetchImpl = makeFetch(({ url, init }, index) => {
+    const parsed = parse(url);
+    if (index === 0) {
+      assert.equal(parsed.pathname, "/api/cpwb/knowledge-bases/9/deletion-plan");
+      return jsonResponse(200, { kind: "knowledge_base", id: 9, sessionCount: 1 });
+    }
+    assert.equal(parsed.pathname, "/api/cpwb/knowledge-bases/9");
+    assert.equal(parsed.searchParams.get("sessionPolicy"), "delete");
     assert.equal(init.method, "DELETE");
     return jsonResponse(200, { removed: true, orphanDocumentIds: [3] });
   });
-  await createCpwbApi({ fetchImpl }).knowledgeBases.remove(9);
+  const api = createCpwbApi({ fetchImpl });
+  await api.knowledgeBases.deletionPlan(9);
+  await api.knowledgeBases.remove(9, { sessionPolicy: "delete" });
 });
 
 test("api: project knowledge-base link/unlink use exact nested paths", async () => {
@@ -177,6 +201,15 @@ test("api: project knowledge-base link/unlink use exact nested paths", async () 
   await api.projectKnowledgeBases.unlink(7, 9);
 });
 
+test("api: knowledge-base projects use the inverse relationship route", async () => {
+  const fetchImpl = makeFetch(({ url }) => {
+    assert.equal(parse(url).pathname, "/api/cpwb/knowledge-bases/2/projects");
+    return jsonResponse(200, [project]);
+  });
+  const api = createCpwbApi({ fetchImpl });
+  assert.deepEqual(await api.knowledgeBaseProjects.list(2), [project]);
+});
+
 test("api: documents list encodes scope/scopeId query", async () => {
   const fetchImpl = makeFetch(({ url }) => {
     const { pathname, searchParams } = parse(url);
@@ -187,6 +220,13 @@ test("api: documents list encodes scope/scopeId query", async () => {
   });
   const api = createCpwbApi({ fetchImpl });
   await api.documents.list({ scope: "knowledgeBase", scopeId: 2 });
+});
+
+test("api: document contentUrl builds safe inline and download URLs", () => {
+  const api = createCpwbApi({ fetchImpl: async () => jsonResponse(200, {}) });
+  assert.equal(api.documents.contentUrl(3), "/api/cpwb/documents/3/content");
+  assert.equal(api.documents.contentUrl(3, { download: true }), "/api/cpwb/documents/3/content?download=1");
+  assert.throws(() => api.documents.contentUrl(0), /positive integer/);
 });
 
 test("api: documents upload sends raw body + encoded filename + scope headers", async () => {
@@ -325,7 +365,7 @@ test("api: schedules create/update/delete/run/history use the modal contract", a
   assert.deepEqual(await api.schedules.runs(6), [{ status: "failed", sessionId: "sess", error: "boom" }]);
 });
 
-test("api: summaries list/run and knowledge-chats list/create paths", async () => {
+test("api: summaries list/run/delete paths", async () => {
   const fetchImpl = makeFetch(({ url, init }, i) => {
     const { pathname } = parse(url);
     if (i === 0) {
@@ -342,20 +382,12 @@ test("api: summaries list/run and knowledge-chats list/create paths", async () =
       assert.equal(init.method, "DELETE");
       return jsonResponse(200, { removed: true, id: 9 });
     }
-    if (i === 3) {
-      assert.equal(pathname, "/api/cpwb/knowledge-chats");
-      return jsonResponse(200, []);
-    }
-    assert.equal(pathname, "/api/cpwb/knowledge-chats");
-    assert.deepEqual(JSON.parse(init.body), { knowledgeBaseId: 2, title: "chat" });
-    return jsonResponse(201, { id: 7, knowledgeBaseId: 2, title: "chat" });
+    throw new Error("unexpected request " + pathname);
   });
   const api = createCpwbApi({ fetchImpl });
   await api.summaries.list({ projectId: 1 });
   await api.summaries.run({ projectId: 1 });
   await api.summaries.remove(9);
-  await api.knowledgeChats.list({ knowledgeBaseId: 2 });
-  await api.knowledgeChats.create({ knowledgeBaseId: 2, title: "chat" });
 });
 
 test("store: deleting a summary refreshes the active project's summary list", async () => {
@@ -405,6 +437,47 @@ test("store: a failed summary generation refreshes the failed row and keeps the 
   assert.equal(store.getSnapshot().action.type, "runSummary");
   assert.equal(store.getSnapshot().action.status, "error");
   assert.equal(store.getSnapshot().action.error.code, "SUMMARY_GENERATION_FAILED");
+});
+
+test("store: a failed schedule run refreshes its diagnostic session and keeps the action error visible", async () => {
+  const schedule = { id: 6, projectId: 1, name: "夜间接口审计", enabled: true, sessionId: "session-schedule-6" };
+  const diagnosticSession = {
+    sessionId: "session-schedule-6",
+    title: "夜间接口审计",
+    sessionType: "schedule",
+    scheduleName: "夜间接口审计",
+    scope: { kind: "project", id: 1 },
+  };
+  const fetchImpl = makeFetch(({ url, init }) => {
+    const { pathname } = parse(url);
+    const method = init.method ?? "GET";
+    if (pathname === "/api/cpwb/schedules/6/run" && method === "POST") {
+      return jsonResponse(502, { error: { code: "SCHEDULE_RUN_FAILED", message: "定时任务执行失败" } });
+    }
+    if (pathname === "/api/cpwb/todos" && method === "GET") return jsonResponse(200, []);
+    if (pathname === "/api/cpwb/schedules" && method === "GET") return jsonResponse(200, [schedule]);
+    if (pathname === "/api/cpwb/schedules/6/runs" && method === "GET") {
+      return jsonResponse(200, [{ status: "failed", sessionId: diagnosticSession.sessionId, error: "agent failed" }]);
+    }
+    if (pathname === "/api/cpwb/summaries" && method === "GET") return jsonResponse(200, []);
+    if (pathname === "/api/cpwb/chat/sessions" && method === "GET") {
+      return jsonResponse(200, { items: [diagnosticSession], total: 1, limit: 20, offset: 0 });
+    }
+    return jsonResponse(404, { error: { code: "NOT_FOUND", message: "not found" } });
+  });
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
+  await store.actions.refreshProject(1, "2026-08-25");
+
+  await assert.rejects(
+    () => store.actions.runSchedule(6),
+    /定时任务执行失败/,
+  );
+
+  assert.deepEqual(store.getSnapshot().recentSessions, [diagnosticSession]);
+  assert.equal(store.getSnapshot().scheduleRuns["6"][0].sessionId, diagnosticSession.sessionId);
+  assert.equal(store.getSnapshot().action.type, "runSchedule");
+  assert.equal(store.getSnapshot().action.status, "error");
+  assert.equal(store.getSnapshot().action.error.code, "SCHEDULE_RUN_FAILED");
 });
 
 test("api: non-ok JSON error envelope becomes Error with code/status", async () => {
@@ -496,7 +569,8 @@ function scenarioFetch(overrides = {}) {
 }
 
 test("store: refresh pulls health/projects/knowledgeBases/documents and reaches ready", async () => {
-  const api = createCpwbApi({ fetchImpl: scenarioFetch() });
+  const fetchImpl = scenarioFetch();
+  const api = createCpwbApi({ fetchImpl });
   const store = createWorkbenchStore(api);
   await store.actions.refresh();
   const s = store.getSnapshot();
@@ -507,6 +581,49 @@ test("store: refresh pulls health/projects/knowledgeBases/documents and reaches 
   assert.equal(s.health.reachable, true);
   assert.equal(s.error, null);
   assert.equal(s.citations.length, 0);
+  const recentRequest = fetchImpl.calls.find(({ url }) => parse(url).pathname === "/api/cpwb/chat/sessions");
+  assert.equal(parse(recentRequest.url).searchParams.get("limit"), "20");
+});
+
+test("api and store keep purge state across a temporary status disconnect", async () => {
+  let reads = 0;
+  const fetchImpl = makeFetch(({ url, init }) => {
+    const { pathname } = parse(url);
+    if (pathname === "/api/cpwb/maintenance/purge-jobs" && init.method === "POST") {
+      return jsonResponse(202, {
+        jobId: "purge-client",
+        state: "queued",
+        revision: 1,
+        recoveryCommand: "dsh-workbench web",
+      });
+    }
+    if (pathname === "/api/cpwb/maintenance/purge-jobs/purge-client") {
+      reads += 1;
+      if (reads === 1) throw new Error("fetch failed");
+      return jsonResponse(200, {
+        jobId: "purge-client",
+        state: "restarting",
+        revision: 5,
+      });
+    }
+    throw new Error("unexpected request: " + pathname);
+  });
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
+
+  await store.actions.startContainerPurge({
+    kind: "project",
+    id: 4,
+    planVersion: "plan-hash",
+    confirmation: "Research",
+    restartConfirmed: true,
+  });
+  await store.actions.refreshPurgeJob("purge-client");
+  assert.equal(store.getSnapshot().maintenanceJob.jobId, "purge-client");
+  assert.equal(store.getSnapshot().maintenanceJob.state, "queued");
+  assert.equal(store.getSnapshot().maintenanceJob.disconnected, true);
+  await store.actions.refreshPurgeJob("purge-client");
+  assert.equal(store.getSnapshot().maintenanceJob.state, "restarting");
+  assert.equal(store.getSnapshot().maintenanceJob.disconnected, false);
 });
 
 test("store: automation prompt settings load and update the visible snapshot", async () => {
@@ -612,8 +729,9 @@ test("store: project rename/delete refresh the authoritative project list", asyn
       return jsonResponse(200, rows[0]);
     }
     if (pathname === "/api/cpwb/projects/1" && method === "DELETE") {
+      assert.equal(parse(url).searchParams.get("sessionPolicy"), "detach");
       rows = [];
-      return jsonResponse(200, { removed: true, projectId: 1, orphanDocumentIds: [] });
+      return jsonResponse(200, { removed: true, projectId: 1, sessionPolicy: "detach", detachedSessionCount: 0, deletedSessionCount: 0, orphanDocumentIds: [] });
     }
     if (pathname === "/api/cpwb/projects" && method === "GET") return jsonResponse(200, rows);
     return jsonResponse(404, { error: { code: "NOT_FOUND", message: "not found" } });
@@ -621,8 +739,44 @@ test("store: project rename/delete refresh the authoritative project list", asyn
   const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
   await store.actions.renameProject({ id: 1, name: "Renamed" });
   assert.equal(store.getSnapshot().projects[0].name, "Renamed");
-  await store.actions.deleteProject(1);
+  await store.actions.deleteProject({ id: 1, sessionPolicy: "detach" });
   assert.deepEqual(store.getSnapshot().projects, []);
+});
+
+test("store: linking a knowledge base refreshes both project links and knowledge cards", async () => {
+  const linkedKnowledgeBase = {
+    ...kb,
+    linkedProjects: [{ ...project, sessionCount: 0 }],
+    overview: { linkedProjectCount: 1 },
+  };
+  const fetchImpl = makeFetch(({ url, init }) => {
+    const { pathname } = parse(url);
+    const method = init.method ?? "GET";
+    if (pathname === "/api/cpwb/projects/1/knowledge-bases/2" && method === "POST") {
+      return jsonResponse(201, { projectId: 1, knowledgeBaseId: 2 });
+    }
+    if (pathname === "/api/cpwb/projects/1/knowledge-bases" && method === "GET") {
+      return jsonResponse(200, [linkedKnowledgeBase]);
+    }
+    if (pathname === "/api/cpwb/knowledge-bases" && method === "GET") {
+      return jsonResponse(200, [linkedKnowledgeBase]);
+    }
+    return jsonResponse(404, { error: { code: "NOT_FOUND", message: "not found" } });
+  });
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
+
+  await store.actions.linkProjectKnowledgeBase(1, 2);
+
+  assert.equal(store.getSnapshot().linkedKnowledgeBases[0].id, 2);
+  assert.equal(store.getSnapshot().knowledgeBases[0].overview.linkedProjectCount, 1);
+  assert.deepEqual(
+    fetchImpl.calls.map(({ url, init }) => [parse(url).pathname, init.method ?? "GET"]),
+    [
+      ["/api/cpwb/projects/1/knowledge-bases/2", "POST"],
+      ["/api/cpwb/projects/1/knowledge-bases", "GET"],
+      ["/api/cpwb/knowledge-bases", "GET"],
+    ],
+  );
 });
 
 test("store: stale refresh response never overwrites a newer refresh", async () => {

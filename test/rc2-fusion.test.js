@@ -105,6 +105,8 @@ test("one-shot drawer is explicitly read-only while continuable drawer owns a fo
 test("production package and CSS declare the rc.2 fusion contracts", async () => {
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.peerDependencies["@deepseek-ai/dsh"], "0.1.1-rc.2");
+  assert.ok(pkg.files.includes("src/launcher"), "published CLI must include its runtime launcher modules");
+  assert.ok(pkg.files.includes("src/client/assets/harness-workbench-logo.svg"), "published README must keep its logo asset");
   for (const version of Object.values(pkg.peerDependencies)) {
     if (typeof version === "string" && version.startsWith("0.")) assert.equal(version, "0.1.1-rc.2");
   }

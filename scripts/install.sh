@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install dsh-cyberpunk-workbench into the DSH web profile.
 # Uses a node_modules symlink (no pnpm needed). Idempotent.
-# Step 3 (restart "dsh web") is manual.
+# Starting the Workbench launcher is manual.
 set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -42,6 +42,6 @@ else
 fi
 
 echo ""
-echo "==> done. Now restart the web server:"
-echo "       dsh web"
+echo "==> done. Now start the Workbench:"
+echo "       node ./bin/dsh-workbench.js"
 echo "    then hard-refresh http://127.0.0.1:3080"

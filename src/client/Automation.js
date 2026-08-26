@@ -1,5 +1,7 @@
 import React from "react";
 import { CalendarBlank, CheckCircle, ClockCountdown, DownloadSimple, PencilSimple, Play, Plus, SpinnerGap, Trash, Warning } from "@phosphor-icons/react";
+import { CyberSelect } from "./CyberSelect.js";
+import { GenerationWave, useArrivalPulse } from "./arrivalPulse.js";
 import { Empty } from "./icons.js";
 import { GlobalModal } from "./globalModal.js";
 import { localDateKey } from "./store.js";
@@ -8,6 +10,14 @@ import { DEFAULT_TIME_ZONE, formatInstant, localDateTimeParts, zonedDateTimeToUt
 const RECURRENCE_LABELS = { once: "仅一次", daily: "每日", weekly: "每周", monthly: "每月" };
 const SUMMARY_STATUS_LABELS = { completed: "已完成", pending: "生成中", failed: "失败" };
 const pad = (value) => String(value).padStart(2, "0");
+
+export function filterSchedules(schedules, query = "") {
+  const needle = String(query ?? "").trim().toLocaleLowerCase();
+  if (!needle) return Array.isArray(schedules) ? schedules : [];
+  return (Array.isArray(schedules) ? schedules : []).filter((schedule) => {
+    return [schedule?.name, schedule?.prompt].some((value) => String(value || "").toLocaleLowerCase().includes(needle));
+  });
+}
 
 export function buildSummaryMarkdown({ projectName, summary }) {
   const name = String(projectName || "项目").trim() || "项目";
@@ -51,16 +61,16 @@ function inferredRecurrence(schedule) {
   return ["once", "daily", "weekly", "monthly"].includes(kind) ? kind : "daily";
 }
 
-function Feedback({ action, type }) {
+function Feedback({ action, type, errorsOnly = false }) {
   if (!action || action.type !== type) return null;
   const iconProps = { size: 15, weight: "bold", "aria-hidden": true };
-  if (action.status === "running") return React.createElement("div", { className: "cpwb-status cpwb-status-loading", role: "status" }, React.createElement(SpinnerGap, iconProps), React.createElement("span", null, "执行中…"));
+  if (action.status === "running" && !errorsOnly) return React.createElement("div", { className: "cpwb-status cpwb-status-loading", role: "status" }, React.createElement(SpinnerGap, iconProps), React.createElement("span", null, "执行中…"));
   if (action.status === "error") return React.createElement("div", { className: "cpwb-status cpwb-status-error", role: "alert" }, React.createElement(Warning, iconProps), React.createElement("span", null, action.error?.message || "操作失败"));
-  if (action.status === "done") return React.createElement("div", { className: "cpwb-status cpwb-status-success", role: "status" }, React.createElement(CheckCircle, iconProps), React.createElement("span", null, "已完成"));
+  if (action.status === "done" && !errorsOnly) return React.createElement("div", { className: "cpwb-status cpwb-status-success", role: "status" }, React.createElement(CheckCircle, iconProps), React.createElement("span", null, "已完成"));
   return null;
 }
 
-function ScheduleDialog({ schedule, timeZone, busy, error, onSave, onDelete, onClose }) {
+export function ScheduleDialog({ schedule, projectId = null, projects = [], timeZone, busy, error, onSave, onDelete, onClose }) {
   const initial = dateTimeFields(schedule?.startsAt || schedule?.nextRunAt, timeZone);
   const [name, setName] = React.useState(schedule?.name || "");
   const [prompt, setPrompt] = React.useState(schedule?.prompt || "");
@@ -70,20 +80,28 @@ function ScheduleDialog({ schedule, timeZone, busy, error, onSave, onDelete, onC
   const [enabled, setEnabled] = React.useState(schedule?.enabled !== false);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
   const [localError, setLocalError] = React.useState("");
+  const [selectedProjectId, setSelectedProjectId] = React.useState(projectId == null ? String(schedule?.projectId || "") : String(projectId));
 
   const submit = (event) => {
     event.preventDefault();
-    if (!name.trim() || !date || !time) { setLocalError("名称、日期和时间均为必填项"); return; }
+    if (!name.trim() || !date || !time || !selectedProjectId) { setLocalError(projectId == null ? "所属项目、名称、日期和时间均为必填项" : "名称、日期和时间均为必填项"); return; }
     let startsAt;
     try { startsAt = zonedDateTimeToUtc(date, time, timeZone).toISOString(); }
     catch (cause) { setLocalError(cause.message); return; }
-    onSave({ name: name.trim(), prompt: prompt.trim() || null, recurrence, startsAt, enabled }).catch(() => {});
+    onSave({ projectId: Number(selectedProjectId), name: name.trim(), prompt: prompt.trim() || null, recurrence, startsAt, enabled }).catch(() => {});
   };
 
   return React.createElement(GlobalModal, { onClose, labelledBy: "cpwb-schedule-dialog-title" },
     React.createElement("form", { className: "cpwb-modal cpwb-schedule-modal", onSubmit: submit },
       React.createElement("div", { className: "cpwb-modal-kicker" }, schedule ? "SCHEDULE / DETAILS" : "SCHEDULE / NEW"),
       React.createElement("h3", { id: "cpwb-schedule-dialog-title" }, schedule ? "定时任务详情" : "新增定时任务"),
+      projectId == null ? React.createElement("label", null, "选择所属项目", React.createElement(CyberSelect, {
+        value: selectedProjectId,
+        onChange: setSelectedProjectId,
+        ariaLabel: "选择定时任务所属项目",
+        placeholder: "请选择项目",
+        options: [{ value: "", label: "请选择项目" }, ...projects.map((project) => ({ value: String(project.id), label: project.name }))],
+      })) : null,
       React.createElement("label", null, "任务名称", React.createElement("input", { autoFocus: true, value: name, onChange: (event) => setName(event.target.value), placeholder: "例如：生成项目周报" })),
       React.createElement("label", null, "执行提示词", React.createElement("textarea", { value: prompt, onChange: (event) => setPrompt(event.target.value), placeholder: "告诉模型需要完成什么" })),
       React.createElement("div", { className: "cpwb-recurrence-picker", role: "group", "aria-label": "重复频率" }, Object.entries(RECURRENCE_LABELS).map(([value, label]) => React.createElement("button", {
@@ -112,11 +130,13 @@ function SummaryDeleteDialog({ summary, busy, error, onConfirm, onClose }) {
         React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-danger", disabled: busy, onClick: () => onConfirm().catch(() => {}) }, busy ? "删除中…" : "确认删除"))));
 }
 
-export function Automation({ store, projectId, view = "all", initialDialog = null }) {
+export function Automation({ store, projectId, view = "all", initialDialog = null, initialQuery = "" }) {
   const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const [dialog, setDialog] = React.useState(initialDialog === "create" ? { schedule: null } : null);
   const [summaryToDelete, setSummaryToDelete] = React.useState(null);
+  const [query, setQuery] = React.useState(initialQuery);
   const schedules = Array.isArray(state.schedules) ? state.schedules : [];
+  const visibleSchedules = filterSchedules(schedules, query);
   const scheduleRuns = state.scheduleRuns || {};
   const summaries = Array.isArray(state.summaries) ? state.summaries : [];
   const automation = state.automation || { summaryEnabled: true, nextDayTodosEnabled: true };
@@ -126,6 +146,7 @@ export function Automation({ store, projectId, view = "all", initialDialog = nul
   const scheduleAction = ["createSchedule", "updateSchedule", "deleteSchedule"].includes(action?.type) ? action : null;
   const summaryGenerating = action?.type === "runSummary" && action.status === "running";
   const summaryDeleting = action?.type === "deleteSummary" && action.status === "running";
+  const arrivingSummaryIds = useArrivalPulse(summaries);
 
   const save = (payload) => {
     const schedule = dialog?.schedule;
@@ -139,7 +160,7 @@ export function Automation({ store, projectId, view = "all", initialDialog = nul
     nextDayTodosEnabled: field === "nextDayTodosEnabled" ? !automation.nextDayTodosEnabled : automation.nextDayTodosEnabled,
   }).catch(() => {});
 
-  const scheduleNodes = schedules.map((schedule) => {
+  const scheduleNodes = visibleSchedules.map((schedule) => {
     const runs = Array.isArray(scheduleRuns[schedule.id]) ? scheduleRuns[schedule.id] : [];
     const latest = runs.at(-1);
     return React.createElement("article", { key: schedule.id, className: "cpwb-schedule-row", onClick: () => setDialog({ schedule }) },
@@ -154,20 +175,22 @@ export function Automation({ store, projectId, view = "all", initialDialog = nul
     const downloadable = summary.status === "completed" && typeof summary.content === "string" && summary.content.trim() !== "";
     const displayContent = summary.status === "failed"
       ? "生成失败，请重新生成"
-      : summary.status === "pending" ? "正在生成…" : summary.content || "暂无内容";
-    return React.createElement("article", { key: summary.id, className: "cpwb-summary-entry" },
+      : summary.content || "暂无内容";
+    return React.createElement("article", { key: summary.id, className: "cpwb-summary-entry" + (arrivingSummaryIds.has(String(summary.id)) ? " cpwb-entry-arrived" : "") },
       React.createElement("div", { className: "cpwb-summary-head" },
-        React.createElement("div", { className: "cpwb-item-meta" }, summary.summaryDate + " · " + (SUMMARY_STATUS_LABELS[summary.status] || summary.status)),
+        React.createElement("div", { className: "cpwb-item-meta" }, summary.summaryDate),
         React.createElement("div", { className: "cpwb-summary-actions" },
           downloadable ? React.createElement("button", { type: "button", className: "cpwb-icon-button", title: "下载 Markdown", "aria-label": `下载 ${summary.summaryDate} 每日总结`, onClick: () => downloadSummaryMarkdown({ projectName, summary }) }, React.createElement(DownloadSimple, { size: 14 })) : null,
           React.createElement("button", { type: "button", className: "cpwb-icon-button cpwb-danger-icon", title: "删除", "aria-label": `删除 ${summary.summaryDate} 每日总结`, onClick: () => setSummaryToDelete(summary) }, React.createElement(Trash, { size: 14 })))),
-      React.createElement("div", { className: "cpwb-summary-content" + (summary.status === "failed" ? " cpwb-summary-failed" : ""), role: summary.status === "failed" ? "alert" : undefined }, displayContent));
+      summary.status === "pending"
+        ? React.createElement(GenerationWave, { label: "正在生成每日总结" })
+        : React.createElement("div", { className: "cpwb-summary-content" + (summary.status === "failed" ? " cpwb-summary-failed" : ""), role: summary.status === "failed" ? "alert" : undefined }, displayContent));
   });
 
   return React.createElement("div", null,
     view !== "schedule" ? React.createElement("section", { className: "cpwb-section" }, React.createElement("div", { className: "cpwb-section-head" }, React.createElement("div", { className: "cpwb-label" }, "自动化开关")), React.createElement("div", { className: "cpwb-toggle-row" }, React.createElement("span", null, "21:00 每日总结"), React.createElement("button", { type: "button", className: "cpwb-toggle" + (automation.summaryEnabled ? " cpwb-on" : ""), onClick: () => toggle("summaryEnabled") }, automation.summaryEnabled ? "开" : "关")), React.createElement("div", { className: "cpwb-toggle-row" }, React.createElement("span", null, "21:00 次日待办"), React.createElement("button", { type: "button", className: "cpwb-toggle" + (automation.nextDayTodosEnabled ? " cpwb-on" : ""), onClick: () => toggle("nextDayTodosEnabled") }, automation.nextDayTodosEnabled ? "开" : "关")), React.createElement(Feedback, { action, type: "updateAutomation" })) : null,
-    view !== "summary" ? React.createElement("section", { className: "cpwb-tool-panel" }, React.createElement("div", { className: "cpwb-tool-head" }, React.createElement("span", null, "SCHEDULES // " + String(schedules.length).padStart(2, "0")), React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-primary cpwb-button-content", onClick: () => setDialog({ schedule: null }) }, React.createElement(Plus, { size: 14, weight: "bold" }), React.createElement("span", null, "新增"))), React.createElement(Feedback, { action, type: "runSchedule" }), schedules.length === 0 ? React.createElement(Empty, { glyph: React.createElement(CalendarBlank, { size: 20 }) }, "暂无定时任务") : React.createElement("div", { className: "cpwb-list" }, scheduleNodes)) : null,
-    view !== "schedule" ? React.createElement("section", { className: "cpwb-section" }, React.createElement("div", { className: "cpwb-section-head" }, React.createElement("div", { className: "cpwb-label" }, "每日总结记录"), React.createElement("button", { type: "button", className: "cpwb-btn cpwb-button-content", disabled: summaryGenerating, onClick: () => store.actions.runSummary({ projectId, summaryDate: localDateKey() }).catch(() => {}) }, summaryGenerating ? React.createElement(SpinnerGap, { size: 13, className: "cpwb-spin" }) : React.createElement(Play, { size: 13 }), React.createElement("span", null, summaryGenerating ? "生成中…" : "立即生成"))), React.createElement(Feedback, { action, type: "runSummary" }), React.createElement(Feedback, { action, type: "deleteSummary" }), summaries.length === 0 ? React.createElement(Empty, { glyph: React.createElement(CalendarBlank, { size: 20 }) }, "暂无总结记录") : summaryNodes) : null,
-    dialog ? React.createElement(ScheduleDialog, { schedule: dialog.schedule, timeZone, busy: scheduleAction?.status === "running", error: scheduleAction?.status === "error" ? scheduleAction.error : null, onSave: save, onDelete: remove, onClose: () => setDialog(null) }) : null,
+    view !== "summary" ? React.createElement("section", { className: "cpwb-tool-panel" }, React.createElement("div", { className: "cpwb-tool-head" }, React.createElement("span", null, "SCHEDULES // " + String(visibleSchedules.length).padStart(2, "0")), React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-primary cpwb-button-content", onClick: () => setDialog({ schedule: null }) }, React.createElement(Plus, { size: 14, weight: "bold" }), React.createElement("span", null, "新增"))), React.createElement("label", { className: "cpwb-tool-search" }, React.createElement("span", { "aria-hidden": true }, "⌕"), React.createElement("input", { type: "search", value: query, onChange: (event) => setQuery(event.target.value), placeholder: "搜索名称或提示词", "aria-label": "搜索定时任务" })), React.createElement(Feedback, { action, type: "runSchedule" }), visibleSchedules.length === 0 ? React.createElement(Empty, { glyph: React.createElement(CalendarBlank, { size: 20 }) }, schedules.length ? "没有匹配的定时任务" : "暂无定时任务") : React.createElement("div", { className: "cpwb-list" }, scheduleNodes)) : null,
+    view !== "schedule" ? React.createElement("section", { className: "cpwb-section" }, React.createElement("div", { className: "cpwb-section-head" }, React.createElement("div", { className: "cpwb-label" }, "每日总结记录"), React.createElement("button", { type: "button", className: "cpwb-btn cpwb-button-content", disabled: summaryGenerating, "aria-busy": summaryGenerating || undefined, onClick: () => store.actions.runSummary({ projectId, summaryDate: localDateKey() }).catch(() => {}) }, React.createElement(Play, { size: 13 }), React.createElement("span", null, "立即生成"))), summaryGenerating ? React.createElement(GenerationWave, { label: "正在生成每日总结" }) : null, React.createElement(Feedback, { action, type: "runSummary", errorsOnly: true }), React.createElement(Feedback, { action, type: "deleteSummary", errorsOnly: true }), summaries.length === 0 ? React.createElement(Empty, { glyph: React.createElement(CalendarBlank, { size: 20 }) }, "暂无总结记录") : summaryNodes) : null,
+    dialog ? React.createElement(ScheduleDialog, { schedule: dialog.schedule, projectId, timeZone, busy: scheduleAction?.status === "running", error: scheduleAction?.status === "error" ? scheduleAction.error : null, onSave: save, onDelete: remove, onClose: () => setDialog(null) }) : null,
     summaryToDelete ? React.createElement(SummaryDeleteDialog, { summary: summaryToDelete, busy: summaryDeleting, error: action?.type === "deleteSummary" && action.status === "error" ? action.error : null, onConfirm: () => store.actions.deleteSummary({ id: summaryToDelete.id, projectId }).then(() => setSummaryToDelete(null)), onClose: () => setSummaryToDelete(null) }) : null);
 }

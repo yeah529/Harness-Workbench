@@ -24,7 +24,7 @@ import { WorkbenchShell } from "../src/client/WorkbenchShell.js";
 import { layoutModeForWidth, nextDrawerOwner } from "../src/client/responsive.js";
 import { clearWorkbenchSessions, registerWorkbenchSession } from "../src/client/workbenchSessions.js";
 
-function shellStore() {
+function shellStore(overrides = {}) {
   const state = {
     phase: "ready",
     projects: [],
@@ -33,8 +33,9 @@ function shellStore() {
     recentSessions: [],
     sessionPage: { items: [], total: 0, limit: 20, offset: 0 },
     workbenchSessions: {
-      "session-cpwb-i": { scope: { kind: "independent", scopeId: null }, chatId: null },
+      "session-cpwb-i": { scope: { kind: "independent", id: null } },
     },
+    ...overrides,
   };
   return {
     getSnapshot: () => state,
@@ -42,6 +43,36 @@ function shellStore() {
     actions: { loadAllSessions: async () => {}, refreshProject: async () => {} },
   };
 }
+
+test("shell sidebar reads only the fixed recent list, never the active scope page", () => {
+  const recentSessions = Array.from({ length: 20 }, (_, index) => ({
+    sessionId: "session-cpwb-recent-" + index,
+    title: "最近会话 " + index,
+    scope: { kind: index % 2 === 0 ? "project" : "independent", id: index % 2 === 0 ? 7 : null },
+  }));
+  const navigation = createNavigationStore();
+  navigation.openConversation("session-cpwb-recent-0");
+  const store = shellStore({
+    recentSessions,
+    scopeSessionPage: {
+      items: [{ sessionId: "session-cpwb-scope-only", title: "不应进入侧栏", scope: { kind: "project", id: 7 } }],
+      total: 99,
+      limit: 3,
+      offset: 0,
+      scopeKey: "project:7",
+    },
+    workbenchSessions: Object.fromEntries(recentSessions.map((session) => [session.sessionId, session])),
+  });
+  const html = renderToStaticMarkup(React.createElement(WorkbenchShell, {
+    navigation,
+    store,
+    sessions: { list: { getSnapshot: () => ({ ids: [], byId: {}, current: undefined }), subscribe: () => () => {} } },
+  }));
+
+  assert.equal((html.match(/class="cpwb-sidebar-recent"/g) || []).length, 20);
+  assert.match(html, /最近会话/);
+  assert.doesNotMatch(html, /其他最近会话|不应进入侧栏|99 个会话/);
+});
 
 test("home metrics fall back to loaded Workbench projects and use the paged session total", () => {
   assert.deepEqual(resolveHomeMetrics({
@@ -74,7 +105,7 @@ test("unified shell renders one mutually exclusive center page and no duplicate 
     assert.equal((html.match(/class="cpwb-global-sidebar"/g) || []).length, 1);
     assert.doesNotMatch(html, /cpwb-home-identity/);
     if (page === "home") {
-      assert.match(html, /打开知识库中心/);
+      assert.match(html, /接入知识芯片/);
       assert.doesNotMatch(html, /cpwb-knowledge-grid/);
     }
   }
@@ -148,16 +179,16 @@ test("Workbench history is isolated to the active project or knowledge-base scop
     },
   };
   const scopes = {
-    "session-cpwb-a": { scope: { kind: "project", scopeId: 1 } },
-    "session-cpwb-b": { scope: { kind: "project", scopeId: 2 } },
-    "session-cpwb-c": { scope: { kind: "knowledge_base", scopeId: 3 } },
+    "session-cpwb-a": { scope: { kind: "project", id: 1 } },
+    "session-cpwb-b": { scope: { kind: "project", id: 2 } },
+    "session-cpwb-c": { scope: { kind: "knowledge_base", id: 3 } },
   };
   assert.deepEqual(
-    listWorkbenchSessions(snapshot, scopes, { kind: "project", scopeId: 1 }).map((row) => row.sessionId),
+    listWorkbenchSessions(snapshot, scopes, { kind: "project", id: 1 }).map((row) => row.sessionId),
     ["session-cpwb-a"],
   );
   assert.deepEqual(
-    listWorkbenchSessions(snapshot, scopes, { kind: "knowledge_base", scopeId: 3 }).map((row) => row.sessionId),
+    listWorkbenchSessions(snapshot, scopes, { kind: "knowledge_base", id: 3 }).map((row) => row.sessionId),
     ["session-cpwb-c"],
   );
 });
@@ -228,8 +259,8 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
   const store = {
     getSnapshot: () => ({
       projects: [{ id: 7, name: "Research" }],
-      workbenchSessions: { "session-cpwb-project-7": {
-        scope: { kind: "project", scopeId: 7 },
+      workbenchSessions: { "session-cpwb-1234567890abcdef1234567890abcdef": {
+        scope: { kind: "project", id: 7 },
         selection: { model: "deepseek-v4-flash", reasoningEffort: "high" },
       } },
       activeProjectId: 7,
@@ -241,14 +272,13 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
   };
   clearWorkbenchSessions();
   registerWorkbenchSession({
-    sessionId: "session-cpwb-project-7",
-    scope: { kind: "project", scopeId: 7 },
-    chatId: null,
+    sessionId: "session-cpwb-1234567890abcdef1234567890abcdef",
+    scope: { kind: "project", id: 7 },
   });
   setProjectHomeOpen(false);
   try {
     const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, {
-      sessionId: "session-cpwb-project-7",
+      sessionId: "session-cpwb-1234567890abcdef1234567890abcdef",
       store,
       renderSlot: (name, props, options) => {
         calls.push({ name, props, options });
@@ -268,8 +298,10 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
     assert.match(html, /项目会话/);
     assert.match(html, /Research/);
     assert.match(html, /1 个关联知识库/);
-    assert.match(html, /deepseek-v4-flash/);
-    assert.match(html, /high/);
+    assert.match(html, /session-cpwb-1…90abcdef/);
+    assert.match(html, /aria-label="复制 Session ID"/);
+    assert.doesNotMatch(html, /deepseek-v4-flash|>high</i);
+    assert.doesNotMatch(html, /cpwb-session-archive-trigger/);
     assert.doesNotMatch(html, /cpwb-global-sidebar|cpwb-sidebar-brand-footer/);
   } finally {
     clearWorkbenchSessions();
@@ -277,20 +309,21 @@ test("Workbench session shell is an overlay and leaves rc.2 conversation renderi
   }
 });
 
-test("knowledge-base and independent conversations never render project-owned tools", () => {
+test("knowledge-base and independent conversations render scoped tools without project-owned actions", () => {
   for (const kind of ["knowledge_base", "independent"]) {
     const sessionId = "session-cpwb-" + kind;
     const store = {
       getSnapshot: () => ({
         projects: [],
         knowledgeBases: kind === "knowledge_base" ? [{ id: 2, name: "Workbench Docs" }] : [],
-        workbenchSessions: { [sessionId]: { scope: { kind, scopeId: kind === "independent" ? null : 2 } } },
+        workbenchSessions: { [sessionId]: { scope: { kind, id: kind === "independent" ? null : 2 } } },
       }),
       subscribe: () => () => {},
       actions: {},
     };
     const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, { sessionId, open: true, store }));
-    assert.doesNotMatch(html, /cpwb-project-rail/);
+    assert.match(html, /cpwb-project-rail/);
+    assert.doesNotMatch(html, />待办<|>每日总结</);
     assert.match(html, /cpwb-session-context-bar/);
     if (kind === "knowledge_base") {
       assert.match(html, /知识库会话/);
@@ -329,6 +362,94 @@ test("production composition does not claim conversation.session or filter nativ
   assert.match(indexSource, /cpwb-workbench-shell/);
   assert.doesNotMatch(indexSource, /cpwb-project-home|cpwb-session-shell/);
   assert.equal((indexSource.match(/slots\.inject\(["']shell\.overlay["']/g) || []).length, 1);
+});
+
+test("production composition adds knowledge sources to completed turns without replacing Chat or Trajectory", async () => {
+  const sessionAdapter = await import("../src/client/sessionAdapter.js");
+  assert.equal(typeof sessionAdapter.registerKnowledgeSources, "function");
+  const definitions = [];
+  const injections = [];
+  const ctx = {
+    effect() { return () => {}; },
+    inputTriggers: { registerSource() { return () => {}; } },
+    conversationEvents: { register(definition) { definitions.push(definition); return () => {}; } },
+    slots: {
+      inject(name) { injections.push(name); return () => {}; },
+      register() { return () => {}; },
+    },
+  };
+
+  sessionAdapter.registerKnowledgeSources(ctx, function KnowledgeSourcesFixture() { return null; });
+
+  assert.ok(definitions.some((definition) => definition.kind === "workbench-knowledge-sources"));
+  assert.ok(injections.includes("conversation.chat.turnTail"));
+  assert.equal(injections.includes("conversation.session"), false);
+  assert.equal(injections.includes("conversation.view"), false);
+});
+
+test("knowledge citation data is published only on the owning turn", async () => {
+  const sessionAdapter = await import("../src/client/sessionAdapter.js");
+  const event = {
+    seq: 17,
+    type: "user/message",
+    data: {
+      source: {
+        kind: "plugin",
+        plugin: "dsh-cyberpunk-workbench",
+        form: "recall",
+      },
+      content: [{
+        type: "text",
+        text: '<knowledge_context>\n[source id="44" document-id="8" file="agents.md" locator="lines:7-12"]\nreference\n[/source]\n</knowledge_context>\n',
+      }],
+    },
+  };
+  const definition = sessionAdapter.knowledgeSourcesDefinition;
+  assert.deepEqual(definition.match(event), { id: "17", role: "start" });
+  const state = definition.start({}, { event });
+  assert.deepEqual(state, {
+    version: 1,
+    passageCount: 1,
+    documentCount: 1,
+    citations: [{ documentId: 8, sourceId: "44", originalName: "agents.md", locator: "lines:7-12" }],
+  });
+  const value = definition.buildLocationData({
+    state,
+    start: { location: { kind: "turn", turn: { turn: 3 } } },
+  }, "turn");
+  assert.deepEqual(value, {
+    kind: "turn",
+    turn: 3,
+    key: "workbench-knowledge-sources",
+    value: state,
+  });
+  assert.equal(definition.buildLocationData({ state, start: { location: { kind: "session" } } }, "turn"), null);
+  assert.equal(sessionAdapter.selectKnowledgeSources({ turn: { data: { get: () => state } } }), state);
+});
+
+test("knowledge source footnote deduplicates documents and links original files", async () => {
+  const shell = await import("../src/client/WorkbenchSessionShell.js");
+  assert.equal(typeof shell.KnowledgeSourcesTail, "function");
+  const html = renderToStaticMarkup(React.createElement(shell.KnowledgeSourcesTail, {
+    matched: {
+      passageCount: 3,
+      documentCount: 2,
+      citations: [
+        { documentId: 7, sourceId: "31", originalName: "AI Agents.pdf", locator: "pages:12-14" },
+        { documentId: 7, sourceId: "32", originalName: "AI Agents.pdf", locator: "pages:19-20" },
+        { documentId: 9, sourceId: "48", originalName: "架构说明.md", locator: "lines:83-126", heading: "Agent loop" },
+      ],
+    },
+  }));
+
+  assert.match(html, /本轮知识来源/);
+  assert.match(html, /2 个文档/);
+  assert.match(html, /3 个片段/);
+  assert.equal((html.match(/AI Agents\.pdf/g) || []).length, 1);
+  assert.match(html, /pages:12-14/);
+  assert.match(html, /pages:19-20/);
+  assert.match(html, /href="\/api\/cpwb\/documents\/7\/content"/);
+  assert.match(html, /href="\/api\/cpwb\/documents\/9\/content"/);
 });
 
 test("rc.2 SlotCore composition keeps native Chat/Trajectory and a dynamic Workbench view switchable", () => {

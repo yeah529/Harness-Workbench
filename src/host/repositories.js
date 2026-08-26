@@ -69,6 +69,7 @@ function mapSchedule(row) {
   return {
     id: row.id,
     projectId: row.project_id,
+    sessionId: row.session_id ?? null,
     name: row.name,
     prompt: row.prompt ?? null,
     rule: row.rule,
@@ -130,28 +131,23 @@ function mapIndexMetadata(row) {
   };
 }
 
-function mapKnowledgeChat(row) {
-  return {
-    id: row.id,
-    knowledgeBaseId: row.knowledge_base_id,
-    title: row.title ?? null,
-    dshSessionId: row.dsh_session_id ?? null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
 function mapWorkbenchSession(row) {
+  const scopeId = row.scope_id ?? null;
   return {
     sessionId: row.session_id,
     scopeKind: row.scope_kind,
-    scopeId: row.scope_id,
+    scopeId,
+    scope: { kind: row.scope_kind, id: scopeId },
     contextName: row.context_name ?? (row.scope_kind === "independent" ? "独立" : null),
     title: row.title ?? null,
-    chatId: row.chat_id ?? null,
+    titleLocked: row.title_locked !== 0,
+    lifecycleStatus: row.lifecycle_status,
+    archivedAt: row.archived_at ?? null,
+    sessionType: row.session_type ?? "chat",
+    scheduleName: row.schedule_name ?? null,
     selection: {
-      provider: row.provider,
-      model: row.model,
+      provider: row.provider ?? null,
+      model: row.model ?? null,
       ...(row.reasoning_effort == null ? {} : { reasoningEffort: row.reasoning_effort }),
     },
     createdAt: row.created_at,
@@ -160,13 +156,43 @@ function mapWorkbenchSession(row) {
 }
 
 const WORKBENCH_SESSION_SELECT =
-  "SELECT ws.*, CASE ws.scope_kind " +
+  "SELECT ws.*, sch.name AS schedule_name, " +
+  "CASE WHEN sch.id IS NULL THEN 'chat' ELSE 'schedule' END AS session_type, " +
+  "CASE ws.scope_kind " +
   "WHEN 'project' THEN p.name " +
   "WHEN 'knowledge_base' THEN kb.name " +
   "ELSE '独立' END AS context_name " +
   "FROM workbench_sessions ws " +
   "LEFT JOIN projects p ON ws.scope_kind = 'project' AND p.id = ws.scope_id " +
-  "LEFT JOIN knowledge_bases kb ON ws.scope_kind = 'knowledge_base' AND kb.id = ws.scope_id ";
+  "LEFT JOIN knowledge_bases kb ON ws.scope_kind = 'knowledge_base' AND kb.id = ws.scope_id " +
+  "LEFT JOIN schedules sch ON sch.session_id = ws.session_id ";
+
+const SESSION_SCOPE_KINDS = new Set(["project", "knowledge_base", "independent"]);
+const CONTEXT_SOURCE_KINDS = new Set(["knowledge_base", "workspace_file", "uploaded_file", "session"]);
+const CONTEXT_MODES = new Set(["pinned", "disabled"]);
+const SESSION_LIFECYCLE_STATUSES = new Set(["draft_failed", "active"]);
+
+function normalizeSessionScope(scope) {
+  const kind = scope?.kind;
+  const rawId = scope?.id;
+  if (!SESSION_SCOPE_KINDS.has(kind)) throw new TypeError("invalid session scope kind");
+  if (kind === "independent") {
+    if (rawId !== undefined && rawId !== null) throw new TypeError("independent scope cannot have an id");
+    return { kind, id: null };
+  }
+  const id = Number(rawId);
+  if (!Number.isInteger(id) || id <= 0) throw new TypeError(kind + " scope requires a positive id");
+  return { kind, id };
+}
+
+function normalizeContextIdentity({ sessionId, sourceKind, sourceId }) {
+  if (typeof sessionId !== "string" || sessionId.trim() === "") throw new TypeError("sessionId is required");
+  if (!CONTEXT_SOURCE_KINDS.has(sourceKind)) throw new TypeError("invalid context source kind");
+  const id = String(sourceId ?? "").trim();
+  if (!id) throw new TypeError("context source id is required");
+  if (sourceKind === "session" && id === sessionId) throw new TypeError("a session cannot reference itself");
+  return { sessionId, sourceKind, sourceId: id };
+}
 
 /**
  * Replace a document's chunks inside a running transaction and return the
@@ -280,14 +306,17 @@ export function createRepositories(db) {
       const sessionIds = db.prepare(
         "SELECT session_id FROM workbench_sessions WHERE scope_kind = 'project' AND scope_id = ? ORDER BY session_id",
       ).all(id).map((row) => row.session_id);
-      return { project, linkedDocuments, orphanDocuments, sessionIds };
+      const relationshipCount = Number(db.prepare(
+        "SELECT COUNT(*) AS n FROM project_knowledge_bases WHERE project_id = ?",
+      ).get(id).n);
+      return { project, linkedDocuments, orphanDocuments, sessionIds, relationshipCount };
     },
 
-    removeCascade(id) {
+    removeContainer(id) {
       const plan = this.deletionPlan(id);
       if (!plan) return null;
+      if (plan.sessionIds.length > 0) throw new Error("project still owns sessions");
       return transaction(db, () => {
-        db.prepare("DELETE FROM workbench_sessions WHERE scope_kind = 'project' AND scope_id = ?").run(id);
         db.prepare("DELETE FROM projects WHERE id = ?").run(id);
         for (const document of plan.orphanDocuments) {
           db.prepare("DELETE FROM documents WHERE id = ?").run(document.id);
@@ -298,16 +327,16 @@ export function createRepositories(db) {
   };
 
   const workbenchSessions = {
-    upsert({ sessionId, scopeKind, scopeId, chatId = null, provider, model, reasoningEffort = null, now = new Date() }) {
+    create({ sessionId, scope, provider = null, model = null, reasoningEffort = null, title = null, titleLocked = false, lifecycleStatus = "active", now = new Date() }) {
+      if (typeof sessionId !== "string" || sessionId.trim() === "") throw new TypeError("sessionId is required");
+      const normalizedScope = normalizeSessionScope(scope);
+      if (!SESSION_LIFECYCLE_STATUSES.has(lifecycleStatus)) throw new TypeError("invalid session lifecycle status");
       const iso = nowIso(now);
       db.prepare(
         "INSERT INTO workbench_sessions " +
-          "(session_id, scope_kind, scope_id, chat_id, provider, model, reasoning_effort, created_at, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-          "ON CONFLICT(session_id) DO UPDATE SET " +
-          "scope_kind = excluded.scope_kind, scope_id = excluded.scope_id, chat_id = excluded.chat_id, " +
-          "provider = excluded.provider, model = excluded.model, reasoning_effort = excluded.reasoning_effort, updated_at = excluded.updated_at",
-      ).run(sessionId, scopeKind, scopeId, chatId, provider, model, reasoningEffort, iso, iso);
+          "(session_id, scope_kind, scope_id, provider, model, reasoning_effort, title, title_locked, lifecycle_status, created_at, updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(sessionId, normalizedScope.kind, normalizedScope.id, provider, model, reasoningEffort, title, titleLocked ? 1 : 0, lifecycleStatus, iso, iso);
       return this.get(sessionId);
     },
 
@@ -316,25 +345,46 @@ export function createRepositories(db) {
       return row ? mapWorkbenchSession(row) : null;
     },
 
-    list({ scopeKind, scopeId, limit = 100, offset = 0 }) {
+    list({ scopeKind, scopeId, lifecycleStatus = null, archived = null, limit = 100, offset = 0 }) {
+      const normalizedScope = normalizeSessionScope({ kind: scopeKind, id: scopeId });
+      if (lifecycleStatus != null && !SESSION_LIFECYCLE_STATUSES.has(lifecycleStatus)) throw new TypeError("invalid session lifecycle status");
       const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
       const safeOffset = Math.max(0, Number(offset) || 0);
+      const lifecycleFilter = lifecycleStatus == null ? "" : "AND ws.lifecycle_status = ? ";
+      const archiveFilter = archived === true
+        ? "AND ws.archived_at IS NOT NULL "
+        : archived === false ? "AND ws.archived_at IS NULL " : "";
+      const params = [normalizedScope.kind, normalizedScope.id];
+      if (lifecycleStatus != null) params.push(lifecycleStatus);
       return db.prepare(
         WORKBENCH_SESSION_SELECT +
-        "WHERE ws.scope_kind = ? AND ws.scope_id = ? " +
+        "WHERE ws.scope_kind = ? AND ws.scope_id IS ? " + lifecycleFilter + archiveFilter +
         "ORDER BY ws.updated_at DESC, ws.rowid DESC LIMIT ? OFFSET ?",
-      ).all(scopeKind, scopeId, safeLimit, safeOffset).map(mapWorkbenchSession);
+      ).all(...params, safeLimit, safeOffset).map(mapWorkbenchSession);
     },
 
-    listAll({ scopeKind = null, query = "", limit = 100, offset = 0 } = {}) {
+    listAll({ scopeKind = null, scopeId = null, query = "", lifecycleStatus = null, archived = null, limit = 100, offset = 0 } = {}) {
       const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
       const safeOffset = Math.max(0, Number(offset) || 0);
       const filters = [];
       const params = [];
       if (scopeKind) {
+        if (!SESSION_SCOPE_KINDS.has(scopeKind)) throw new TypeError("invalid session scope kind");
         filters.push("ws.scope_kind = ?");
         params.push(scopeKind);
       }
+      if (scopeId != null) {
+        if (!scopeKind || scopeKind === "independent") throw new TypeError("scopeId requires a project or knowledge-base scope");
+        filters.push("ws.scope_id IS ?");
+        params.push(Number(scopeId));
+      }
+      if (lifecycleStatus != null) {
+        if (!SESSION_LIFECYCLE_STATUSES.has(lifecycleStatus)) throw new TypeError("invalid session lifecycle status");
+        filters.push("ws.lifecycle_status = ?");
+        params.push(lifecycleStatus);
+      }
+      if (archived === true) filters.push("ws.archived_at IS NOT NULL");
+      else if (archived === false) filters.push("ws.archived_at IS NULL");
       const normalizedQuery = String(query ?? "").trim().toLowerCase();
       if (normalizedQuery) {
         filters.push("(LOWER(ws.session_id) LIKE ? OR LOWER(COALESCE(ws.title, p.name, kb.name, '独立')) LIKE ?)");
@@ -348,13 +398,26 @@ export function createRepositories(db) {
       ).all(...params, safeLimit, safeOffset).map(mapWorkbenchSession);
     },
 
-    countAll({ scopeKind = null, query = "" } = {}) {
+    countAll({ scopeKind = null, scopeId = null, query = "", lifecycleStatus = null, archived = null } = {}) {
       const filters = [];
       const params = [];
       if (scopeKind) {
+        if (!SESSION_SCOPE_KINDS.has(scopeKind)) throw new TypeError("invalid session scope kind");
         filters.push("ws.scope_kind = ?");
         params.push(scopeKind);
       }
+      if (scopeId != null) {
+        if (!scopeKind || scopeKind === "independent") throw new TypeError("scopeId requires a project or knowledge-base scope");
+        filters.push("ws.scope_id IS ?");
+        params.push(Number(scopeId));
+      }
+      if (lifecycleStatus != null) {
+        if (!SESSION_LIFECYCLE_STATUSES.has(lifecycleStatus)) throw new TypeError("invalid session lifecycle status");
+        filters.push("ws.lifecycle_status = ?");
+        params.push(lifecycleStatus);
+      }
+      if (archived === true) filters.push("ws.archived_at IS NOT NULL");
+      else if (archived === false) filters.push("ws.archived_at IS NULL");
       const normalizedQuery = String(query ?? "").trim().toLowerCase();
       if (normalizedQuery) {
         filters.push("(LOWER(ws.session_id) LIKE ? OR LOWER(COALESCE(ws.title, p.name, kb.name, '独立')) LIKE ?)");
@@ -371,15 +434,56 @@ export function createRepositories(db) {
     },
 
     remove(sessionId) {
-      db.prepare("DELETE FROM workbench_sessions WHERE session_id = ?").run(sessionId);
+      return Number(db.prepare("DELETE FROM workbench_sessions WHERE session_id = ?").run(sessionId).changes) > 0;
+    },
+
+    archive(sessionId, now = new Date()) {
+      const iso = nowIso(now);
+      const info = db.prepare(
+        "UPDATE workbench_sessions SET archived_at = COALESCE(archived_at, ?), updated_at = ? WHERE session_id = ?",
+      ).run(iso, iso, sessionId);
+      return Number(info.changes) === 0 ? null : this.get(sessionId);
+    },
+
+    restore(sessionId, now = new Date()) {
+      const iso = nowIso(now);
+      const info = db.prepare(
+        "UPDATE workbench_sessions SET archived_at = NULL, updated_at = ? WHERE session_id = ?",
+      ).run(iso, sessionId);
+      return Number(info.changes) === 0 ? null : this.get(sessionId);
     },
 
     latest({ scopeKind, scopeId }) {
       const row = db.prepare(
         WORKBENCH_SESSION_SELECT +
-        "WHERE ws.scope_kind = ? AND ws.scope_id = ? ORDER BY ws.updated_at DESC, ws.rowid DESC LIMIT 1",
+        "WHERE ws.scope_kind = ? AND ws.scope_id IS ? AND ws.lifecycle_status = 'active' AND ws.archived_at IS NULL ORDER BY ws.updated_at DESC, ws.rowid DESC LIMIT 1",
       ).get(scopeKind, scopeId);
       return row ? mapWorkbenchSession(row) : null;
+    },
+
+    updateScope({ sessionId, scope, now = new Date() }) {
+      const normalizedScope = normalizeSessionScope(scope);
+      const info = db.prepare(
+        "UPDATE workbench_sessions SET scope_kind = ?, scope_id = ?, updated_at = ? WHERE session_id = ?",
+      ).run(normalizedScope.kind, normalizedScope.id, nowIso(now), sessionId);
+      return Number(info.changes) === 0 ? null : this.get(sessionId);
+    },
+
+    updateLifecycle({ sessionId, lifecycleStatus, now = new Date() }) {
+      if (!SESSION_LIFECYCLE_STATUSES.has(lifecycleStatus)) throw new TypeError("invalid session lifecycle status");
+      const info = db.prepare(
+        "UPDATE workbench_sessions SET lifecycle_status = ?, updated_at = ? WHERE session_id = ?",
+      ).run(lifecycleStatus, nowIso(now), sessionId);
+      return Number(info.changes) === 0 ? null : this.get(sessionId);
+    },
+
+    rename({ sessionId, title, titleLocked = true, now = new Date() }) {
+      const normalizedTitle = typeof title === "string" ? title.trim() : "";
+      if (!normalizedTitle) throw new TypeError("session title is required");
+      const info = db.prepare(
+        "UPDATE workbench_sessions SET title = ?, title_locked = ?, updated_at = ? WHERE session_id = ?",
+      ).run(normalizedTitle, titleLocked ? 1 : 0, nowIso(now), sessionId);
+      return Number(info.changes) === 0 ? null : this.get(sessionId);
     },
 
     touch(sessionId, now = new Date()) {
@@ -390,7 +494,7 @@ export function createRepositories(db) {
     setTitleIfEmpty(sessionId, title, now = new Date()) {
       if (typeof title !== "string" || title.trim() === "") return this.get(sessionId);
       db.prepare(
-        "UPDATE workbench_sessions SET title = ?, updated_at = ? WHERE session_id = ? AND (title IS NULL OR TRIM(title) = '')",
+        "UPDATE workbench_sessions SET title = ?, updated_at = ? WHERE session_id = ? AND title_locked = 0 AND (title IS NULL OR TRIM(title) = '')",
       ).run(title.trim(), nowIso(now), sessionId);
       return this.get(sessionId);
     },
@@ -457,14 +561,17 @@ export function createRepositories(db) {
       const sessionIds = db.prepare(
         "SELECT session_id FROM workbench_sessions WHERE scope_kind = 'knowledge_base' AND scope_id = ? ORDER BY session_id",
       ).all(id).map((row) => row.session_id);
-      return { knowledgeBase, linkedDocuments, orphanDocuments, sessionIds };
+      const relationshipCount = Number(db.prepare(
+        "SELECT COUNT(*) AS n FROM project_knowledge_bases WHERE knowledge_base_id = ?",
+      ).get(id).n);
+      return { knowledgeBase, linkedDocuments, orphanDocuments, sessionIds, relationshipCount };
     },
 
-    removeCascade(id) {
+    removeContainer(id) {
       const plan = this.deletionPlan(id);
       if (!plan) return null;
+      if (plan.sessionIds.length > 0) throw new Error("knowledge base still owns sessions");
       return transaction(db, () => {
-        db.prepare("DELETE FROM workbench_sessions WHERE scope_kind = 'knowledge_base' AND scope_id = ?").run(id);
         db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(id);
         for (const document of plan.orphanDocuments) {
           db.prepare("DELETE FROM documents WHERE id = ?").run(document.id);
@@ -837,58 +944,91 @@ export function createRepositories(db) {
     },
   };
 
-  const knowledgeChats = {
-    create({ knowledgeBaseId, title = null, dshSessionId = null, now = new Date() }) {
+  const sessionContextSources = {
+    set({ sessionId, sourceKind, sourceId, mode, now = new Date() }) {
+      const identity = normalizeContextIdentity({ sessionId, sourceKind, sourceId });
+      if (!CONTEXT_MODES.has(mode)) throw new TypeError("invalid context source mode");
       const iso = nowIso(now);
       db.prepare(
-        "INSERT INTO knowledge_chats (knowledge_base_id, title, dsh_session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-      ).run(knowledgeBaseId, title, dshSessionId, iso, iso);
-      const row = db.prepare("SELECT * FROM knowledge_chats WHERE id = last_insert_rowid()").get();
-      return mapKnowledgeChat(row);
+        "INSERT INTO session_context_sources (session_id, source_kind, source_id, mode, created_at, updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(session_id, source_kind, source_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at",
+      ).run(identity.sessionId, identity.sourceKind, identity.sourceId, mode, iso, iso);
+      return this.get(identity);
     },
 
-    listByKnowledgeBase(knowledgeBaseId) {
+    get({ sessionId, sourceKind, sourceId }) {
+      const identity = normalizeContextIdentity({ sessionId, sourceKind, sourceId });
+      const row = db.prepare(
+        "SELECT * FROM session_context_sources WHERE session_id = ? AND source_kind = ? AND source_id = ?",
+      ).get(identity.sessionId, identity.sourceKind, identity.sourceId);
+      return row ? {
+        sessionId: row.session_id,
+        sourceKind: row.source_kind,
+        sourceId: row.source_id,
+        mode: row.mode,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      } : null;
+    },
+
+    list(sessionId) {
       return db.prepare(
-        "SELECT * FROM knowledge_chats WHERE knowledge_base_id = ? ORDER BY id",
-      ).all(knowledgeBaseId).map(mapKnowledgeChat);
-    },
-
-    get(id) {
-      const row = db.prepare("SELECT * FROM knowledge_chats WHERE id = ?").get(id);
-      return row ? mapKnowledgeChat(row) : null;
-    },
-
-    remove(id) {
-      db.prepare("DELETE FROM knowledge_chats WHERE id = ?").run(id);
-    },
-
-    list() {
-      return db.prepare("SELECT * FROM knowledge_chats ORDER BY id").all().map(mapKnowledgeChat);
-    },
-
-    /** Read project-visible DSH chat activity for the host daily summary. */
-    listActivityByProject(projectId) {
-      return db.prepare(
-        "SELECT kc.id AS chat_id, kc.knowledge_base_id, kc.dsh_session_id, kc.updated_at " +
-          "FROM knowledge_chats kc " +
-          "JOIN project_knowledge_bases pkb ON pkb.knowledge_base_id = kc.knowledge_base_id " +
-          "WHERE pkb.project_id = ? ORDER BY kc.id",
-      ).all(projectId).map((row) => ({
-        chatId: row.chat_id,
-        knowledgeBaseId: row.knowledge_base_id,
-        dshSessionId: row.dsh_session_id ?? null,
+        "SELECT * FROM session_context_sources WHERE session_id = ? ORDER BY source_kind, source_id",
+      ).all(sessionId).map((row) => ({
+        sessionId: row.session_id,
+        sourceKind: row.source_kind,
+        sourceId: row.source_id,
+        mode: row.mode,
+        createdAt: row.created_at,
         updatedAt: row.updated_at,
       }));
     },
 
-    /** Bind a live DSH session id to an existing chat (used on reopen). */
-    bindSession({ id, dshSessionId, now = new Date() }) {
+    remove({ sessionId, sourceKind, sourceId }) {
+      const identity = normalizeContextIdentity({ sessionId, sourceKind, sourceId });
+      return Number(db.prepare(
+        "DELETE FROM session_context_sources WHERE session_id = ? AND source_kind = ? AND source_id = ?",
+      ).run(identity.sessionId, identity.sourceKind, identity.sourceId).changes) > 0;
+    },
+  };
+
+  const messageContextRefs = {
+    addMany({ sessionId, messageId, sources, now = new Date() }) {
+      if (typeof messageId !== "string" || messageId.trim() === "") throw new TypeError("messageId is required");
+      if (!Array.isArray(sources)) throw new TypeError("sources must be an array");
+      const identities = sources.map((source) => normalizeContextIdentity({
+        sessionId,
+        sourceKind: source.kind ?? source.sourceKind,
+        sourceId: source.id ?? source.sourceId,
+      }));
       const iso = nowIso(now);
-      const info = db.prepare(
-        "UPDATE knowledge_chats SET dsh_session_id = ?, updated_at = ? WHERE id = ?",
-      ).run(dshSessionId, iso, id);
-      if (Number(info.changes) === 0) return null;
-      return this.get(id);
+      transaction(db, () => {
+        const insert = db.prepare(
+          "INSERT OR IGNORE INTO message_context_refs (session_id, message_id, source_kind, source_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        );
+        for (const source of identities) insert.run(source.sessionId, messageId.trim(), source.sourceKind, source.sourceId, iso);
+      });
+      return this.list({ sessionId, messageId: messageId.trim() });
+    },
+
+    list({ sessionId, messageId = null }) {
+      const rows = messageId == null
+        ? db.prepare("SELECT * FROM message_context_refs WHERE session_id = ? ORDER BY message_id, source_kind, source_id").all(sessionId)
+        : db.prepare("SELECT * FROM message_context_refs WHERE session_id = ? AND message_id = ? ORDER BY source_kind, source_id").all(sessionId, messageId);
+      return rows.map((row) => ({
+        sessionId: row.session_id,
+        messageId: row.message_id,
+        sourceKind: row.source_kind,
+        sourceId: row.source_id,
+        createdAt: row.created_at,
+      }));
+    },
+
+    removeForMessage({ sessionId, messageId }) {
+      return Number(db.prepare(
+        "DELETE FROM message_context_refs WHERE session_id = ? AND message_id = ?",
+      ).run(sessionId, messageId).changes);
     },
   };
 
@@ -929,6 +1069,18 @@ export function createRepositories(db) {
       return this.get(id);
     },
 
+    bindSession({ id, sessionId }) {
+      const schedule = this.get(id);
+      if (!schedule) return null;
+      const session = workbenchSessions.get(sessionId);
+      if (!session) throw new Error("scheduled session does not exist");
+      if (session.scopeKind !== "project" || session.scopeId !== schedule.projectId) {
+        throw new Error("scheduled session must belong to the schedule project");
+      }
+      db.prepare("UPDATE schedules SET session_id = ? WHERE id = ?").run(sessionId, id);
+      return this.get(id);
+    },
+
     remove(id) {
       const info = db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
       return Number(info.changes) === 1;
@@ -965,6 +1117,13 @@ export function createRepositories(db) {
       ).run(sessionId, error, iso, id);
       const row = db.prepare("SELECT * FROM schedule_runs WHERE id = ?").get(id);
       return row ? mapRun(row) : null;
+    },
+
+    failRunning({ error = "interrupted", finishedAt = new Date() } = {}) {
+      const info = db.prepare(
+        "UPDATE schedule_runs SET status = 'failed', error = ?, finished_at = ? WHERE status = 'running'",
+      ).run(error, nowIso(finishedAt));
+      return Number(info.changes);
     },
 
     missRun({ id, error = "missed", finishedAt = new Date() }) {
@@ -1041,6 +1200,69 @@ export function createRepositories(db) {
     },
   };
 
+  const maintenance = {
+    purgeContainer({
+      kind,
+      id,
+      expectedSessionIds,
+      expectedOrphanDocumentIds,
+    }) {
+      if (kind !== "project" && kind !== "knowledge_base") {
+        throw new TypeError("maintenance purge requires a project or knowledge base");
+      }
+      const containerId = Number(id);
+      if (!Number.isInteger(containerId) || containerId <= 0) {
+        throw new TypeError("maintenance purge requires a positive container id");
+      }
+      const normalizeIds = (values, label) => {
+        if (!Array.isArray(values)) throw new TypeError(`${label} must be an array`);
+        return [...new Set(values)].sort((left, right) =>
+          typeof left === "number" && typeof right === "number"
+            ? left - right
+            : String(left).localeCompare(String(right)),
+        );
+      };
+      const expectedSessions = normalizeIds(expectedSessionIds, "expectedSessionIds");
+      const expectedDocuments = normalizeIds(
+        expectedOrphanDocumentIds,
+        "expectedOrphanDocumentIds",
+      );
+
+      return transaction(db, () => {
+        const repository = kind === "project" ? projects : knowledgeBases;
+        const plan = repository.deletionPlan(containerId);
+        if (!plan) throw new Error("maintenance purge container not found");
+        const currentSessions = normalizeIds(plan.sessionIds, "current session ids");
+        const currentDocuments = normalizeIds(
+          plan.orphanDocuments.map((document) => document.id),
+          "current orphan document ids",
+        );
+        if (
+          JSON.stringify(currentSessions) !== JSON.stringify(expectedSessions) ||
+          JSON.stringify(currentDocuments) !== JSON.stringify(expectedDocuments)
+        ) {
+          throw new Error("stale purge plan: container graph changed after confirmation");
+        }
+
+        const removeSession = db.prepare(
+          "DELETE FROM workbench_sessions WHERE session_id = ?",
+        );
+        for (const sessionId of expectedSessions) removeSession.run(sessionId);
+        if (kind === "project") {
+          db.prepare("DELETE FROM projects WHERE id = ?").run(containerId);
+        } else {
+          db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(containerId);
+        }
+        const removeDocument = db.prepare("DELETE FROM documents WHERE id = ?");
+        for (const documentId of expectedDocuments) removeDocument.run(documentId);
+        return {
+          ...plan,
+          container: kind === "project" ? plan.project : plan.knowledgeBase,
+        };
+      });
+    },
+  };
+
   return {
     projects,
     knowledgeBases,
@@ -1052,8 +1274,10 @@ export function createRepositories(db) {
     todos,
     settings,
     summaries,
-    knowledgeChats,
+    sessionContextSources,
+    messageContextRefs,
     workbenchSessions,
     schedules,
+    maintenance,
   };
 }

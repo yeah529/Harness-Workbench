@@ -1,5 +1,6 @@
 import React from "react";
-import { ChatCircleText, MagnifyingGlass } from "@phosphor-icons/react";
+import { Archive, ArrowCounterClockwise, ChatCircleText, MagnifyingGlass } from "@phosphor-icons/react";
+import { CyberSelect } from "./CyberSelect.js";
 
 function scopeLabel(row) {
   if (row.contextName) return row.contextName;
@@ -15,54 +16,97 @@ function activityLabel(value) {
   return date.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-export function SessionListPage({ store, onOpenSession }) {
+export function SessionListPage({ archived = false, embedded = false, store, onOpenSession, initialScope = null }) {
   const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const [query, setQuery] = React.useState("");
+  const [appliedQuery, setAppliedQuery] = React.useState("");
   const [context, setContext] = React.useState("");
   const page = state.sessionPage ?? { items: [], total: 0, limit: 20, offset: 0 };
+  const lockedScope = initialScope?.kind === "project" || initialScope?.kind === "knowledge_base" ? initialScope : null;
+  const scopeKind = lockedScope?.kind ?? (context || null);
+  const scopeId = lockedScope?.id ?? null;
 
   const load = React.useCallback((offset = 0) => store.actions.loadAllSessions({
-    query: query.trim(),
-    context: context || null,
+    query: appliedQuery,
+    scopeKind,
+    scopeId,
+    archived,
     offset,
     limit: page.limit || 20,
-  }), [context, page.limit, query, store]);
+  }), [appliedQuery, archived, page.limit, scopeId, scopeKind, store]);
 
-  React.useEffect(function () { load(0).catch(function () {}); }, []);
+  React.useEffect(function () { load(0).catch(function () {}); }, [load]);
 
-  return React.createElement("main", { className: "cpwb-session-list-page cpwb-workbench-page", "data-page": "sessions" },
-    React.createElement("header", { className: "cpwb-page-header" },
-      React.createElement("div", { className: "cpwb-page-header-main" },
-        React.createElement("span", null, "03 / CONVERSATIONS"),
-        React.createElement("h1", null, "全部会话"),
-        React.createElement("p", null, "项目、知识库与独立会话统一归档。")),
-      React.createElement("div", { className: "cpwb-page-header-stat" }, React.createElement("strong", null, page.total), React.createElement("span", null, "条会话"))),
-    React.createElement("form", { className: "cpwb-session-filters", onSubmit: function (event) { event.preventDefault(); load(0).catch(function () {}); } },
+  const mutate = async function (row) {
+    if (archived) await store.actions.restoreSession(row.sessionId);
+    else await store.actions.archiveSession(row.sessionId);
+    await load(0).catch(function () {});
+  };
+
+  const header = embedded
+    ? React.createElement("header", { className: "cpwb-settings-archive-header" },
+        React.createElement("div", null,
+          React.createElement("span", { className: "cpwb-eyebrow" }, "SESSION STORAGE / ARCHIVE"),
+          React.createElement("h2", null, "归档会话"),
+          React.createElement("p", null, "检索已归档记录，打开查看或恢复到最近会话。")),
+        React.createElement("strong", { "aria-label": page.total + " 条归档会话" }, String(page.total).padStart(2, "0")))
+    : React.createElement("header", { className: "cpwb-page-header" },
+        React.createElement("div", { className: "cpwb-page-header-main" },
+          React.createElement("span", null, archived ? "04 / ARCHIVE" : "03 / CONVERSATIONS"),
+          React.createElement("h1", null, archived ? "归档会话" : "全部会话"),
+          React.createElement("p", null, archived ? "已归档记录仍可查看，并可随时恢复到最近会话。" : "项目、知识库与独立会话统一管理。")),
+        React.createElement("div", { className: "cpwb-page-header-stat" }, React.createElement("strong", null, page.total), React.createElement("span", null, "条会话")));
+
+  return React.createElement("main", {
+    className: "cpwb-session-list-page" + (embedded ? " cpwb-settings-archive" : " cpwb-workbench-page"),
+    "data-page": archived ? "archive" : "sessions",
+  },
+    header,
+    lockedScope ? React.createElement("div", { className: "cpwb-session-scope-banner" },
+      React.createElement("span", null, lockedScope.kind === "project" ? "PROJECT SCOPE" : "KNOWLEDGE SCOPE"),
+      React.createElement("strong", null, lockedScope.name || (lockedScope.kind === "project" ? "当前项目" : "当前知识库")),
+      React.createElement("small", null, "仅显示该" + (lockedScope.kind === "project" ? "项目" : "知识库") + "会话")) : null,
+    React.createElement("form", { className: "cpwb-session-filters" + (lockedScope ? " cpwb-session-filters-locked" : ""), onSubmit: function (event) { event.preventDefault(); setAppliedQuery(query.trim()); } },
       React.createElement("label", null,
         React.createElement(MagnifyingGlass, { size: 18, weight: "regular", "aria-hidden": true }),
-        React.createElement("input", { value: query, onChange: (event) => setQuery(event.target.value), placeholder: "搜索会话或来源", "aria-label": "搜索会话" })),
-      React.createElement("select", { value: context, onChange: (event) => setContext(event.target.value), "aria-label": "会话类型" },
-        React.createElement("option", { value: "" }, "全部类型"),
-        React.createElement("option", { value: "project" }, "项目"),
-        React.createElement("option", { value: "knowledge_base" }, "知识库"),
-        React.createElement("option", { value: "independent" }, "独立")),
-      React.createElement("button", { type: "submit" }, "检索")),
+        React.createElement("input", { value: query, onChange: (event) => setQuery(event.target.value), placeholder: archived ? "搜索归档会话或来源" : "搜索会话或来源", "aria-label": archived ? "搜索归档会话" : "搜索会话" })),
+      lockedScope ? null : React.createElement(CyberSelect, {
+        value: context,
+        onChange: setContext,
+        ariaLabel: "会话类型",
+        options: [
+          { value: "", label: "全部类型" },
+          { value: "project", label: "项目" },
+          { value: "knowledge_base", label: "知识库" },
+          { value: "independent", label: "独立" },
+        ],
+      }),
+      React.createElement("button", { type: "submit" }, archived ? "搜索" : "检索")),
     state.action?.status === "error"
       ? React.createElement("div", { className: "cpwb-page-error", role: "alert" }, state.action.error?.message || "会话加载失败")
       : null,
     page.items.length === 0
       ? React.createElement("div", { className: "cpwb-session-list-empty" }, React.createElement(ChatCircleText, { size: 28, weight: "regular" }), React.createElement("span", null, "暂无匹配会话"))
-      : React.createElement("div", { className: "cpwb-session-list" }, page.items.map((row) => React.createElement("button", {
-        type: "button",
+      : React.createElement("div", { className: "cpwb-session-list" }, page.items.map((row) => React.createElement("article", {
         key: row.sessionId,
-        className: "cpwb-session-list-row",
-        onClick: () => onOpenSession?.(row.sessionId),
+        className: "cpwb-session-list-row" + (archived ? " cpwb-session-list-row-archived" : ""),
       },
-      React.createElement(ChatCircleText, { size: 20, weight: "regular", "aria-hidden": true }),
-      React.createElement("span", null,
-        React.createElement("strong", null, row.title || row.displayTitle || row.contextName || "未命名会话"),
-        React.createElement("small", null, scopeLabel(row))),
-      React.createElement("time", null, activityLabel(row.updatedAt))))),
+      React.createElement("button", { type: "button", className: "cpwb-session-list-open", disabled: typeof onOpenSession !== "function", onClick: () => onOpenSession?.(row.sessionId) },
+        React.createElement(ChatCircleText, { size: 20, weight: "regular", "aria-hidden": true }),
+        React.createElement("span", null,
+          React.createElement("strong", null, row.title || row.displayTitle || row.contextName || "未命名会话"),
+          React.createElement("small", null, scopeLabel(row))),
+        React.createElement("time", null, archived ? "归档于 " + activityLabel(row.archivedAt) : activityLabel(row.updatedAt))),
+      React.createElement("button", {
+        type: "button",
+        className: "cpwb-session-list-action",
+        disabled: state.action?.status === "loading",
+        onClick: () => mutate(row).catch(function () {}),
+        "aria-label": (archived ? "恢复会话 " : "归档会话 ") + (row.title || "未命名会话"),
+        title: archived ? "恢复会话" : "归档会话",
+      }, archived
+        ? React.createElement(ArrowCounterClockwise, { size: 18, weight: "regular", "aria-hidden": true })
+        : React.createElement(Archive, { size: 18, weight: "regular", "aria-hidden": true }))))),
     React.createElement("footer", { className: "cpwb-session-pagination" },
       React.createElement("span", null, "共 " + page.total + " 条"),
       React.createElement("div", null,

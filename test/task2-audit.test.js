@@ -110,7 +110,20 @@ test("WorkbenchSettingsSection is a native section component with real controls"
       auth: { configured: false, source: null, readOnly: false, canConnect: true, activation: "next-request" },
       index: { status: "ready", counts: { ready: 3 } },
       automationPrompts: { summaryPrompt: "Custom summary", todoPrompt: "Custom todo" },
-    } }),
+    },
+    sessionPage: {
+      items: [{
+        sessionId: "session-cpwb-archived-settings",
+        title: "历史架构讨论",
+        scope: { kind: "project", id: 7 },
+        contextName: "Research",
+        archivedAt: "2026-08-23T09:30:00.000Z",
+      }],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    },
+  }),
     actions: { loadSettings: async () => calls.push("loadSettings") },
   };
   const render = (initialActive) => renderToStaticMarkup(React.createElement(WorkbenchSettingsSection, {
@@ -119,16 +132,20 @@ test("WorkbenchSettingsSection is a native section component with real controls"
     store,
   }));
   assert.match(render("workbench"), /Workbench 设置/);
-  assert.match(render("timezone"), /全局时区/);
+  const timezone = render("timezone");
+  assert.match(timezone, /全局时区/);
+  assert.doesNotMatch(timezone, /<select/);
   const embedding = render("embedding");
   assert.match(embedding, /Embedding Base URL/);
   assert.match(embedding, /设置 \/ 替换凭据/);
   assert.match(embedding, /重建全部向量索引/);
   assert.match(embedding, /全部知识库/);
+  assert.doesNotMatch(embedding, /<select/);
   const network = render("network");
   assert.match(network, /网络 \/ Proxy/);
   assert.match(network, /当前生效：direct/);
   assert.match(network, /下次启动：custom/);
+  assert.doesNotMatch(network, /<select/);
   const auth = render("auth");
   assert.match(auth, /Codex 快速接入/);
   assert.match(auth, /扫描并接入 Codex/);
@@ -139,6 +156,13 @@ test("WorkbenchSettingsSection is a native section component with real controls"
   assert.match(automation, /Custom summary/);
   assert.match(automation, /Custom todo/);
   assert.match(automation, /保存提示词/);
+  const archived = render("archive");
+  assert.match(archived, /归档会话/);
+  assert.match(archived, /搜索归档会话/);
+  assert.match(archived, /历史架构讨论/);
+  assert.match(archived, /恢复会话/);
+  assert.match(archived, /归档于/);
+  assert.doesNotMatch(archived, /<select/);
   assert.match(render("workbench"), /DSH credentials/);
 });
 

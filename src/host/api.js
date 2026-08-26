@@ -22,10 +22,12 @@
  */
 
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 
 import { saveFile, FileStorageError, FILE_ERROR_CODES } from "./files.js";
 import { RetrievalError } from "./retrieval.js";
 import { WorkbenchSessionError, SESSION_ERROR_CODES } from "./session-errors.js";
+import { ContextSourceError } from "./context.js";
 import { nextScheduleOccurrence, scheduleRuleFromInput } from "./scheduler.js";
 import { DEFAULT_TIME_ZONE } from "./timezone.js";
 import { embeddingIdentity } from "./embedding.js";
@@ -45,11 +47,12 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** An HTTP error carrying a stable machine-readable code and a clean message. */
 class ApiError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    if (details !== undefined) this.details = details;
   }
 }
 
@@ -65,8 +68,12 @@ const SESSION_ERROR_STATUS = {
   [SESSION_ERROR_CODES.RETRIEVAL_FAILED]: 502,
   [SESSION_ERROR_CODES.CHAT_PERSIST_FAILED]: 500,
   [SESSION_ERROR_CODES.SESSION_CREATE_FAILED]: 500,
-  [SESSION_ERROR_CODES.CHAT_NOT_FOUND]: 404,
-  [SESSION_ERROR_CODES.CHAT_KB_MISMATCH]: 409,
+  [SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED]: 502,
+  [SESSION_ERROR_CODES.DRAFT_NOT_RETRYABLE]: 409,
+  [SESSION_ERROR_CODES.CONTEXT_SOURCE_UNAVAILABLE]: 422,
+  [SESSION_ERROR_CODES.SESSION_RENAME_FAILED]: 500,
+  [SESSION_ERROR_CODES.SESSION_DELETE_FAILED]: 500,
+  [SESSION_ERROR_CODES.SESSION_DELETE_UNAVAILABLE]: 501,
   [SESSION_ERROR_CODES.SESSION_RESUME_FAILED]: 500,
 };
 
@@ -74,6 +81,44 @@ const SESSION_ERROR_STATUS = {
 
 function isPositiveInt(value) {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+function normalizeSessionScope(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError(422, "INVALID_SCOPE", "scope is required");
+  }
+  if (!["project", "knowledge_base", "independent"].includes(value.kind)) {
+    throw new ApiError(422, "INVALID_SCOPE", "scope.kind must be project, knowledge_base, or independent");
+  }
+  if (value.kind === "independent") {
+    if (value.id !== undefined && value.id !== null) {
+      throw new ApiError(422, "INVALID_SCOPE", "independent scope cannot have an id");
+    }
+    return { kind: "independent", id: null };
+  }
+  if (!isPositiveInt(value.id)) {
+    throw new ApiError(422, "INVALID_SCOPE", value.kind + " scope requires a positive id");
+  }
+  return { kind: value.kind, id: value.id };
+}
+
+function optionalSourceList(body, field) {
+  const value = body[field];
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new ApiError(422, "INVALID_FIELD", field + " must be an array");
+  return value;
+}
+
+function normalizeContextSource(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError(422, "INVALID_CONTEXT_SOURCE", "source is required");
+  }
+  if (!["knowledge_base", "workspace_file", "uploaded_file", "session"].includes(value.kind)) {
+    throw new ApiError(422, "INVALID_CONTEXT_SOURCE", "invalid context source kind");
+  }
+  const id = String(value.id ?? "").trim();
+  if (!id) throw new ApiError(422, "INVALID_CONTEXT_SOURCE", "context source id is required");
+  return { kind: value.kind, id };
 }
 
 /** True for a strict YYYY-MM-DD string that names a real calendar day. */
@@ -99,8 +144,27 @@ function ok(res, payload, status = 200) {
   sendJson(res, status, payload);
 }
 
-function fail(res, status, code, message) {
-  sendJson(res, status, { error: { code, message } });
+function originalFileHeaders(document, download) {
+  const encodedName = encodeURIComponent(document.originalName).replace(/'/g, "%27");
+  const fallbackName = document.originalName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return {
+    "content-type": document.mimeType || "application/octet-stream",
+    "content-disposition": `${download ? "attachment" : "inline"}; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`,
+    "content-security-policy": "sandbox; default-src 'none'",
+    "x-content-type-options": "nosniff",
+    "cache-control": "private, no-store",
+  };
+}
+
+function fail(res, status, code, message, details) {
+  sendJson(res, status, { error: { code, message, ...(details === undefined ? {} : { details }) } });
+}
+
+function safeSessionErrorDetails(error) {
+  if (error?.code !== SESSION_ERROR_CODES.DRAFT_ACTIVATION_FAILED || !error.details) return undefined;
+  const { sessionId, lifecycleStatus, pendingQuestion } = error.details;
+  if (typeof sessionId !== "string" || lifecycleStatus !== "draft_failed" || typeof pendingQuestion !== "string") return undefined;
+  return { sessionId, lifecycleStatus, pendingQuestion };
 }
 
 /** Map any thrown value into an ApiError with a stable, non-leaking code. */
@@ -118,8 +182,11 @@ function toApiError(err) {
   if (err instanceof RetrievalError) {
     return new ApiError(422, err.code, err.message);
   }
+  if (err instanceof ContextSourceError) {
+    return new ApiError(422, err.code, err.message);
+  }
   if (err instanceof WorkbenchSessionError) {
-    return new ApiError(SESSION_ERROR_STATUS[err.code] ?? 500, err.code, err.message);
+    return new ApiError(SESSION_ERROR_STATUS[err.code] ?? 500, err.code, err.message, safeSessionErrorDetails(err));
   }
   return new ApiError(500, "INTERNAL_ERROR", "internal server error");
 }
@@ -376,9 +443,50 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
 
   const hasRunSchedule = typeof services.runSchedule === "function";
   const hasRunSummary = typeof services.runSummary === "function";
-  const hasSessions = typeof sessions?.createSession === "function" && typeof sessions?.submitPrompt === "function";
+  const hasSessions = typeof sessions?.materializeDraft === "function"
+    && typeof sessions?.confirmDraft === "function"
+    && typeof sessions?.renameSession === "function"
+    && typeof sessions?.moveSession === "function"
+    && typeof sessions?.deleteSession === "function";
+  const hasSessionContext = typeof sessions?.getContext === "function"
+    && typeof sessions?.setContext === "function"
+    && typeof sessions?.removeContext === "function";
+  const hasSessionArchive = typeof sessions?.archiveSession === "function"
+    && typeof sessions?.restoreSession === "function";
+  const maintenance = services.maintenance ?? null;
   const logError = typeof logger?.error === "function" ? logger.error.bind(logger) : () => {};
   const configuredTimeZone = () => settings?.get?.("timezone") ?? DEFAULT_TIME_ZONE;
+
+  const permanentDeletionCapability = () => maintenance?.capability?.() ?? {
+    available: false,
+    requiresRestart: true,
+    backend: null,
+    reason: "Permanent deletion requires dsh-workbench supervised mode",
+  };
+
+  function publicMaintenanceJob(job) {
+    if (!job || typeof job !== "object") return job;
+    const output = {};
+    for (const key of [
+      "jobId",
+      "state",
+      "revision",
+      "armed",
+      "createdAt",
+      "completedAt",
+      "recoveryCommand",
+      "container",
+    ]) {
+      if (job[key] !== undefined) output[key] = job[key];
+    }
+    if (job.error && typeof job.error === "object") {
+      output.error = {
+        code: String(job.error.code ?? "PURGE_FAILED"),
+        message: String(job.error.message ?? "Maintenance failed"),
+      };
+    }
+    return output;
+  }
 
   // ----- documents -----
 
@@ -447,6 +555,23 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       return;
     }
     ok(res, repos.documents.list());
+  }
+
+  async function handleDocumentContent(req, res, { params, url }) {
+    const id = parseId(params.id);
+    const document = repos.documents.get(id);
+    if (!document) throw new ApiError(404, "NOT_FOUND", "document not found: " + id);
+    let bytes;
+    try {
+      bytes = await readFile(join(dataDir, "files", document.sha256));
+    } catch {
+      throw new ApiError(404, "FILE_NOT_FOUND", "original file is unavailable");
+    }
+    res.writeHead(200, {
+      ...originalFileHeaders(document, url.searchParams.get("download") === "1"),
+      "content-length": bytes.byteLength,
+    });
+    res.end(bytes);
   }
 
   async function handleDocumentGet(req, res, { params }) {
@@ -530,6 +655,14 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       throw new ApiError(501, "NOT_IMPLEMENTED", "schedule run service is not available");
     }
     const result = await services.runSchedule(schedule);
+    if (result?.status === "failed") {
+      throw new ApiError(
+        502,
+        "SCHEDULE_RUN_FAILED",
+        result.error || "定时任务执行失败",
+        { runId: result.id ?? null, sessionId: result.sessionId ?? null },
+      );
+    }
     ok(res, result);
   }
 
@@ -538,7 +671,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     const projectId = requirePositiveInt(body, "projectId");
     const project = repos.projects.get(projectId);
     if (!project) throw new ApiError(404, "NOT_FOUND", "project not found: " + projectId);
-    // No summaryDate => pass null and let the Task 9 service decide the local day.
+    // No summaryDate: pass null so the scheduler decides the configured local day.
     const summaryDate = optionalDate(body, "summaryDate");
     if (!hasRunSummary) {
       throw new ApiError(501, "NOT_IMPLEMENTED", "summary run service is not available");
@@ -577,23 +710,119 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, repos.projects.update({ id, name }));
   }
 
-  async function handleProjectDelete(req, res, { params }) {
+  function deletionPlanResponse(kind, plan, extended = null) {
+    const container = kind === "project" ? plan.project : plan.knowledgeBase;
+    return {
+      kind,
+      id: container.id,
+      name: container.name,
+      sessionCount: plan.sessionIds.length,
+      ...(extended ? { descendantSessionCount: extended.descendantSessionIds?.length ?? 0 } : {}),
+      relationshipCount: plan.relationshipCount,
+      documentCount: plan.linkedDocuments.length,
+      orphanDocumentCount: plan.orphanDocuments.length,
+      ...(extended ? { planVersion: extended.planVersion } : {}),
+      permanentDeletion: permanentDeletionCapability(),
+    };
+  }
+
+  function deletionPolicy(url) {
+    const value = url.searchParams.get("sessionPolicy") || "detach";
+    if (value !== "detach" && value !== "delete") {
+      throw new ApiError(422, "INVALID_FIELD", "sessionPolicy must be detach or delete");
+    }
+    return value;
+  }
+
+  async function handleProjectDeletionPlan(req, res, { params }) {
     const id = parseId(params.id);
-    if (!repos.projects.get(id)) throw new ApiError(404, "NOT_FOUND", "project not found: " + id);
+    const extended = maintenance?.containerPlan
+      ? await maintenance.containerPlan("project", id)
+      : null;
+    const plan = extended
+      ? {
+          project: extended.container ?? { id: extended.id, name: extended.name },
+          sessionIds: extended.sessionIds ?? [],
+          linkedDocuments: extended.linkedDocuments ?? [],
+          orphanDocuments: extended.orphanDocuments ?? [],
+          relationshipCount: extended.relationshipCount ?? 0,
+        }
+      : repos.projects.deletionPlan(id);
+    if (!plan) throw new ApiError(404, "NOT_FOUND", "project not found: " + id);
+    ok(res, deletionPlanResponse("project", plan, extended));
+  }
+
+  async function handleProjectDelete(req, res, { params, url }) {
+    const id = parseId(params.id);
+    const preview = repos.projects.deletionPlan(id);
+    if (!preview) throw new ApiError(404, "NOT_FOUND", "project not found: " + id);
+    const sessionPolicy = deletionPolicy(url);
+    if (sessionPolicy === "delete") {
+      throw new ApiError(409, "PURGE_JOB_REQUIRED", "permanent deletion requires a maintenance purge job");
+    }
     const plan = typeof services.deleteProject === "function"
-      ? await services.deleteProject(id)
-      : repos.projects.removeCascade(id);
+      ? await services.deleteProject({ projectId: id, sessionPolicy })
+      : (() => {
+          for (const sessionId of preview.sessionIds) {
+            if (sessionPolicy === "delete") repos.workbenchSessions.remove(sessionId);
+            else repos.workbenchSessions.updateScope({ sessionId, scope: { kind: "independent", id: null } });
+          }
+          return repos.projects.removeContainer(id);
+        })();
     ok(res, {
       removed: true,
       projectId: id,
+      sessionPolicy,
+      detachedSessionCount: sessionPolicy === "detach" ? preview.sessionIds.length : 0,
+      deletedSessionCount: sessionPolicy === "delete" ? preview.sessionIds.length : 0,
       orphanDocumentIds: (plan?.orphanDocuments || []).map((document) => document.id),
     });
   }
 
   async function handleKnowledgeBasesList(req, res) {
     ok(res, repos.knowledgeBases.list().map((knowledgeBase) => {
+      const documents = repos.documents.listByKnowledgeBase(knowledgeBase.id);
+      const linkedProjects = repos.projectKnowledgeBases.listByKnowledgeBase(knowledgeBase.id).map((project) => ({
+        ...project,
+        sessionCount: repos.workbenchSessions.list({ scopeKind: "project", scopeId: project.id, limit: 500 }).length,
+      }));
+      const readyFileCount = documents.filter((document) => document.status === "ready").length;
+      const hasAttention = documents.some((document) => document.status === "failed" || document.status === "stale");
+      const chunkCount = documents.reduce((total, document) => total + repos.chunks.listByDocument(document.id).length, 0);
+      const latestIndexedAt = documents.reduce((latest, document) => {
+        if (!document.indexedAt) return latest;
+        return !latest || document.indexedAt > latest ? document.indexedAt : latest;
+      }, null);
       const recentSession = repos.workbenchSessions.latest({ scopeKind: "knowledge_base", scopeId: knowledgeBase.id });
-      return recentSession ? { ...knowledgeBase, recentSession } : knowledgeBase;
+      const overview = {
+        fileCount: documents.length,
+        readyFileCount,
+        chunkCount,
+        linkedProjectCount: linkedProjects.length,
+        sessionCount: repos.workbenchSessions.list({ scopeKind: "knowledge_base", scopeId: knowledgeBase.id, limit: 500 }).length,
+        indexPercent: documents.length === 0 ? 0 : Math.round((readyFileCount / documents.length) * 100),
+        state: documents.length === 0
+          ? "empty"
+          : hasAttention
+            ? "attention"
+            : readyFileCount === documents.length
+              ? "ready"
+              : "indexing",
+        latestIndexedAt,
+      };
+      const recentDocuments = [...documents]
+        .sort((a, b) => String(b.indexedAt || b.createdAt).localeCompare(String(a.indexedAt || a.createdAt)))
+        .slice(0, 3)
+        .map(({ id, originalName, mimeType, size, status, createdAt, indexedAt, error }) => ({
+          id, originalName, mimeType, size, status, createdAt, indexedAt, error,
+        }));
+      return {
+        ...knowledgeBase,
+        ...(recentSession ? { recentSession } : {}),
+        overview,
+        linkedProjects,
+        recentDocuments,
+      };
     }));
   }
 
@@ -604,15 +833,47 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, repos.knowledgeBases.create({ name, description }), 201);
   }
 
-  async function handleKnowledgeBaseDelete(req, res, { params }) {
+  async function handleKnowledgeBaseDeletionPlan(req, res, { params }) {
     const id = parseId(params.id);
-    if (!repos.knowledgeBases.get(id)) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + id);
+    const extended = maintenance?.containerPlan
+      ? await maintenance.containerPlan("knowledge_base", id)
+      : null;
+    const plan = extended
+      ? {
+          knowledgeBase: extended.container ?? { id: extended.id, name: extended.name },
+          sessionIds: extended.sessionIds ?? [],
+          linkedDocuments: extended.linkedDocuments ?? [],
+          orphanDocuments: extended.orphanDocuments ?? [],
+          relationshipCount: extended.relationshipCount ?? 0,
+        }
+      : repos.knowledgeBases.deletionPlan(id);
+    if (!plan) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + id);
+    ok(res, deletionPlanResponse("knowledge_base", plan, extended));
+  }
+
+  async function handleKnowledgeBaseDelete(req, res, { params, url }) {
+    const id = parseId(params.id);
+    const preview = repos.knowledgeBases.deletionPlan(id);
+    if (!preview) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + id);
+    const sessionPolicy = deletionPolicy(url);
+    if (sessionPolicy === "delete") {
+      throw new ApiError(409, "PURGE_JOB_REQUIRED", "permanent deletion requires a maintenance purge job");
+    }
     const plan = typeof services.deleteKnowledgeBase === "function"
-      ? await services.deleteKnowledgeBase(id)
-      : repos.knowledgeBases.removeCascade(id);
+      ? await services.deleteKnowledgeBase({ knowledgeBaseId: id, sessionPolicy })
+      : (() => {
+          for (const sessionId of preview.sessionIds) {
+            if (sessionPolicy === "delete") repos.workbenchSessions.remove(sessionId);
+            else repos.workbenchSessions.updateScope({ sessionId, scope: { kind: "independent", id: null } });
+          }
+          return repos.knowledgeBases.removeContainer(id);
+        })();
     ok(res, {
       removed: true,
       knowledgeBaseId: id,
+      sessionPolicy,
+      detachedSessionCount: sessionPolicy === "detach" ? preview.sessionIds.length : 0,
+      deletedSessionCount: sessionPolicy === "delete" ? preview.sessionIds.length : 0,
       orphanDocumentIds: (plan?.orphanDocuments || []).map((document) => document.id),
     });
   }
@@ -926,29 +1187,6 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, repos.automation?.update?.(patch) ?? patch);
   }
 
-  async function handleKnowledgeChatsList(req, res, { url }) {
-    const kbRaw = url.searchParams.get("knowledgeBaseId");
-    if (kbRaw != null) {
-      const knowledgeBaseId = queryPositiveInt(kbRaw, "knowledgeBaseId");
-      if (!repos.knowledgeBases.get(knowledgeBaseId)) {
-        throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + knowledgeBaseId);
-      }
-      ok(res, repos.knowledgeChats.listByKnowledgeBase(knowledgeBaseId));
-      return;
-    }
-    ok(res, repos.knowledgeChats.list());
-  }
-
-  async function handleKnowledgeChatCreate(req, res) {
-    const body = await readJsonBody(req);
-    const knowledgeBaseId = requirePositiveInt(body, "knowledgeBaseId");
-    if (!repos.knowledgeBases.get(knowledgeBaseId)) {
-      throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + knowledgeBaseId);
-    }
-    const title = optionalString(body, "title");
-    ok(res, repos.knowledgeChats.create({ knowledgeBaseId, title }), 201);
-  }
-
   // ----- project <-> knowledge-base association -----
 
   async function handleProjectKbs(req, res, { params }) {
@@ -974,99 +1212,223 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     ok(res, { removed });
   }
 
+  async function handleKnowledgeBaseProjects(req, res, { params }) {
+    const knowledgeBaseId = parseId(params.id);
+    if (!repos.knowledgeBases.get(knowledgeBaseId)) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + knowledgeBaseId);
+    ok(res, repos.projectKnowledgeBases.listByKnowledgeBase(knowledgeBaseId));
+  }
+
   async function handleHealth(req, res) {
     const report = await ollama.health();
     ok(res, { ok: true, ...report });
   }
 
-  // ----- chat sessions / prompts -----
+  // ----- unified chat sessions -----
 
   async function handleChatSessionCreate(req, res) {
     if (!hasSessions) {
       throw new ApiError(501, "NOT_IMPLEMENTED", "session service is not available");
     }
     const body = await readJsonBody(req);
-    const projectId = body.projectId === undefined ? undefined : requirePositiveInt(body, "projectId");
-    const knowledgeBaseId = body.knowledgeBaseId === undefined ? undefined : requirePositiveInt(body, "knowledgeBaseId");
-    if (projectId !== undefined && knowledgeBaseId !== undefined) {
-      throw new ApiError(422, "INVALID_SCOPE", "provide at most one of projectId or knowledgeBaseId");
-    }
-    const title = optionalString(body, "title");
-    const chatId = body.chatId === undefined ? undefined : requirePositiveInt(body, "chatId");
-    const resumeSessionId = optionalString(body, "resumeSessionId");
-    const input = { title };
-    if (projectId !== undefined) input.projectId = projectId;
-    if (knowledgeBaseId !== undefined) input.knowledgeBaseId = knowledgeBaseId;
-    if (chatId !== undefined) input.chatId = chatId;
-    if (resumeSessionId != null) input.resumeSessionId = resumeSessionId;
-    const result = await sessions.createSession(input);
+    const allowedFields = new Set(["scope", "title", "pinnedSources"]);
+    const unknownField = Object.keys(body).find((field) => !allowedFields.has(field));
+    if (unknownField) throw new ApiError(422, "INVALID_FIELD", "unknown field: " + unknownField);
+    const input = {
+      scope: normalizeSessionScope(body.scope),
+      title: requireString(body, "title"),
+      pinnedSources: optionalSourceList(body, "pinnedSources"),
+    };
+    const result = await sessions.materializeDraft(input);
     ok(res, result, 201);
   }
 
   async function handleChatSessionList(req, res, { url }) {
-    const projectId = url.searchParams.get("projectId");
-    const knowledgeBaseId = url.searchParams.get("knowledgeBaseId");
-    if (projectId != null && knowledgeBaseId != null) {
-      throw new ApiError(422, "INVALID_SCOPE", "provide at most one of projectId or knowledgeBaseId");
-    }
-    if (projectId != null) {
-      const id = parseId(projectId);
-      if (!repos.projects.get(id)) throw new ApiError(404, "NOT_FOUND", "project not found: " + id);
-      ok(res, repos.workbenchSessions.list({ scopeKind: "project", scopeId: id }));
-      return;
-    }
-    if (knowledgeBaseId != null) {
-      const id = parseId(knowledgeBaseId);
-      if (!repos.knowledgeBases.get(id)) throw new ApiError(404, "NOT_FOUND", "knowledge base not found: " + id);
-      ok(res, repos.workbenchSessions.list({ scopeKind: "knowledge_base", scopeId: id }));
-      return;
-    }
-
     const limit = Math.min(queryPositiveInt(url.searchParams.get("limit"), "limit") ?? 8, 100);
     const offset = queryNonNegativeInt(url.searchParams.get("offset"), "offset", 0);
     const query = url.searchParams.get("query") ?? "";
-    const scopeKind = url.searchParams.get("context");
+    const archivedRaw = url.searchParams.get("archived");
+    if (archivedRaw != null && archivedRaw !== "true" && archivedRaw !== "false") {
+      throw new ApiError(422, "INVALID_FIELD", "archived must be true or false");
+    }
+    const archived = archivedRaw === "true";
+    const scopeKind = url.searchParams.get("scopeKind");
     if (scopeKind != null && !["project", "knowledge_base", "independent"].includes(scopeKind)) {
-      throw new ApiError(422, "INVALID_SCOPE", "context must be project, knowledge_base, or independent");
+      throw new ApiError(422, "INVALID_SCOPE", "scopeKind must be project, knowledge_base, or independent");
+    }
+    const scopeIdRaw = url.searchParams.get("scopeId");
+    if (scopeKind === "project" || scopeKind === "knowledge_base") {
+      const scopeId = queryPositiveInt(scopeIdRaw, "scopeId");
+      if (scopeId === undefined) throw new ApiError(422, "INVALID_SCOPE", "scopeId is required for this scopeKind");
+      ok(res, {
+        items: repos.workbenchSessions.listAll({ scopeKind, scopeId, query, lifecycleStatus: "active", archived, limit, offset }),
+        total: repos.workbenchSessions.countAll({ scopeKind, scopeId, query, lifecycleStatus: "active", archived }),
+        limit,
+        offset,
+      });
+      return;
+    }
+    if (scopeKind === "independent" && scopeIdRaw != null) {
+      throw new ApiError(422, "INVALID_SCOPE", "independent scope cannot have a scopeId");
     }
     ok(res, {
-      items: repos.workbenchSessions.listAll({ scopeKind, query, limit, offset }),
-      total: repos.workbenchSessions.countAll({ scopeKind, query }),
+      items: repos.workbenchSessions.listAll({ scopeKind, query, lifecycleStatus: "active", archived, limit, offset }),
+      total: repos.workbenchSessions.countAll({ scopeKind, query, lifecycleStatus: "active", archived }),
       limit,
       offset,
     });
   }
 
-  async function handleChatPromptCreate(req, res) {
+  async function handleChatSessionPatch(req, res, { params }) {
     if (!hasSessions) {
       throw new ApiError(501, "NOT_IMPLEMENTED", "session service is not available");
     }
     const body = await readJsonBody(req);
-    const sessionId = requireString(body, "sessionId");
-    const question = requireString(body, "question");
-    const projectId = body.projectId === undefined ? undefined : requirePositiveInt(body, "projectId");
-    const knowledgeBaseId = body.knowledgeBaseId === undefined ? undefined : requirePositiveInt(body, "knowledgeBaseId");
-    if (projectId !== undefined && knowledgeBaseId !== undefined) {
-      throw new ApiError(422, "INVALID_SCOPE", "provide at most one of projectId or knowledgeBaseId");
+    const sessionId = params.sessionId;
+    if (body.operation === "rename") {
+      ok(res, await sessions.renameSession({ sessionId, title: requireString(body, "title") }));
+      return;
     }
-    const input = { sessionId, question };
-    if (projectId !== undefined) input.projectId = projectId;
-    if (knowledgeBaseId !== undefined) input.knowledgeBaseId = knowledgeBaseId;
-    const result = await sessions.submitPrompt(input);
-    ok(res, result);
+    if (body.operation === "move") {
+      ok(res, await sessions.moveSession({ sessionId, scope: normalizeSessionScope(body.scope) }));
+      return;
+    }
+    if (body.operation === "archive" || body.operation === "restore") {
+      if (!hasSessionArchive) throw new ApiError(501, "NOT_IMPLEMENTED", "session archive service is not available");
+      ok(res, body.operation === "archive"
+        ? await sessions.archiveSession(sessionId)
+        : await sessions.restoreSession(sessionId));
+      return;
+    }
+    if (body.operation === "confirmDraft") {
+      ok(res, await sessions.confirmDraft({ sessionId }));
+      return;
+    }
+    throw new ApiError(422, "INVALID_OPERATION", "operation must be rename, move, archive, restore, or confirmDraft");
+  }
+
+  async function handleChatSessionDelete(req, res, { params }) {
+    if (!hasSessions) throw new ApiError(501, "NOT_IMPLEMENTED", "session service is not available");
+    const deleted = await sessions.deleteSession(params.sessionId);
+    if (!deleted) throw new ApiError(404, "NOT_FOUND", "session not found: " + params.sessionId);
+    ok(res, { deleted: true });
+  }
+
+  async function handleChatSessionOpen(req, res, { params }) {
+    if (!hasSessions || typeof sessions.openSession !== "function") {
+      throw new ApiError(501, "NOT_IMPLEMENTED", "session service is not available");
+    }
+    ok(res, await sessions.openSession({ sessionId: params.sessionId }));
+  }
+
+  async function handleChatSessionContextGet(req, res, { params }) {
+    if (!hasSessionContext) {
+      throw new ApiError(501, "NOT_IMPLEMENTED", "session context service is not available");
+    }
+    ok(res, sessions.getContext(params.sessionId));
+  }
+
+  async function handleChatSessionContextPut(req, res, { params }) {
+    if (!hasSessionContext) {
+      throw new ApiError(501, "NOT_IMPLEMENTED", "session context service is not available");
+    }
+    const body = await readJsonBody(req);
+    if (!["pinned", "disabled"].includes(body.mode)) {
+      throw new ApiError(422, "INVALID_CONTEXT_MODE", "mode must be pinned or disabled");
+    }
+    ok(res, sessions.setContext({
+      sessionId: params.sessionId,
+      source: normalizeContextSource(body.source),
+      mode: body.mode,
+    }));
+  }
+
+  async function handleChatSessionContextDelete(req, res, { params, url }) {
+    if (!hasSessionContext) {
+      throw new ApiError(501, "NOT_IMPLEMENTED", "session context service is not available");
+    }
+    const source = normalizeContextSource({
+      kind: url.searchParams.get("sourceKind"),
+      id: url.searchParams.get("sourceId"),
+    });
+    ok(res, {
+      removed: Boolean(sessions.removeContext({ sessionId: params.sessionId, source })),
+    });
+  }
+
+  async function handlePurgeJobCreate(req, res) {
+    if (!maintenance?.createPurgeJob || !maintenance?.armPurgeJob) {
+      throw new ApiError(501, "PURGE_UNAVAILABLE", "maintenance purge service is unavailable");
+    }
+    const body = await readJsonBody(req);
+    const allowedFields = new Set([
+      "kind",
+      "id",
+      "planVersion",
+      "confirmation",
+      "restartConfirmed",
+    ]);
+    const unknownField = Object.keys(body).find((field) => !allowedFields.has(field));
+    if (unknownField) throw new ApiError(422, "INVALID_FIELD", "unknown field: " + unknownField);
+    const kind = requireString(body, "kind");
+    if (!["project", "knowledge_base"].includes(kind)) {
+      throw new ApiError(422, "INVALID_FIELD", "kind must be project or knowledge_base");
+    }
+    const id = requirePositiveInt(body, "id");
+    const planVersion = requireString(body, "planVersion");
+    const confirmation = requireString(body, "confirmation");
+    if (body.restartConfirmed !== true) {
+      throw new ApiError(422, "INVALID_FIELD", "restartConfirmed must be true");
+    }
+    let job;
+    try {
+      job = await maintenance.createPurgeJob({
+        kind,
+        id,
+        planVersion,
+        name: confirmation,
+        restartConfirmed: true,
+      });
+    } catch (error) {
+      throw new ApiError(409, "PURGE_PLAN_REJECTED", error?.message ?? "purge job rejected");
+    }
+    res.once?.("finish", () => {
+      void maintenance.armPurgeJob(job.jobId).catch(logError);
+    });
+    ok(res, publicMaintenanceJob(job), 202);
+  }
+
+  async function handlePurgeJobGet(req, res, { params }) {
+    if (!maintenance?.getJob) {
+      throw new ApiError(501, "PURGE_UNAVAILABLE", "maintenance purge service is unavailable");
+    }
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?$/.test(params.jobId)) {
+      throw new ApiError(422, "INVALID_ID", "invalid purge job id");
+    }
+    try {
+      ok(res, publicMaintenanceJob(await maintenance.getJob(params.jobId)));
+    } catch {
+      throw new ApiError(404, "NOT_FOUND", "purge job not found");
+    }
   }
 
   // ----- dispatcher (single source of truth for the approved surface) -----
 
   const routes = [
     { pattern: "/health", methods: { GET: handleHealth } },
+    { pattern: "/maintenance/purge-jobs", methods: { POST: handlePurgeJobCreate } },
+    { pattern: "/maintenance/purge-jobs/:jobId", methods: { GET: handlePurgeJobGet } },
     { pattern: "/chat/sessions", methods: { GET: handleChatSessionList, POST: handleChatSessionCreate } },
-    { pattern: "/chat/prompts", methods: { POST: handleChatPromptCreate } },
+    { pattern: "/chat/sessions/:sessionId/context", methods: { GET: handleChatSessionContextGet, PUT: handleChatSessionContextPut, DELETE: handleChatSessionContextDelete } },
+    { pattern: "/chat/sessions/:sessionId/open", methods: { POST: handleChatSessionOpen } },
+    { pattern: "/chat/sessions/:sessionId", methods: { PATCH: handleChatSessionPatch, DELETE: handleChatSessionDelete } },
     { pattern: "/projects", methods: { GET: handleProjectsList, POST: handleProjectCreate } },
+    { pattern: "/projects/:id/deletion-plan", methods: { GET: handleProjectDeletionPlan } },
     { pattern: "/projects/:id", methods: { PATCH: handleProjectPatch, DELETE: handleProjectDelete } },
     { pattern: "/knowledge-bases", methods: { GET: handleKnowledgeBasesList, POST: handleKnowledgeBaseCreate } },
+    { pattern: "/knowledge-bases/:id/deletion-plan", methods: { GET: handleKnowledgeBaseDeletionPlan } },
     { pattern: "/knowledge-bases/:id", methods: { DELETE: handleKnowledgeBaseDelete } },
     { pattern: "/documents", methods: { GET: handleDocumentsList, POST: handleUpload } },
+    { pattern: "/documents/:id/content", methods: { GET: handleDocumentContent } },
     { pattern: "/documents/:id/reindex", methods: { POST: handleReindex } },
     { pattern: "/knowledge-bases/:id/reindex", methods: { POST: handleKnowledgeBaseReindex } },
     { pattern: "/documents/:id/links/:scope/:scopeId", methods: { DELETE: handleUnlink } },
@@ -1082,9 +1444,9 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     { pattern: "/summaries/run", methods: { POST: handleSummaryRun } },
     { pattern: "/summaries/:id", methods: { DELETE: handleSummaryDelete } },
     { pattern: "/projects/:projectId/automation", methods: { GET: handleAutomationGet, PATCH: handleAutomationPatch } },
-    { pattern: "/knowledge-chats", methods: { GET: handleKnowledgeChatsList, POST: handleKnowledgeChatCreate } },
     { pattern: "/projects/:projectId/knowledge-bases", methods: { GET: handleProjectKbs } },
     { pattern: "/projects/:projectId/knowledge-bases/:knowledgeBaseId", methods: { POST: handleProjectKbLink, DELETE: handleProjectKbUnlink } },
+    { pattern: "/knowledge-bases/:id/projects", methods: { GET: handleKnowledgeBaseProjects } },
     { pattern: "/settings/embedding", methods: { GET: handleEmbeddingSettings, PATCH: handleEmbeddingPatch } },
     { pattern: "/settings/embedding/test", methods: { POST: handleEmbeddingTest } },
     { pattern: "/settings/index", methods: { GET: handleIndexStatus } },
@@ -1102,6 +1464,16 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
   async function dispatch(req, res, url) {
     const path = subPath(url.pathname);
     const method = req.method.toUpperCase();
+    if (
+      maintenance?.isLocked?.() === true &&
+      !["GET", "HEAD", "OPTIONS"].includes(method)
+    ) {
+      throw new ApiError(
+        503,
+        "PURGE_MAINTENANCE_ACTIVE",
+        "Workbench maintenance is active; retry after restart",
+      );
+    }
     const allowed = [];
     for (const route of routes) {
       const params = matchParams(path, route.pattern);
@@ -1132,7 +1504,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       }
       const apiError = toApiError(err);
       if (shouldLogError(apiError, err)) logError(err);
-      fail(res, apiError.status, apiError.code, apiError.message);
+      fail(res, apiError.status, apiError.code, apiError.message, apiError.details);
     }
   }
 

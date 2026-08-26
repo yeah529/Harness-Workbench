@@ -1,7 +1,6 @@
 /**
  * Task 8B client tests: chat API wrapper, workbench session registry + selector,
- * session-wait orchestration, project/KB entry via store actions, citation
- * persistence, composer draft policy, and rail-width helpers.
+ * session-wait orchestration, unified draft lifecycle, and rail-width helpers.
  *
  * Pure Node tests (no React): they drive createCpwbApi / createWorkbenchStore
  * and the pure helper modules against a mock fetch.
@@ -22,14 +21,6 @@ import {
   waitForSessionReady,
   openWorkbenchSession,
 } from "../src/client/workbenchSessions.js";
-import {
-  buildSubmitPayload,
-  composerDraftPolicy,
-  cancelResultToOutcome,
-  runCancel,
-  ATTACHMENT_UNSUPPORTED_TEXT,
-  EMPTY_RETRIEVAL_TEXT,
-} from "../src/client/composer.js";
 import {
   clampRailWidth,
   adjustRailWidth,
@@ -80,61 +71,86 @@ function makeSessions(initialById = {}) {
 
 // -------------------------------------------------------------------- api
 
-test("api: chat.sessions.create posts projectId to /chat/sessions", async () => {
+test("api: chat.sessions.create materializes one canonical owner without a prompt", async () => {
   const fetchImpl = makeFetch(({ url, init }) => {
     assert.equal(parse(url).pathname, "/api/cpwb/chat/sessions");
     assert.equal(init.method, "POST");
-    assert.deepEqual(JSON.parse(init.body), { projectId: 1 });
-    return jsonResponse(201, { sessionId: "s1", scope: { kind: "project", scopeId: 1 }, reused: false });
+    assert.deepEqual(JSON.parse(init.body), {
+      scope: { kind: "project", id: 1 },
+      title: "开始实现",
+      pinnedSources: [],
+    });
+    return jsonResponse(201, { sessionId: "s1", scope: { kind: "project", id: 1 } });
   });
   const api = createCpwbApi({ fetchImpl });
-  const out = await api.chat.sessions.create({ projectId: 1 });
+  const out = await api.chat.sessions.create({ scope: { kind: "project", id: 1 }, title: "开始实现" });
   assert.equal(out.sessionId, "s1");
 });
 
-test("api: chat.sessions.create posts knowledgeBaseId + chatId for reopen", async () => {
+test("api: chat.sessions.open resumes one durable session", async () => {
   const fetchImpl = makeFetch(({ url, init }) => {
-    assert.equal(parse(url).pathname, "/api/cpwb/chat/sessions");
-    assert.deepEqual(JSON.parse(init.body), { knowledgeBaseId: 2, chatId: 7 });
-    return jsonResponse(201, { sessionId: "s2", scope: { kind: "knowledge_base", scopeId: 2 }, chatId: 7, reused: true });
+    assert.equal(parse(url).pathname, "/api/cpwb/chat/sessions/s2/open");
+    assert.equal(init.method, "POST");
+    assert.deepEqual(JSON.parse(init.body), {});
+    return jsonResponse(200, { sessionId: "s2", scope: { kind: "knowledge_base", id: 2 } });
   });
   const api = createCpwbApi({ fetchImpl });
-  const out = await api.chat.sessions.create({ knowledgeBaseId: 2, chatId: 7 });
-  assert.equal(out.reused, true);
+  const out = await api.chat.sessions.open("s2");
+  assert.equal(out.scope.id, 2);
 });
 
-test("api: chat.sessions.create can resume a project workbench session", async () => {
+test("api: chat.sessions mutation and context routes use the session id", async () => {
+  let call = 0;
   const fetchImpl = makeFetch(({ url, init }) => {
-    assert.equal(parse(url).pathname, "/api/cpwb/chat/sessions");
-    assert.deepEqual(JSON.parse(init.body), { projectId: 9, resumeSessionId: "session-cpwb-old" });
-    return jsonResponse(201, { sessionId: "session-cpwb-old", scope: { kind: "project", scopeId: 9 }, reused: true });
+    call += 1;
+    const parsed = parse(url);
+    if (call === 1) assert.deepEqual(JSON.parse(init.body), { operation: "confirmDraft" });
+    if (call === 2) assert.deepEqual(JSON.parse(init.body), { operation: "rename", title: "新标题" });
+    if (call === 3) assert.deepEqual(JSON.parse(init.body), { operation: "move", scope: { kind: "independent", id: null } });
+    if (call === 4) assert.deepEqual(JSON.parse(init.body), { operation: "archive" });
+    if (call === 5) assert.deepEqual(JSON.parse(init.body), { operation: "restore" });
+    if (call <= 5) assert.equal(parsed.pathname, "/api/cpwb/chat/sessions/s-old");
+    if (call === 6) {
+      assert.equal(parsed.pathname, "/api/cpwb/chat/sessions/s-old/context");
+      assert.deepEqual(JSON.parse(init.body), { source: { kind: "knowledge_base", id: "2" }, mode: "pinned" });
+    }
+    if (call === 7) {
+      assert.equal(parsed.pathname, "/api/cpwb/chat/sessions/s-old/context");
+      assert.equal(parsed.searchParams.get("sourceKind"), "knowledge_base");
+      assert.equal(parsed.searchParams.get("sourceId"), "2");
+    }
+    if (call === 8) assert.equal(parsed.pathname, "/api/cpwb/chat/sessions/s-old");
+    return jsonResponse(200, { sessionId: "s-old", scope: { kind: "independent", id: null } });
   });
   const api = createCpwbApi({ fetchImpl });
-  const out = await api.chat.sessions.create({ projectId: 9, resumeSessionId: "session-cpwb-old" });
-  assert.equal(out.reused, true);
+  await api.chat.sessions.confirm("s-old");
+  await api.chat.sessions.rename({ sessionId: "s-old", title: "新标题" });
+  await api.chat.sessions.move({ sessionId: "s-old", scope: { kind: "independent", id: null } });
+  await api.chat.sessions.archive("s-old");
+  await api.chat.sessions.restore("s-old");
+  await api.chat.sessions.context.set({ sessionId: "s-old", source: { kind: "knowledge_base", id: "2" }, mode: "pinned" });
+  await api.chat.sessions.context.remove({ sessionId: "s-old", source: { kind: "knowledge_base", id: "2" } });
+  await api.chat.sessions.remove("s-old");
 });
 
-test("api: chat.sessions.list supports scoped and global paged queries", async () => {
+test("api: chat.sessions.list supports scoped, archived, and global paged queries", async () => {
   const calls = [];
   const fetchImpl = makeFetch(({ url, init }) => {
     calls.push(url);
     assert.equal(parse(url).pathname, "/api/cpwb/chat/sessions");
     assert.equal(init.method ?? "GET", "GET");
-    if (parse(url).searchParams.has("projectId")) {
-      return jsonResponse(200, [{ sessionId: "session-cpwb-1", scope: { kind: "project", scopeId: 9 } }]);
-    }
-    return jsonResponse(200, { items: [], total: 0, limit: 8, offset: 0 });
+    return jsonResponse(200, { items: [{ sessionId: "session-cpwb-1", scopeKind: "project", scopeId: 9 }], total: 1, limit: 8, offset: 0 });
   });
   const api = createCpwbApi({ fetchImpl });
-  const rows = await api.chat.sessions.list({ projectId: 9 });
-  assert.equal(rows[0].sessionId, "session-cpwb-1");
-  const page = await api.chat.sessions.list({ limit: 8, offset: 0, query: "独立", context: "independent" });
-  assert.equal(page.total, 0);
-  const global = parse(calls[1]).searchParams;
+  const page = await api.chat.sessions.list({ scopeKind: "project", scopeId: 9, archived: true, limit: 8, offset: 0, query: "研究" });
+  assert.equal(page.items[0].sessionId, "session-cpwb-1");
+  const global = parse(calls[0]).searchParams;
   assert.equal(global.get("limit"), "8");
   assert.equal(global.get("offset"), "0");
-  assert.equal(global.get("query"), "独立");
-  assert.equal(global.get("context"), "independent");
+  assert.equal(global.get("query"), "研究");
+  assert.equal(global.get("scopeKind"), "project");
+  assert.equal(global.get("scopeId"), "9");
+  assert.equal(global.get("archived"), "true");
 });
 
 test("navigation store keeps Workbench pages mutually exclusive", () => {
@@ -153,17 +169,6 @@ test("navigation store keeps Workbench pages mutually exclusive", () => {
   dispose();
 });
 
-test("api: chat.prompts.submit posts sessionId/question/scope", async () => {
-  const fetchImpl = makeFetch(({ url, init }) => {
-    assert.equal(parse(url).pathname, "/api/cpwb/chat/prompts");
-    assert.equal(init.method, "POST");
-    assert.deepEqual(JSON.parse(init.body), { sessionId: "s1", question: "hello?", knowledgeBaseId: 2 });
-    return jsonResponse(200, { sessionId: "s1", citations: [], outcome: { text: "hi" } });
-  });
-  const api = createCpwbApi({ fetchImpl });
-  await api.chat.prompts.submit({ sessionId: "s1", question: "hello?", knowledgeBaseId: 2 });
-});
-
 test("selector: isWorkbenchSessionId matches the stable session-cpwb- prefix", () => {
   assert.equal(isWorkbenchSessionId("session-cpwb-1"), true);
   assert.equal(isWorkbenchSessionId("session-cpwb-"), true);
@@ -177,8 +182,8 @@ test("selector: isWorkbenchSessionId matches the stable session-cpwb- prefix", (
 test("registry: getWorkbenchSession returns null for unknown and entry for known", () => {
   clearWorkbenchSessions();
   assert.equal(getWorkbenchSession("nope"), null);
-  registerWorkbenchSession({ sessionId: "s9", scope: { kind: "knowledge_base", scopeId: 3 }, chatId: 5 });
-  assert.deepEqual(getWorkbenchSession("s9"), { scope: { kind: "knowledge_base", scopeId: 3 }, chatId: 5 });
+  registerWorkbenchSession({ sessionId: "s9", scope: { kind: "knowledge_base", id: 3 } });
+  assert.deepEqual(getWorkbenchSession("s9"), { scope: { kind: "knowledge_base", id: 3 } });
 });
 
 // ------------------------------------------------------------ wait / open
@@ -281,171 +286,94 @@ function chatScenarioFetch(overrides = {}) {
       });
     }
     if (pathname === "/api/cpwb/chat/sessions" && method === "POST") {
-      return jsonResponse(201, overrides.createResult ?? { sessionId: "s1", scope: { kind: "project", scopeId: 1 }, reused: false });
+      return jsonResponse(201, overrides.createResult ?? {
+        sessionId: "s1",
+        scope: { kind: "project", id: 1 },
+        lifecycleStatus: "draft_failed",
+      });
     }
-    if (pathname === "/api/cpwb/chat/prompts" && method === "POST") {
-      if (overrides.submitError) return jsonResponse(502, { error: { code: "RETRIEVAL_FAILED", message: "retrieval down" } });
-      return jsonResponse(200, overrides.submitResult ?? { sessionId: "s1", citations: [], outcome: { text: "ok" } });
+    if (pathname === "/api/cpwb/chat/sessions/s1" && method === "PATCH") {
+      return jsonResponse(200, overrides.confirmResult ?? {
+        sessionId: "s1",
+        scope: { kind: "project", id: 1 },
+        lifecycleStatus: "active",
+      });
     }
-    if (pathname === "/api/cpwb/knowledge-chats" && method === "GET") return jsonResponse(200, overrides.knowledgeChats ?? []);
+    if (pathname.endsWith("/open") && method === "POST") {
+      return jsonResponse(200, overrides.openResult ?? { sessionId: "s1", scope: { kind: "project", id: 1 } });
+    }
     return jsonResponse(404, { error: { code: "NOT_FOUND", message: "nf" } });
   });
 }
 
-test("store: openProjectChat registers the workbench session", async () => {
+test("store: confirmation registers the canonical session and reloads recents", async () => {
   clearWorkbenchSessions();
-  const api = createCpwbApi({ fetchImpl: chatScenarioFetch() });
-  const store = createWorkbenchStore(api);
-  const out = await store.actions.openProjectChat({ projectId: 1 });
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl: chatScenarioFetch() }));
+  store.actions.startDraft({ scope: { kind: "project", id: 1 } });
+  await store.actions.materializeDraft({ text: "开始" });
+  store.actions.markDraftAdmitted();
+  const out = await store.actions.confirmDraft();
   assert.equal(out.sessionId, "s1");
-  const snap = store.getSnapshot();
-  assert.ok(snap.workbenchSessions["s1"], "session registry mirrors into the store");
-  assert.deepEqual(snap.workbenchSessions["s1"].scope, { kind: "project", scopeId: 1 });
-  assert.deepEqual(snap.citationsBySession["s1"], []);
+  assert.deepEqual(store.getSnapshot().workbenchSessions.s1.scope, { kind: "project", id: 1 });
 });
 
-test("store: a newly opened session appears in recent navigation", async () => {
-  clearWorkbenchSessions();
-  let created = false;
-  const fetchImpl = makeFetch(({ url, init }) => {
-    const { pathname, searchParams } = parse(url);
-    const method = init.method ?? "GET";
-    if (pathname === "/api/cpwb/chat/sessions" && method === "POST") {
-      created = true;
-      return jsonResponse(201, {
-        sessionId: "session-cpwb-new-project",
-        scope: { kind: "project", scopeId: 1 },
-        reused: false,
-      });
-    }
-    if (pathname === "/api/cpwb/chat/sessions" && method === "GET") {
-      return jsonResponse(200, {
-        items: created ? [{
-          sessionId: "session-cpwb-new-project",
-          scopeKind: "project",
-          scopeId: 1,
-          contextName: "DSH-Research",
-          chatId: null,
-        }] : [],
-        total: created ? 1 : 0,
-        limit: Number(searchParams.get("limit") || 8),
-        offset: Number(searchParams.get("offset") || 0),
-      });
-    }
-    return jsonResponse(404, { error: { code: "NOT_FOUND", message: "nf" } });
-  });
-  const store = createWorkbenchStore(createCpwbApi({ fetchImpl }));
-
-  await store.actions.openProjectChat({ projectId: 1 });
-
-  assert.deepEqual(
-    store.getSnapshot().recentSessions.map((item) => item.sessionId),
-    ["session-cpwb-new-project"],
-  );
-});
-
-test("store: loads refresh-safe recent/all sessions and creates an independent session", async () => {
-  clearWorkbenchSessions();
+test("store: loads recent and filtered all-session pages", async () => {
   const sessionPage = {
     items: [
-      { sessionId: "session-cpwb-i", scopeKind: "independent", scopeId: null, contextName: "独立", chatId: null },
-      { sessionId: "session-cpwb-p", scopeKind: "project", scopeId: 2, contextName: "P", chatId: null },
+      { sessionId: "session-cpwb-i", scopeKind: "independent", scopeId: null, contextName: "独立" },
+      { sessionId: "session-cpwb-p", scopeKind: "project", scopeId: 2, contextName: "P" },
     ],
     total: 2,
     limit: 8,
     offset: 0,
   };
-  const api = createCpwbApi({ fetchImpl: chatScenarioFetch({
-    sessionPage,
-    createResult: { sessionId: "session-cpwb-new", scope: { kind: "independent", scopeId: null }, reused: false },
-  }) });
-  const store = createWorkbenchStore(api);
+  const store = createWorkbenchStore(createCpwbApi({ fetchImpl: chatScenarioFetch({ sessionPage }) }));
   await store.actions.loadRecentSessions({ limit: 8 });
   assert.deepEqual(store.getSnapshot().recentSessions.map((item) => item.sessionId), ["session-cpwb-i", "session-cpwb-p"]);
-  await store.actions.loadAllSessions({ query: "P", context: "project", offset: 0 });
+  await store.actions.loadAllSessions({ query: "P", scopeKind: "project", scopeId: 2, offset: 0 });
   assert.equal(store.getSnapshot().sessionPage.total, 2);
-  const created = await store.actions.openIndependentSession();
-  assert.equal(created.scope.kind, "independent");
-  assert.deepEqual(store.getSnapshot().workbenchSessions[created.sessionId].scope, { kind: "independent", scopeId: null });
 });
 
-test("store: openKnowledgeChat reopens with chatId and reloads chat list", async () => {
+test("store: openSession restores its canonical scope", async () => {
   clearWorkbenchSessions();
-  const api = createCpwbApi({ fetchImpl: chatScenarioFetch({ createResult: { sessionId: "s2", scope: { kind: "knowledge_base", scopeId: 2 }, chatId: 7, reused: true } }) });
+  const api = createCpwbApi({ fetchImpl: chatScenarioFetch({
+    openResult: { sessionId: "s2", scope: { kind: "knowledge_base", id: 2 } },
+  }) });
   const store = createWorkbenchStore(api);
-  const out = await store.actions.openKnowledgeChat({ knowledgeBaseId: 2, chatId: 7 });
-  assert.equal(out.reused, true);
-  assert.equal(out.chatId, 7);
-  assert.ok(store.getSnapshot().workbenchSessions["s2"]);
+  const out = await store.actions.openSession("s2");
+  assert.deepEqual(out.scope, { kind: "knowledge_base", id: 2 });
+  assert.ok(store.getSnapshot().workbenchSessions.s2);
 });
 
-test("store: submitPrompt stores citations by session and rejects without overwriting on failure", async () => {
-  clearWorkbenchSessions();
-  const citations = [{ sourceId: "1", originalName: "n.md", locator: "lines:1-1", text: "hit" }];
-  const api = createCpwbApi({ fetchImpl: chatScenarioFetch({ submitResult: { sessionId: "s1", citations, outcome: { text: "ok" } } }) });
+test("store: archive removes a session from recents and restore brings it back", async () => {
+  let archivedAt = null;
+  const row = () => ({
+    sessionId: "session-cpwb-soft-archive",
+    scope: { kind: "independent", id: null },
+    title: "可恢复会话",
+    archivedAt,
+  });
+  const api = {
+    health: async () => ({ ok: true }),
+    chat: { sessions: {
+      async list({ archived = false } = {}) {
+        const visible = archived ? archivedAt != null : archivedAt == null;
+        return { items: visible ? [row()] : [], total: visible ? 1 : 0, limit: 8, offset: 0 };
+      },
+      async archive() { archivedAt = "2026-08-23T09:30:00.000Z"; return row(); },
+      async restore() { archivedAt = null; return row(); },
+    } },
+  };
   const store = createWorkbenchStore(api);
-  await store.actions.openProjectChat({ projectId: 1 });
-  await store.actions.submitPrompt({ sessionId: "s1", question: "q", projectId: 1 });
-  assert.deepEqual(store.getSnapshot().citationsBySession["s1"], citations);
+  await store.actions.loadRecentSessions({ limit: 8 });
+  assert.deepEqual(store.getSnapshot().recentSessions.map((item) => item.sessionId), ["session-cpwb-soft-archive"]);
 
-  const failingApi = createCpwbApi({ fetchImpl: chatScenarioFetch({ submitError: true }) });
-  const failingStore = createWorkbenchStore(failingApi);
-  await failingStore.actions.openProjectChat({ projectId: 1 });
-  await assert.rejects(
-    () => failingStore.actions.submitPrompt({ sessionId: "s1", question: "q", projectId: 1 }),
-    (err) => err.code === "RETRIEVAL_FAILED",
-  );
-  assert.deepEqual(failingStore.getSnapshot().citationsBySession["s1"], [], "failed submit leaves no citations");
-});
+  await store.actions.archiveSession("session-cpwb-soft-archive");
+  assert.deepEqual(store.getSnapshot().recentSessions, []);
+  assert.equal(store.getSnapshot().workbenchSessions["session-cpwb-soft-archive"].archivedAt, "2026-08-23T09:30:00.000Z");
 
-// ------------------------------------------------------------ composer pure
-
-test("composer: buildSubmitPayload maps scope to projectId/knowledgeBaseId", () => {
-  assert.deepEqual(
-    buildSubmitPayload({ sessionId: "s", question: "q", scope: { kind: "project", scopeId: 1 } }),
-    { sessionId: "s", question: "q", projectId: 1, knowledgeBaseId: undefined },
-  );
-  assert.deepEqual(
-    buildSubmitPayload({ sessionId: "s", question: "q", scope: { kind: "knowledge_base", scopeId: 2 } }),
-    { sessionId: "s", question: "q", projectId: undefined, knowledgeBaseId: 2 },
-  );
-});
-
-test("composer: draft policy clears only on success (retains on error)", () => {
-  assert.deepEqual(composerDraftPolicy(null), { clear: true });
-  assert.deepEqual(composerDraftPolicy(new Error("boom")), { clear: false });
-  assert.equal(ATTACHMENT_UNSUPPORTED_TEXT, "知识库问答当前仅支持文本");
-});
-
-test("composer: empty-retrieval copy is the designed sentence", () => {
-  assert.equal(EMPTY_RETRIEVAL_TEXT, "未找到足够相关的知识库内容");
-});
-
-test("composer: cancelResultToOutcome treats only ok===true as success", () => {
-  assert.deepEqual(cancelResultToOutcome({ ok: true }), { ok: true, error: null });
-  assert.deepEqual(cancelResultToOutcome({ ok: true, error: "ignored" }), { ok: true, error: null });
-  assert.equal(cancelResultToOutcome(null).ok, false);
-  assert.equal(cancelResultToOutcome(undefined).ok, false);
-  assert.equal(cancelResultToOutcome({}).ok, false);
-  assert.equal(cancelResultToOutcome({ ok: false }).ok, false);
-});
-
-test("composer: cancelResultToOutcome surfaces the server error for ok!==true", () => {
-  assert.deepEqual(cancelResultToOutcome({ ok: false, error: "server refused" }), { ok: false, error: "server refused" });
-  assert.deepEqual(cancelResultToOutcome({ ok: false, error: { message: "bad stop" } }), { ok: false, error: "bad stop" });
-  assert.deepEqual(cancelResultToOutcome({ ok: false, error: null }), { ok: false, error: "停止失败" });
-  assert.deepEqual(cancelResultToOutcome({ ok: false }), { ok: false, error: "停止失败" });
-});
-
-test("composer: runCancel covers success / failure / reject into one outcome", async () => {
-  // success: resolved RpcResult { ok:true }
-  assert.deepEqual(await runCancel(async () => ({ ok: true })), { ok: true, error: null });
-  // failure: resolved RpcResult { ok:false, error } (does NOT reject)
-  assert.deepEqual(await runCancel(async () => ({ ok: false, error: "server refused" })), { ok: false, error: "server refused" });
-  // reject: the session binding throws / rejects
-  assert.deepEqual(await runCancel(async () => { throw new Error("session gone"); }), { ok: false, error: "session gone" });
-  // reject with no message falls back to the stable copy
-  assert.deepEqual(await runCancel(async () => { throw null; }), { ok: false, error: "停止失败" });
+  await store.actions.restoreSession("session-cpwb-soft-archive");
+  assert.deepEqual(store.getSnapshot().recentSessions.map((item) => item.sessionId), ["session-cpwb-soft-archive"]);
 });
 
 // ---------------------------------------------------------------- rail

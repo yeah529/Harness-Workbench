@@ -13,7 +13,7 @@
  *   { phase, projects, knowledgeBases, documents, health, error,
  *     activeProjectId, activeKnowledgeBaseId, linkedKnowledgeBases,
  *     todos, schedules, summaries, citations, action,
- *     knowledgeChats, workbenchSessions, citationsBySession }
+ *     draft, workbenchSessions, contextBySession }
  *
  * refresh() aborts any prior refresh and fetches health / projects /
  * knowledgeBases / documents in parallel. refreshProject(projectId, today)
@@ -24,6 +24,8 @@
  */
 
 import { registerWorkbenchSession } from "./workbenchSessions.js";
+
+const RECENT_SESSION_LIMIT = 20;
 
 /** Local calendar day as YYYY-MM-DD (never derived from the UTC clock). */
 export function localDateKey(date = new Date()) {
@@ -66,12 +68,20 @@ function loadScheduleRuns(api, schedules, signal) {
 
 function normalizeSessionRow(row) {
   const kind = row?.scope?.kind ?? row?.scopeKind;
-  const scopeId = row?.scope?.scopeId ?? row?.scopeId ?? null;
+  const id = row?.scope?.id ?? row?.scopeId ?? null;
   return {
     ...row,
-    scope: { kind, scopeId },
-    chatId: row?.chatId ?? null,
+    scope: { kind, id },
   };
+}
+
+function normalizeSessionScope(scope) {
+  if (!scope || !["project", "knowledge_base", "independent"].includes(scope.kind)) {
+    throw new TypeError("会话归属无效");
+  }
+  if (scope.kind === "independent") return { kind: "independent", id: null };
+  if (!Number.isSafeInteger(scope.id) || scope.id <= 0) throw new TypeError("会话归属缺少有效 ID");
+  return { kind: scope.kind, id: scope.id };
 }
 
 function sessionMap(rows) {
@@ -106,12 +116,16 @@ export function createWorkbenchStore(api) {
     automation: { summaryEnabled: true, nextDayTodosEnabled: true },
     citations: [],
     action: null,
-    knowledgeChats: [],
+    draft: null,
     recentSessions: [],
     recentSessionTotal: 0,
-    sessionPage: { items: [], total: 0, limit: 20, offset: 0, query: "", context: null },
+    sessionPage: { items: [], total: 0, limit: 20, offset: 0, query: "", context: null, archived: false },
     workbenchSessions: {},
     citationsBySession: {},
+    contextBySession: {},
+    globalSchedules: [],
+    linkedProjects: [],
+    maintenanceJob: null,
   };
 
   const listeners = new Set();
@@ -198,11 +212,6 @@ export function createWorkbenchStore(api) {
     (projectId, signal) => api.projectKnowledgeBases.list(projectId, { signal }),
     (linkedKnowledgeBases) => setState({ linkedKnowledgeBases }),
   );
-  const loadKnowledgeChats = makeGuarded(
-    (knowledgeBaseId, signal) => api.knowledgeChats.list({ knowledgeBaseId, signal }),
-    (knowledgeChats) => setState({ knowledgeChats }),
-  );
-
   async function fetchSessionPage(params, signal) {
     if (typeof api.chat?.sessions?.list !== "function") {
       return { items: [], total: 0, limit: params.limit ?? 8, offset: params.offset ?? 0 };
@@ -256,7 +265,7 @@ export function createWorkbenchStore(api) {
         api.documents.list({ signal: ac.signal }),
       ]);
       if (disposed || seq !== refreshSeq) return;
-      const sessionPage = await fetchSessionPage({ limit: 8, offset: 0 }, ac.signal);
+      const sessionPage = await fetchSessionPage({ limit: RECENT_SESSION_LIMIT, offset: 0 }, ac.signal);
       if (disposed || seq !== refreshSeq) return;
       const recentSessions = sessionPage.items.map(normalizeSessionRow);
       setState({
@@ -370,6 +379,78 @@ export function createWorkbenchStore(api) {
     refreshDocuments,
     loadSettings,
 
+    startContainerPurge: async function startContainerPurge(input) {
+      if (typeof api.maintenance?.createPurgeJob !== "function") {
+        throw new Error("maintenance purge API is unavailable");
+      }
+      const job = await runAction(
+        "startContainerPurge",
+        () => api.maintenance.createPurgeJob(input),
+      );
+      setState({
+        maintenanceJob: {
+          ...job,
+          disconnected: false,
+          lastPollError: null,
+        },
+      });
+      return job;
+    },
+
+    refreshPurgeJob: async function refreshPurgeJob(jobId) {
+      if (typeof api.maintenance?.getPurgeJob !== "function") {
+        throw new Error("maintenance purge API is unavailable");
+      }
+      try {
+        const job = await api.maintenance.getPurgeJob(jobId);
+        setState({
+          maintenanceJob: {
+            ...(state.maintenanceJob?.jobId === jobId ? state.maintenanceJob : {}),
+            ...job,
+            disconnected: false,
+            lastPollError: null,
+          },
+        });
+        return job;
+      } catch (error) {
+        const lastConfirmed = state.maintenanceJob?.jobId === jobId
+          ? state.maintenanceJob
+          : { jobId };
+        setState({
+          maintenanceJob: {
+            ...lastConfirmed,
+            disconnected: true,
+            lastPollError: toError(error),
+          },
+        });
+        return null;
+      }
+    },
+
+    resumePurgeJob: async function resumePurgeJob(jobId) {
+      if (state.maintenanceJob?.jobId !== jobId) {
+        setState({
+          maintenanceJob: {
+            jobId,
+            state: "reconnecting",
+            disconnected: false,
+            lastPollError: null,
+          },
+        });
+      }
+      return actions.refreshPurgeJob(jobId);
+    },
+
+    clearPurgeJob: async function clearPurgeJob() {
+      const terminal = state.maintenanceJob?.state;
+      if (!terminal) return;
+      if (terminal !== "completed" && terminal !== "restored") {
+        throw new Error("maintenance job is not complete");
+      }
+      setState({ maintenanceJob: null });
+      await refresh();
+    },
+
     updateTimezone: async function updateTimezone(timezone) {
       const result = await runAction("updateTimezone", () => api.settings.updateTimezone(timezone));
       setState({ settings: { ...state.settings, timezone: result?.timezone || result } });
@@ -430,119 +511,183 @@ export function createWorkbenchStore(api) {
       return result;
     },
 
-    loadKnowledgeChats: async function loadKnowledgeChats(kbId) {
-      await loadKnowledgeChats.run(kbId);
-    },
-
-    loadRecentSessions: async function loadRecentSessions({ limit = 8 } = {}) {
+    loadRecentSessions: async function loadRecentSessions({ limit = RECENT_SESSION_LIMIT } = {}) {
       return loadRecent.run(limit);
     },
 
-    loadAllSessions: async function loadAllSessions({ query = "", context = null, offset = 0, limit = 20 } = {}) {
-      return loadSessionPage.run({ query, context, offset, limit });
+    loadAllSessions: async function loadAllSessions({ query = "", scopeKind = null, scopeId = null, archived = false, offset = 0, limit = 20 } = {}) {
+      return loadSessionPage.run({ query, scopeKind, scopeId, archived, offset, limit });
     },
 
-    openIndependentSession: async function openIndependentSession({ resumeSessionId } = {}) {
-      const ac = track(new AbortController());
-      let result;
-      try {
-        result = await runAction("openIndependentSession", () => api.chat.sessions.create({ resumeSessionId }, { signal: ac.signal }));
-      } finally {
-        untrack(ac);
-      }
-      const entry = { scope: result.scope ?? { kind: "independent", scopeId: null }, chatId: null };
-      registerWorkbenchSession({ sessionId: result.sessionId, ...entry });
-      setState({
-        workbenchSessions: { ...state.workbenchSessions, [result.sessionId]: entry },
-        citationsBySession: { ...state.citationsBySession, [result.sessionId]: [] },
-      });
-      await loadRecent.run(8);
+    loadGlobalSchedules: async function loadGlobalSchedules() {
+      const schedules = await runAction("loadGlobalSchedules", () => api.schedules.list({}));
+      setState({ globalSchedules: Array.isArray(schedules) ? schedules : [] });
+      return schedules;
+    },
+
+    loadKnowledgeBaseProjects: async function loadKnowledgeBaseProjects(knowledgeBaseId) {
+      const projects = await runAction("loadKnowledgeBaseProjects", () => api.knowledgeBaseProjects.list(knowledgeBaseId));
+      setState({ linkedProjects: Array.isArray(projects) ? projects : [] });
+      return projects;
+    },
+
+    reindexKnowledgeBase: async function reindexKnowledgeBase(knowledgeBaseId) {
+      const result = await runAction("reindexKnowledgeBase", () => api.knowledgeBaseIndex.reindex(knowledgeBaseId));
+      await actions.refreshDocuments();
       return result;
     },
 
-    /**
-     * Create (POST /chat/sessions {projectId}) the plugin's own local Ollama
-     * session for a project, register it, and reset that session's citations.
-     * Rejects on failure so the caller stays on the project home and surfaces
-     * the error. The caller then waits for the session in ctx.sessions.list and
-     * opens it — this action never touches the DSH session service directly.
-     */
-    openProjectChat: async function openProjectChat({ projectId, resumeSessionId }) {
-      const ac = track(new AbortController());
-      let result;
-      try {
-        result = await runAction("openProjectChat", () =>
-          api.chat.sessions.create({ projectId, resumeSessionId }, { signal: ac.signal }));
-      } finally {
-        untrack(ac);
-      }
-      registerWorkbenchSession({
-        sessionId: result.sessionId,
-        scope: result.scope ?? { kind: "project", scopeId: projectId },
-        chatId: result.chatId ?? null,
-      });
-      const entry = {
-        scope: result.scope ?? { kind: "project", scopeId: projectId },
-        chatId: result.chatId ?? null,
+    startDraft: function startDraft({ scope, pinnedSources = [] }) {
+      const draft = {
+        scope: normalizeSessionScope(scope),
+        pinnedSources: Array.isArray(pinnedSources) ? pinnedSources : [],
+        text: "",
+        status: "pristine",
+        sessionId: null,
+        error: null,
       };
-      setState({
-        workbenchSessions: { ...state.workbenchSessions, [result.sessionId]: entry },
-        citationsBySession: { ...state.citationsBySession, [result.sessionId]: [] },
-      });
-      await loadRecent.run(8);
-      return result;
+      setState({ draft, error: null });
+      return draft;
     },
 
-    /**
-     * Create or reopen (POST /chat/sessions {knowledgeBaseId, chatId?}) a
-     * knowledge-base chat session (backed by a hidden DSH workspace), register
-     * it, reset its citations, and re-fetch the KB chat list. Rejects on failure.
-     */
-    openKnowledgeChat: async function openKnowledgeChat({ knowledgeBaseId, chatId, title }) {
+    discardDraft: async function discardDraft() {
+      const draft = state.draft;
+      if (!draft) return null;
+      if (draft.status === "admitted") return actions.confirmDraft();
+      if (draft.sessionId) {
+        await runAction("discardDraft", () => api.chat.sessions.remove(draft.sessionId));
+      }
+      setState({ draft: null });
+      return null;
+    },
+
+    materializeDraft: async function materializeDraft({ text }) {
+      const title = typeof text === "string" ? text.trim() : "";
+      if (!title) throw new TypeError("首条消息不能为空");
+      const draft = state.draft;
+      if (!draft) throw new TypeError("当前没有待激活的会话草稿");
+      if (draft.sessionId) {
+        setState({ draft: { ...draft, text, error: null } });
+        return { sessionId: draft.sessionId, scope: draft.scope, title };
+      }
+      setState({ draft: { ...draft, text, status: "materializing", error: null } });
       const ac = track(new AbortController());
-      let result;
       try {
-        result = await runAction("openKnowledgeChat", () =>
-          api.chat.sessions.create({ knowledgeBaseId, chatId, title }, { signal: ac.signal }));
+        const result = await runAction("materializeDraft", () => api.chat.sessions.create({
+          scope: draft.scope,
+          title,
+          pinnedSources: draft.pinnedSources,
+        }, { signal: ac.signal }));
+        setState({ draft: {
+          ...draft,
+          text,
+          status: "materialized",
+          sessionId: result.sessionId,
+          error: null,
+        } });
+        return result;
+      } catch (error) {
+        setState({ draft: { ...draft, text, status: "error", error: toError(error) } });
+        throw error;
       } finally {
         untrack(ac);
       }
-      registerWorkbenchSession({
-        sessionId: result.sessionId,
-        scope: result.scope ?? { kind: "knowledge_base", scopeId: knowledgeBaseId },
-        chatId: result.chatId ?? chatId ?? null,
-      });
-      const entry = {
-        scope: result.scope ?? { kind: "knowledge_base", scopeId: knowledgeBaseId },
-        chatId: result.chatId ?? chatId ?? null,
-      };
+    },
+
+    markDraftAdmitted: function markDraftAdmitted() {
+      const draft = state.draft;
+      if (!draft?.sessionId) throw new TypeError("会话尚未物化");
+      setState({ draft: { ...draft, status: "admitted", error: null } });
+    },
+
+    markDraftError: function markDraftError(error) {
+      const draft = state.draft;
+      if (!draft) return;
+      setState({ draft: { ...draft, status: draft.status === "admitted" ? "admitted" : "materialized", error: toError(error) } });
+    },
+
+    confirmDraft: async function confirmDraft() {
+      const draft = state.draft;
+      if (!draft?.sessionId || draft.status !== "admitted") throw new TypeError("首条消息尚未被 DSH 接受");
+      const result = await runAction("confirmDraft", () => api.chat.sessions.confirm(draft.sessionId));
+      const entry = normalizeSessionRow({ ...result, scope: result.scope ?? draft.scope });
+      registerWorkbenchSession({ sessionId: result.sessionId, scope: entry.scope });
       setState({
+        draft: null,
         workbenchSessions: { ...state.workbenchSessions, [result.sessionId]: entry },
-        citationsBySession: { ...state.citationsBySession, [result.sessionId]: [] },
       });
-      await loadKnowledgeChats.run(knowledgeBaseId);
-      await loadRecent.run(8);
+      await loadRecent.run(RECENT_SESSION_LIMIT);
       return result;
     },
 
-    /**
-     * Submit one question through the RAG path (POST /chat/prompts), which the
-     * host retrieves and injects hidden context for before sending. On success
-     * the returned real citations are stored under the session; on failure the
-     * action rejects (the composer keeps the draft and shows the error).
-     */
-    submitPrompt: async function submitPrompt({ sessionId, question, projectId, knowledgeBaseId }) {
-      const ac = track(new AbortController());
-      let result;
-      try {
-        result = await runAction("submitPrompt", () =>
-          api.chat.prompts.submit({ sessionId, question, projectId, knowledgeBaseId }, { signal: ac.signal }));
-      } finally {
-        untrack(ac);
-      }
-      const citations = Array.isArray(result.citations) ? result.citations : [];
-      setState({ citationsBySession: { ...state.citationsBySession, [sessionId]: citations } });
+    openSession: async function openSession(sessionId) {
+      const result = await runAction("openSession", () => api.chat.sessions.open(sessionId));
+      const entry = normalizeSessionRow(result);
+      registerWorkbenchSession({ sessionId, scope: entry.scope });
+      setState({ workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry } });
+      return entry;
+    },
+
+    renameSession: async function renameSession({ sessionId, title }) {
+      const result = await runAction("renameSession", () => api.chat.sessions.rename({ sessionId, title }));
+      const entry = normalizeSessionRow(result);
+      setState({ workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry } });
+      await loadRecent.run(RECENT_SESSION_LIMIT);
+      return entry;
+    },
+
+    moveSession: async function moveSession({ sessionId, scope }) {
+      const result = await runAction("moveSession", () => api.chat.sessions.move({ sessionId, scope: normalizeSessionScope(scope) }));
+      const entry = normalizeSessionRow(result);
+      registerWorkbenchSession({ sessionId, scope: entry.scope });
+      setState({ workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry } });
+      await loadRecent.run(RECENT_SESSION_LIMIT);
+      return entry;
+    },
+
+    archiveSession: async function archiveSession(sessionId) {
+      const result = await runAction("archiveSession", () => api.chat.sessions.archive(sessionId));
+      const entry = normalizeSessionRow(result);
+      setState({
+        recentSessions: state.recentSessions.filter((row) => row.sessionId !== sessionId),
+        workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry },
+      });
+      await loadRecent.run(RECENT_SESSION_LIMIT);
+      return entry;
+    },
+
+    restoreSession: async function restoreSession(sessionId) {
+      const result = await runAction("restoreSession", () => api.chat.sessions.restore(sessionId));
+      const entry = normalizeSessionRow(result);
+      setState({ workbenchSessions: { ...state.workbenchSessions, [sessionId]: entry } });
+      await loadRecent.run(RECENT_SESSION_LIMIT);
+      return entry;
+    },
+
+    deleteSession: async function deleteSession(sessionId) {
+      const result = await runAction("deleteSession", () => api.chat.sessions.remove(sessionId));
+      const next = { ...state.workbenchSessions };
+      delete next[sessionId];
+      setState({ workbenchSessions: next });
+      await loadRecent.run(RECENT_SESSION_LIMIT);
       return result;
+    },
+
+    loadSessionContext: async function loadSessionContext(sessionId) {
+      const context = await runAction("loadSessionContext", () => api.chat.sessions.context.get(sessionId));
+      setState({ contextBySession: { ...state.contextBySession, [sessionId]: context } });
+      return context;
+    },
+
+    setSessionContext: async function setSessionContext({ sessionId, source, mode }) {
+      const context = await runAction("setSessionContext", () => api.chat.sessions.context.set({ sessionId, source, mode }));
+      setState({ contextBySession: { ...state.contextBySession, [sessionId]: context } });
+      return context;
+    },
+
+    removeSessionContext: async function removeSessionContext({ sessionId, source }) {
+      await runAction("removeSessionContext", () => api.chat.sessions.context.remove({ sessionId, source }));
+      return actions.loadSessionContext(sessionId);
     },
 
     selectKnowledgeBase: async function selectKnowledgeBase(kbId) {
@@ -585,10 +730,19 @@ export function createWorkbenchStore(api) {
       return updated;
     },
 
-    deleteProject: async function deleteProject(id) {
+    loadProjectDeletionPlan: async function loadProjectDeletionPlan(id) {
       const ac = track(new AbortController());
       try {
-        await runAction("deleteProject", () => api.projects.remove(id, { signal: ac.signal }), { projectId: id });
+        return await runAction("loadProjectDeletionPlan", () => api.projects.deletionPlan(id, { signal: ac.signal }), { projectId: id });
+      } finally {
+        untrack(ac);
+      }
+    },
+
+    deleteProject: async function deleteProject({ id, sessionPolicy = "detach" }) {
+      const ac = track(new AbortController());
+      try {
+        await runAction("deleteProject", () => api.projects.remove(id, { sessionPolicy, signal: ac.signal }), { projectId: id, sessionPolicy });
       } finally {
         untrack(ac);
       }
@@ -618,10 +772,19 @@ export function createWorkbenchStore(api) {
       return created;
     },
 
-    deleteKnowledgeBase: async function deleteKnowledgeBase(id) {
+    loadKnowledgeBaseDeletionPlan: async function loadKnowledgeBaseDeletionPlan(id) {
       const ac = track(new AbortController());
       try {
-        await runAction("deleteKnowledgeBase", () => api.knowledgeBases.remove(id, { signal: ac.signal }), { knowledgeBaseId: id });
+        return await runAction("loadKnowledgeBaseDeletionPlan", () => api.knowledgeBases.deletionPlan(id, { signal: ac.signal }), { knowledgeBaseId: id });
+      } finally {
+        untrack(ac);
+      }
+    },
+
+    deleteKnowledgeBase: async function deleteKnowledgeBase({ id, sessionPolicy = "detach" }) {
+      const ac = track(new AbortController());
+      try {
+        await runAction("deleteKnowledgeBase", () => api.knowledgeBases.remove(id, { sessionPolicy, signal: ac.signal }), { knowledgeBaseId: id, sessionPolicy });
       } finally {
         untrack(ac);
       }
@@ -629,7 +792,6 @@ export function createWorkbenchStore(api) {
       await refresh();
       setState({
         activeKnowledgeBaseId: state.activeKnowledgeBaseId === id ? null : state.activeKnowledgeBaseId,
-        knowledgeChats: state.activeKnowledgeBaseId === id ? [] : state.knowledgeChats,
         citations: state.activeKnowledgeBaseId === id ? [] : state.citations,
       });
     },
@@ -642,7 +804,7 @@ export function createWorkbenchStore(api) {
       } finally {
         untrack(ac);
       }
-      await loadLinked.run(projectId);
+      await Promise.all([loadLinked.run(projectId), loadKnowledgeBases.run()]);
     },
 
     unlinkProjectKnowledgeBase: async function unlinkProjectKnowledgeBase(projectId, knowledgeBaseId) {
@@ -653,7 +815,7 @@ export function createWorkbenchStore(api) {
       } finally {
         untrack(ac);
       }
-      await loadLinked.run(projectId);
+      await Promise.all([loadLinked.run(projectId), loadKnowledgeBases.run()]);
     },
 
     uploadFiles: async function uploadFiles({ files, scope, scopeId }) {
@@ -758,6 +920,17 @@ export function createWorkbenchStore(api) {
       await refreshProject(projectId, lastToday ?? localDateKey());
     },
 
+    createGlobalSchedule: async function createGlobalSchedule({ projectId, name, recurrence, startsAt, prompt, enabled }) {
+      const ac = track(new AbortController());
+      try {
+        await runAction("createGlobalSchedule", () => api.schedules.create({ projectId, name, recurrence, startsAt, prompt, enabled }, { signal: ac.signal }));
+      } finally {
+        untrack(ac);
+      }
+      const schedules = await api.schedules.list({});
+      setState({ globalSchedules: Array.isArray(schedules) ? schedules : [] });
+    },
+
     updateSchedule: async function updateSchedule({ id, name, prompt, recurrence, startsAt, enabled }) {
       const ac = track(new AbortController());
       try {
@@ -782,12 +955,23 @@ export function createWorkbenchStore(api) {
 
     runSchedule: async function runSchedule(id) {
       const ac = track(new AbortController());
+      let result;
+      let failure = null;
       try {
-        await runAction("runSchedule", () => api.schedules.run(id, { signal: ac.signal }), { scheduleId: id });
+        result = await runAction("runSchedule", () => api.schedules.run(id, { signal: ac.signal }), { scheduleId: id });
+      } catch (error) {
+        failure = error;
       } finally {
         untrack(ac);
       }
       if (state.activeProjectId != null) await refreshProject(state.activeProjectId, lastToday ?? localDateKey());
+      await loadRecent.run(RECENT_SESSION_LIMIT);
+      if (failure) {
+        setState({ action: { type: "runSchedule", scheduleId: id, status: "error", error: toError(failure) } });
+        throw failure;
+      }
+      setState({ action: { type: "runSchedule", scheduleId: id, status: "done", error: null, result } });
+      return result;
     },
 
     runSummary: async function runSummary({ projectId, summaryDate }) {

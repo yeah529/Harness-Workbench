@@ -4,13 +4,13 @@
  *
  * This is the ONLY place the plugin remembers which sessions it created or
  * reopened through POST /api/cpwb/chat/sessions — but that registry is for
- * *scope lookup* only (projectId / knowledgeBaseId / chatId). Message state
+ * *scope lookup* only. Message state
  * and input state remain exclusively in rc.2 session services.
  */
 
 export const WORKBENCH_SESSION_PREFIX = "session-cpwb-";
 
-const registry = new Map(); // sessionId -> { scope: { kind, scopeId }, chatId: number | null }
+const registry = new Map(); // sessionId -> { scope: { kind, id } }
 
 /** Pure membership test: is this session id a workbench-owned DSH session? */
 export function isWorkbenchSessionId(sessionId) {
@@ -18,8 +18,8 @@ export function isWorkbenchSessionId(sessionId) {
 }
 
 /** Register (or replace) the workbench entry for one session. */
-export function registerWorkbenchSession({ sessionId, scope, chatId }) {
-  const entry = { scope, chatId: chatId ?? null };
+export function registerWorkbenchSession({ sessionId, scope }) {
+  const entry = { scope: { kind: scope.kind, id: scope.id ?? null } };
   registry.set(sessionId, entry);
   return entry;
 }

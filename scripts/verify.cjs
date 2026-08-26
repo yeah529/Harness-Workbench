@@ -27,6 +27,12 @@ function verifySources() {
   const theme = read("src/client/theme.css");
   const css = read("src/client/workbench.css");
   const logo = read("src/client/assets/harness-workbench-logo.svg");
+  const maintenanceScreen = read("src/client/MaintenanceScreen.js");
+  const maintenanceHost = read("src/host/maintenance.js");
+  const hostApi = read("src/host/api.js");
+  const launcher = read("src/launcher/process.js");
+  const rc2Storage = read("src/maintenance/rc2-storage.js");
+  const purgeJobs = read("src/maintenance/purge-jobs.js");
   const clientSources = fs.readdirSync(path.join(root, "src/client"))
     .filter((name) => name.endsWith(".js"))
     .map((name) => read("src/client/" + name))
@@ -40,12 +46,14 @@ function verifySources() {
   forbid(index, /slots\.inject\(["'](?:conversation\.session|conversation\.view|details)["']/, "index.js");
 
   for (const token of ["home", "knowledge", "sessions", "conversation", "cpwb-layout-"]) requireText(shell, token, "WorkbenchShell.js");
+  for (const token of ["MaintenanceScreen", "readStoredMaintenanceJob", "resumePurgeJob"]) requireText(shell, token, "WorkbenchShell.js");
   for (const token of ["待办", "定时任务", "关联知识库", "每日总结", "native-details", "DrawerDialog"]) requireText(session, token, "WorkbenchSessionShell.js");
   forbid(session, /renderSlot\([\s\S]*conversation\.view|only\s*:\s*["']chat["']/, "WorkbenchSessionShell.js");
 
-  for (const token of ["新建会话", "首页", "知识库", "最近会话", "查看全部会话", "SidebarBrand"]) requireText(sidebar, token, "WorkbenchSidebar.js");
+  for (const token of ["新建会话", "首页", "知识芯片", "最近会话", "查看全部会话", "SidebarBrand"]) requireText(sidebar, token, "WorkbenchSidebar.js");
   requireText(sidebar, "@phosphor-icons/react", "WorkbenchSidebar.js");
-  for (const token of ['viewBox="0 0 190 74"', "Harness Workbench", "HARNESS", "WORKBENCH"]) requireText(logo, token, "logo SVG");
+  for (const token of ['viewBox="0 0 306 72"', 'viewBox="0 0 64 64"', 'viewBox="0 0 236 66"', "Harness Workbench", "#4de8f4", "#ffb51b"]) requireText(logo, token, "logo SVG");
+  forbid(logo, /<text|font-family|font-weight/, "logo SVG");
 
   requireText(settingsSlot, 'ctx.slots.inject("settings.section"', "settingsSlot.js");
   forbid(settingsSlot, /children\s*:/, "settingsSlot.js");
@@ -57,6 +65,14 @@ function verifySources() {
   for (const token of ["--cpwb-surface-base", "--cpwb-border-strong", "body:has(.cpwb-app-shell)", "--dsw-alias-bg-base", '[role="dialog"][aria-modal="true"]', "prefers-reduced-motion"]) requireText(theme, token, "theme.css");
   for (const token of ["cpwb-global-sidebar", "cpwb-project-rail", "cpwb-responsive-drawer", "max-width: 899px", "min-width: 900px", "max-width: 1279px", "prefers-reduced-transparency", "focus-visible"]) requireText(css, token, "workbench.css");
 
+  for (const token of ["SAFE PURGE PROTOCOL", "关闭 DSH 服务", "隔离会话数据", "清理关系与索引", "重启并验证", "cpwb-maintenance-job"]) requireText(maintenanceScreen, token, "MaintenanceScreen.js");
+  for (const token of ["CPWB_SUPERVISED", "createPurgeJob", "armPurgeJob", "finalizeStartupJob"]) requireText(maintenanceHost, token, "maintenance host");
+  for (const token of ["/maintenance/purge-jobs", "/maintenance/purge-jobs/:jobId", "PURGE_JOB_REQUIRED"]) requireText(hostApi, token, "host api");
+  for (const token of ["CPWB_SUPERVISED", "recoverIncompletePurge", "prepareRc2Purge", "commitRc2Purge", "rollback_pending"]) requireText(launcher, token, "supervised launcher");
+  for (const token of ["assertSessionId", "assertSha256", "isSymbolicLink", "errorOnExist", "restoreRc2Purge", "commitRc2Purge"]) requireText(rc2Storage, token, "RC.2 purge storage");
+  for (const token of ["acquireLock", "writeManifest", "releaseLock"]) requireText(purgeJobs, token, "purge job store");
+  forbid(maintenanceScreen + maintenanceHost + launcher + rc2Storage + purgeJobs, /\/Users\/yewang|OPENAI_CODEX_ACCESS_TOKEN|Authorization\s*:/, "maintenance sources");
+
   forbid(clientSources, /localStorage/, "client source");
   forbid(clientSources, /setInterval\s*\(/, "client source");
   console.log("static architecture and visual contracts: OK");
@@ -66,7 +82,6 @@ async function verifyBundle() {
   let captured = null;
   const styles = [];
   const sessionCreates = [];
-  let createMode = "project";
   let sessionState = { ids: [], byId: {}, current: undefined, bindingId: undefined, phase: "ready" };
   let workspaceState = { items: [], phase: "ready" };
   globalThis.window = {
@@ -89,12 +104,16 @@ async function verifyBundle() {
     if (pathname.endsWith("/chat/sessions") && init.method === "POST") {
       const body = JSON.parse(init.body || "{}");
       sessionCreates.push(body);
-      const sessionId = createMode === "project" ? "session-cpwb-project" : "session-cpwb-independent";
-      const scope = createMode === "project" ? { kind: "project", scopeId: 1 } : { kind: "independent", scopeId: null };
+      const sessionId = "session-cpwb-project";
+      const scope = body.scope;
       sessionState = { ids: [sessionId], byId: { [sessionId]: { sessionId, cwd: "/tmp/workbench", blank: true } }, current: sessionId, bindingId: sessionId, phase: "ready" };
       workspaceState = { items: [{ workspaceId: "ws-test", path: "/tmp/workbench", sessionIds: [sessionId] }], phase: "ready" };
-      const value = { sessionId, scope, reused: false };
+      const value = { sessionId, scope, title: body.title, lifecycleStatus: "draft_failed" };
       return { ok: true, status: 201, json: async () => value, text: async () => JSON.stringify(value) };
+    }
+    if (pathname.endsWith("/chat/sessions/session-cpwb-project") && init.method === "PATCH") {
+      const value = { sessionId: "session-cpwb-project", scope: { kind: "project", id: 1 }, title: "verify unified session", lifecycleStatus: "active" };
+      return { ok: true, status: 200, json: async () => value, text: async () => JSON.stringify(value) };
     }
     const value = pathname.endsWith("/health")
       ? { ok: true, reachable: true }
@@ -120,6 +139,7 @@ async function verifyBundle() {
   if (typeof exports.apply !== "function" || typeof exports.getStore !== "function") throw new Error("client bundle exports are incomplete");
 
   const registrations = [];
+  const conversationDefinitions = [];
   const disposers = [];
   const ctx = {
     effect(effect) {
@@ -128,6 +148,13 @@ async function verifyBundle() {
     },
     layout: {},
     connection: {},
+    conversation: {},
+    conversationEvents: {
+      register(definition) {
+        conversationDefinitions.push(definition);
+        return () => {};
+      },
+    },
     inputTriggers: { registerSource() { return () => {}; } },
     workspaces: {
       pickDirectory: async () => null,
@@ -158,21 +185,27 @@ async function verifyBundle() {
   const settings = registrations.filter((entry) => entry.config.name === "settings.section");
   const imageAttachment = registrations.filter((entry) => entry.config.name === "conversation.input.left" && entry.config.id === "cpwb-image-attachment-button");
   const modelIndicator = registrations.filter((entry) => entry.config.name === "conversation.input.right" && entry.config.id === "cpwb-model-indicator");
+  const knowledgeSources = registrations.filter((entry) => entry.config.name === "conversation.chat.turnTail");
   if (shell.length !== 1 || shell[0].config.id !== "cpwb-workbench-shell") throw new Error("bundle must register one unified Workbench shell");
   if (settings.length !== 1 || settings[0].config.id !== "cpwb-workbench-settings") throw new Error("bundle must contribute one native settings section");
   if (imageAttachment.length !== 1) throw new Error("bundle must add one image picker beside the native rc.2 composer chrome");
   if (modelIndicator.length !== 1) throw new Error("bundle must add one compact model indicator beside the native selector");
+  if (knowledgeSources.length !== 1 || conversationDefinitions.filter((definition) => definition.kind === "workbench-knowledge-sources").length !== 1) {
+    throw new Error("bundle must add one durable knowledge-source footer to native Chat turns");
+  }
   if (registrations.some((entry) => ["conversation.session", "conversation.view", "details"].includes(entry.config.name))) {
     throw new Error("bundle must not claim native conversation or details slots");
   }
   const store = exports.getStore();
-  await store.actions.openProjectChat({ projectId: 1 });
-  createMode = "independent";
-  const shellProps = shell[0].config.inject();
-  await shellProps.createSession();
-  if (JSON.stringify(sessionCreates.at(-1)) !== "{}") {
-    throw new Error("global new-session action must create an unscoped independent session");
+  store.actions.startDraft({ scope: { kind: "project", id: 1 } });
+  if (sessionCreates.length !== 0) throw new Error("local draft must not create a DSH session");
+  await store.actions.materializeDraft({ text: "verify unified session" });
+  const created = sessionCreates.at(-1);
+  if (created.scope?.kind !== "project" || created.scope?.id !== 1 || created.title !== "verify unified session") {
+    throw new Error("first send must materialize exactly one canonical project session");
   }
+  store.actions.markDraftAdmitted();
+  await store.actions.confirmDraft();
   for (const dispose of disposers.reverse()) await dispose();
   console.log("bundle exports, CSS injection, and Slot composition: OK");
 }

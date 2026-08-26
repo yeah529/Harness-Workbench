@@ -25,6 +25,11 @@ import { createWorkbenchSettings } from "./settings.js";
 import { createEmbeddingAdapter } from "./embedding.js";
 import { localDateKey } from "./timezone.js";
 import { createCodexAuth } from "./codex-auth.js";
+import { createContextResolver } from "./context.js";
+import { createSessionIndexAdapter } from "./session-index.js";
+import { createMaintenanceService } from "./maintenance.js";
+import { createPurgeJobStore } from "../maintenance/purge-jobs.js";
+import { DEFAULT_DSH_HOME } from "./config.js";
 
 /**
  * Host plugin dependencies: the DSH web server, the LLM adapter registry, and
@@ -32,7 +37,7 @@ import { createCodexAuth } from "./codex-auth.js";
  * composes. Optional services are read from the injected context without
  * probing the DSH context accessor for names that may not be registered.
  */
-const inject = ["webServer", "agents", "sessions", "workspaceRegistry", "credentials"];
+const inject = ["webServer", "agents", "sessions", "workspaceRegistry", "credentials", "sessionQuery"];
 
 function optionalContextService(ctx, name) {
   // Cordis only exposes injected services as context properties. The `in`
@@ -44,13 +49,23 @@ function optionalContextService(ctx, name) {
 
 /** Build the host-owned scheduled prompt runner with one release seam. */
 export function createScheduledRunPrompt(sessionService) {
-  return async function runScheduledPrompt({ kind = "schedule", projectId, prompt }) {
+  return async function runScheduledPrompt({ kind = "schedule", projectId, prompt, schedule = null }) {
     let session = null;
     try {
-      session = await sessionService.createSession({ projectId, scheduled: true });
+      if (kind === "schedule") {
+        const result = await sessionService.runScheduledSession({
+          projectId,
+          scheduleId: schedule?.id ?? null,
+          prompt,
+          title: schedule?.name || "定时任务执行",
+          sessionId: schedule?.sessionId ?? null,
+        });
+        session = { sessionId: result.sessionId };
+        return result;
+      }
+      session = await sessionService.createSession({ scope: { kind: "project", id: projectId }, scheduled: true });
       let result = await sessionService.submitPrompt({
         sessionId: session.sessionId,
-        projectId,
         question: prompt,
       });
       if ((kind === "summary" || kind === "todo") && result.outcome?.reason?.kind !== "completed") {
@@ -61,7 +76,6 @@ export function createScheduledRunPrompt(sessionService) {
         const requestedOutput = kind === "summary" ? "最终中文总结正文" : "最终待办逐行清单";
         result = await sessionService.submitPrompt({
           sessionId: session.sessionId,
-          projectId,
           question: `上一条响应不是可展示的${requestedOutput}。不要调用任何工具，不要输出 DSML、XML、代码或分析过程；只依据上一条消息已提供的数据，直接输出${requestedOutput}。`,
         });
         if (result.outcome?.reason?.kind !== "completed") {
@@ -74,6 +88,7 @@ export function createScheduledRunPrompt(sessionService) {
         text: kind === "summary" || kind === "todo" ? assertAutomationText(text, kind) : text,
       };
     } catch (error) {
+      if (!session?.sessionId && error?.sessionId) session = { sessionId: error.sessionId };
       if (!session?.sessionId) throw error;
       const wrapped = new Error(error instanceof Error ? error.message : String(error));
       wrapped.sessionId = session.sessionId;
@@ -87,6 +102,8 @@ export function createScheduledRunPrompt(sessionService) {
 /** Host plugin body — build the stack and own its lifecycle. */
 function apply(ctx, config = {}) {
   const dataDir = resolveDataRoot({ dataDir: config.dataDir });
+  const runtimeEnv = config.env ?? process.env;
+  const dshHome = config.dshHome ?? runtimeEnv.DSH_HOME ?? DEFAULT_DSH_HOME;
 
   ctx.effect(() => {
     let disposeRoute = null;
@@ -95,12 +112,23 @@ function apply(ctx, config = {}) {
     let queue = null;
     let sessionService = null;
     let scheduler = null;
+    let maintenanceStartup = null;
     try {
       db = openDatabase({ dataDir });
       const repos = createRepositories(db);
+      const contextResolver = createContextResolver({ repos });
       const settings = createWorkbenchSettings({ repos, dshInitial: config.settings?.initial });
       const ollama = createOllamaClient();
       vectorIndex = createVectorIndex({ dataDir });
+      const jobs = createPurgeJobStore({ dshHome });
+      const maintenance = createMaintenanceService({
+        env: runtimeEnv,
+        dshHome,
+        dataDir,
+        repos,
+        vectorIndex,
+        jobs,
+      });
       const credentials = optionalContextService(ctx, "credentials");
       const codexAuth = createCodexAuth({ credentials });
       const getCredential = async (ref) => {
@@ -132,8 +160,11 @@ function apply(ctx, config = {}) {
         }
       };
       indexer = createDocumentIndexer({ repos, vectorIndex, embedding });
-      const retriever = createRetriever({ repos, vectorIndex, embedding });
-      void indexer.reconcileStale().catch(() => {});
+      const sessionQuery = optionalContextService(ctx, "sessionQuery");
+      const sessionIndex = sessionQuery && typeof sessionQuery.readSession === "function"
+        ? createSessionIndexAdapter({ sessionQuery, embedding, vectorStore: vectorIndex })
+        : null;
+      const retriever = createRetriever({ repos, vectorIndex, embedding, sessionIndex });
       queue = createIndexQueue({ repos, indexer });
       const sessionWorkspace = async ({ kind, scopeId }) => {
         if (!ctx.workspaceRegistry || typeof ctx.workspaceRegistry.resolveByPath !== "function" || typeof ctx.workspaceRegistry.create !== "function") {
@@ -147,7 +178,7 @@ function apply(ctx, config = {}) {
         const title = kind === "knowledge_base" ? "Workbench KB " + scopeId : "Workbench Independent";
         return existing ?? ctx.workspaceRegistry.create(path, title);
       };
-      sessionService = createSessionService({ ctx, repos, retriever, sessionWorkspace });
+      sessionService = createSessionService({ ctx, repos, retriever, sessionWorkspace, contextResolver, sessionIndex });
       const runPrompt = createScheduledRunPrompt(sessionService);
       scheduler = createScheduler({
         repos,
@@ -156,7 +187,37 @@ function apply(ctx, config = {}) {
         automationPrompts: () => settings.get("automationPrompts"),
         projectConversations: (input) => sessionService.readProjectDailyConversation(input),
       });
-      scheduler.start();
+      const deleteContainer = async ({ kind, id, sessionPolicy }) => {
+        if (sessionPolicy !== "detach") {
+          throw new Error("permanent deletion requires a maintenance purge job");
+        }
+        const repository = kind === "project" ? repos.projects : repos.knowledgeBases;
+        const plan = repository.deletionPlan(id);
+        if (!plan) return null;
+        const sourceScope = { kind, id };
+        const moved = [];
+        try {
+          for (const sessionId of plan.sessionIds) {
+            await sessionService.moveSession({ sessionId, scope: { kind: "independent", id: null } });
+            moved.push(sessionId);
+          }
+          for (const document of plan.orphanDocuments) await vectorIndex.deleteDocument(document.id);
+          const removed = repository.removeContainer(id);
+          for (const document of plan.orphanDocuments) {
+            await unlink(join(dataDir, "files", document.sha256)).catch((error) => {
+              if (error?.code !== "ENOENT") throw error;
+            });
+          }
+          return removed;
+        } catch (error) {
+          if (sessionPolicy === "detach" && repository.get(id)) {
+            for (const sessionId of moved.reverse()) {
+              await sessionService.moveSession({ sessionId, scope: sourceScope }).catch(() => {});
+            }
+          }
+          throw error;
+        }
+      };
       const api = createApi({
         repos,
         queue,
@@ -171,32 +232,9 @@ function apply(ctx, config = {}) {
         codexAuth,
         dshAdapter: optionalContextService(ctx, "dshAdapter") ?? null,
         services: {
-          deleteProject: async (projectId) => {
-            const plan = repos.projects.deletionPlan(projectId);
-            if (!plan) return null;
-            for (const sessionId of plan.sessionIds) await sessionService.release(sessionId);
-            for (const document of plan.orphanDocuments) await vectorIndex.deleteDocument(document.id);
-            const removed = repos.projects.removeCascade(projectId);
-            for (const document of plan.orphanDocuments) {
-              await unlink(join(dataDir, "files", document.sha256)).catch((error) => {
-                if (error?.code !== "ENOENT") throw error;
-              });
-            }
-            return removed;
-          },
-          deleteKnowledgeBase: async (knowledgeBaseId) => {
-            const plan = repos.knowledgeBases.deletionPlan(knowledgeBaseId);
-            if (!plan) return null;
-            for (const sessionId of plan.sessionIds) await sessionService.release(sessionId);
-            for (const document of plan.orphanDocuments) await vectorIndex.deleteDocument(document.id);
-            const removed = repos.knowledgeBases.removeCascade(knowledgeBaseId);
-            for (const document of plan.orphanDocuments) {
-              await unlink(join(dataDir, "files", document.sha256)).catch((error) => {
-                if (error?.code !== "ENOENT") throw error;
-              });
-            }
-            return removed;
-          },
+          maintenance,
+          deleteProject: ({ projectId, sessionPolicy }) => deleteContainer({ kind: "project", id: projectId, sessionPolicy }),
+          deleteKnowledgeBase: ({ knowledgeBaseId, sessionPolicy }) => deleteContainer({ kind: "knowledge_base", id: knowledgeBaseId, sessionPolicy }),
           runSchedule: (schedule) => scheduler.runScheduleNow(schedule),
           runSummary: ({ projectId, summaryDate }) => scheduler.runSummary(
             { id: projectId },
@@ -208,6 +246,18 @@ function apply(ctx, config = {}) {
         },
       });
       disposeRoute = api.register(ctx.webServer);
+      const startOrdinaryServices = async () => {
+        scheduler.start();
+        await indexer.reconcileStale().catch(() => {});
+        await maintenance.markGenerationReady();
+      };
+      maintenanceStartup = maintenance.isLocked()
+        ? maintenance.finalizeStartupJob().then(startOrdinaryServices)
+        : startOrdinaryServices();
+      maintenanceStartup.catch(() => {
+        // The launcher observes the missing generation-ready marker plus the
+        // persisted restoring state, then owns rollback and recovery startup.
+      });
     } catch (err) {
       // Release whatever was created before the failure, in reverse order, so a
       // failed boot never leaks an adapter, route, or open resources.
@@ -225,6 +275,7 @@ function apply(ctx, config = {}) {
       // handle before closing the index/vector/database layers in order.
       disposeRoute();
       scheduler.stop();
+      await maintenanceStartup?.catch(() => {});
       await sessionService.dispose();
       await queue.close();
       await vectorIndex.close();
