@@ -1,7 +1,7 @@
 # Harness Workbench
 
 <p align="center">
-  <img src="./src/client/assets/harness-workbench-logo.svg" alt="Harness Workbench" width="420">
+  <img src="./docs/images/readme/harness-workbench-logo-dark.svg" alt="Harness Workbench" width="560">
 </p>
 
 <p align="center">
@@ -43,7 +43,7 @@ dsh-workbench
 
 ### 待办与自动化
 
-<img src="./docs/images/readme/project-automation.png" alt="项目定时任务控制面" width="360">
+<img src="./docs/images/readme/project-automation.png" alt="项目待办与自动化控制面" width="420">
 
 ### Workbench 设置与 Codex
 

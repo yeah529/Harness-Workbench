@@ -749,7 +749,7 @@ If no provider credential is available, record model-answer/tool execution as un
 ```bash
 git status --short
 git diff --stat
-rg -n "/Users/yewang|access_token|api[_-]?key|authorization: bearer|knowledge_chats|openKnowledgeChat|chatId" src test scripts README.md README.zh-CN.md package.json
+rg -n "/Users/example|access_token|api[_-]?key|authorization: bearer|knowledge_chats|openKnowledgeChat|chatId" src test scripts README.md README.zh-CN.md package.json
 ```
 
 Review every hit; test sentinel values are allowed only when clearly fake and source/runtime credentials are forbidden.

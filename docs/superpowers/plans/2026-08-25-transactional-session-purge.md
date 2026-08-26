@@ -907,7 +907,7 @@ Case B makes both maintenance and recovery starts fail. Assert `rollback_pending
 - `CPWB_SUPERVISED` and generation-ready handling;
 - `MaintenanceScreen` visible copy;
 - no recursive delete of `DSH_HOME`, `sessions/`, `workspace.json` or `session_projcache.json`;
-- no source path containing `/Users/yewang`;
+- no source path containing `/Users/example`;
 - no token or Authorization value in a recovery command.
 
 - [ ] **Step 4: Document user and maintainer recovery**

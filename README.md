@@ -1,7 +1,7 @@
 # Harness Workbench
 
 <p align="center">
-  <img src="./src/client/assets/harness-workbench-logo.svg" alt="Harness Workbench" width="420">
+  <img src="./docs/images/readme/harness-workbench-logo-dark.svg" alt="Harness Workbench" width="560">
 </p>
 
 <p align="center">
@@ -43,7 +43,7 @@ dsh-workbench
 
 ### Todos and scheduled agents
 
-<img src="./docs/images/readme/project-automation.png" alt="Project automation panel" width="360">
+<img src="./docs/images/readme/project-automation.png" alt="Project todos and automation panel" width="420">
 
 ### Workbench settings and Codex bridge
 
