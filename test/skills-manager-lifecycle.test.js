@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
 import { SkillScopeManager } from "../src/client/SkillsManager.js";
+import { WorkbenchSessionShell } from "../src/client/WorkbenchSessionShell.js";
 
 class FakeNode {
   constructor(ownerDocument, nodeType, nodeName) {
@@ -38,7 +39,14 @@ class FakeElement extends FakeNode {
   }
   setAttribute(name, value) { this.attributes.set(name, String(value)); this[name] = String(value); }
   removeAttribute(name) { this.attributes.delete(name); delete this[name]; }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
   focus() { this.ownerDocument.activeElement = this; }
+  click() { this.clicked = true; }
+  querySelector(selector) {
+    return findNodes(this, (node) => node.nodeType === 1 && (
+      selector === "button" ? node.tagName === "BUTTON" : selector.includes("button") && node.tagName === "BUTTON"
+    ))[0] || null;
+  }
 }
 
 class FakeDocument extends FakeNode {
@@ -280,4 +288,96 @@ test("mounted manager ignores a pending clipboard result after scope switch and 
   await act(async () => { root.unmount(); });
   await act(async () => { pending.resolve(); });
   assert.doesNotMatch(container.textContent, /已复制/);
+});
+
+test("compact import menu has stable focus, outside dismissal, and chooser semantics", async () => {
+  const document = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { act } = React;
+  const snapshot = { skillCatalogs: { "project:7": { status: "ready", data: { rootPath: "/project/.dsh/skills", items: [], diagnostics: [] } } }, skillAction: null };
+  const store = { getSnapshot: () => snapshot, subscribe: () => () => {}, actions: { loadSkills: async () => {} } };
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () => { root.render(React.createElement(SkillScopeManager, { store, scope: "project", projectId: 7, compact: true })); });
+  const trigger = findNodes(container, (node) => node.tagName === "BUTTON" && node.getAttribute?.("aria-haspopup") === "menu")[0];
+  assert.ok(trigger);
+  const triggerId = trigger.getAttribute("id");
+  assert.ok(triggerId);
+  await act(async () => { await invokeProp(trigger, "onClick", {}); });
+  const menu = findNodes(container, (node) => node.getAttribute?.("role") === "menu")[0];
+  const options = findNodes(menu, (node) => node.getAttribute?.("role") === "menuitem");
+  assert.ok(menu);
+  assert.equal(menu.getAttribute("aria-labelledby"), triggerId);
+  assert.equal(options.length, 2);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(document.activeElement, options[0]);
+  assert.ok(document.listeners.get("keydown"));
+  assert.ok(document.listeners.get("pointerdown"));
+  await act(async () => {
+    document.listeners.get("keydown")({ key: "Escape", preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(document.activeElement, trigger);
+  assert.equal(document.listeners.get("keydown"), undefined);
+  assert.equal(document.listeners.get("pointerdown"), undefined);
+
+  await act(async () => { await invokeProp(trigger, "onClick", {}); });
+  const reopened = findNodes(container, (node) => node.getAttribute?.("role") === "menu")[0];
+  await act(async () => { document.listeners.get("pointerdown")({ target: document.body }); });
+  assert.equal(findNodes(container, (node) => node.getAttribute?.("role") === "menu").length, 0);
+  assert.ok(reopened);
+
+  await act(async () => { await invokeProp(trigger, "onClick", {}); });
+  await act(async () => { document.listeners.get("click")({ target: document.body }); });
+  assert.equal(findNodes(container, (node) => node.getAttribute?.("role") === "menu").length, 0);
+
+  await act(async () => { await invokeProp(trigger, "onClick", {}); });
+  const directoryOption = findNodes(container, (node) => node.getAttribute?.("role") === "menuitem")[0];
+  const directoryInput = findNodes(container, (node) => node.tagName === "INPUT" && node.getAttribute?.("webkitdirectory") !== null)[0];
+  assert.ok(directoryInput);
+  await act(async () => { await invokeProp(directoryOption, "onClick", {}); });
+  assert.equal(directoryInput.clicked, true);
+  assert.equal(findNodes(container, (node) => node.getAttribute?.("role") === "menu").length, 0);
+
+  await act(async () => { root.unmount(); });
+  assert.equal(document.listeners.get("keydown"), undefined);
+  assert.equal(document.listeners.get("pointerdown"), undefined);
+});
+
+test("mounted project rail tabs activate and move focus with roving keyboard navigation", async () => {
+  const document = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { act } = React;
+  const state = {
+    projects: [{ id: 7, name: "Research" }],
+    workbenchSessions: { "session-cpwb-tabs": { sessionId: "session-cpwb-tabs", scope: { kind: "project", id: 7 }, title: "Tabs" } },
+    linkedKnowledgeBases: [],
+    skillCatalogs: { "project:7": { status: "ready", data: { rootPath: "/project/.dsh/skills", items: [], diagnostics: [] } } },
+  };
+  const store = { getSnapshot: () => state, subscribe: () => () => {}, actions: { refreshProject: async () => {}, loadSkills: async () => {} } };
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const sessionsSnapshot = { subagentsByParent: {} };
+  const sessions = { list: { getSnapshot: () => sessionsSnapshot, subscribe: () => () => {} } };
+  await act(async () => { root.render(React.createElement(WorkbenchSessionShell, { sessionId: "session-cpwb-tabs", open: true, store, sessions, layoutMode: "desktop" })); });
+  const tabs = () => findNodes(container, (node) => node.tagName === "BUTTON" && node.getAttribute?.("role") === "tab");
+  const first = tabs()[0];
+  const second = tabs()[1];
+  assert.equal(first.getAttribute("tabindex"), "0");
+  assert.equal(second.getAttribute("tabindex"), "-1");
+  await act(async () => { invokeProp(first, "onKeyDown", { key: "ArrowRight", preventDefault() {} }); });
+  assert.equal(document.activeElement, second);
+  assert.equal(second.getAttribute("aria-selected"), "true");
+  assert.equal(first.getAttribute("tabindex"), "-1");
+  await act(async () => { invokeProp(second, "onKeyDown", { key: "End", preventDefault() {} }); });
+  const last = tabs()[4];
+  assert.equal(document.activeElement, last);
+  assert.equal(last.getAttribute("aria-selected"), "true");
+  await act(async () => { invokeProp(last, "onKeyDown", { key: "ArrowRight", preventDefault() {} }); });
+  assert.equal(document.activeElement, tabs()[0]);
+  await act(async () => { invokeProp(tabs()[0], "onKeyDown", { key: "ArrowLeft", preventDefault() {} }); });
+  assert.equal(document.activeElement, tabs()[4]);
+  const panel = findNodes(container, (node) => node.getAttribute?.("role") === "tabpanel")[0];
+  assert.equal(panel.getAttribute("aria-labelledby"), last.getAttribute("id"));
+  await act(async () => { root.unmount(); });
 });

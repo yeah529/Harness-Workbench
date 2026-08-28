@@ -136,6 +136,9 @@ function SkillRow({ item, scope, targetKey, store, onDelete, compact = false }) 
 }
 
 export function SkillScopeManager({ store, scope = "global", projectId = null, compact = false }) {
+  const idSeed = React.useId();
+  const importMenuId = "cpwb-skills-import-menu-" + idSeed.replace(/:/g, "-");
+  const importTriggerId = importMenuId + "-trigger";
   const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const key = skillScopeKey(scope, projectId);
   const catalog = state.skillCatalogs?.[key] || { status: "loading", data: null, error: null };
@@ -151,6 +154,9 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   const replacePendingRef = React.useRef(false);
   const directoryRef = React.useRef(null);
   const zipRef = React.useRef(null);
+  const importTriggerRef = React.useRef(null);
+  const importMenuRef = React.useRef(null);
+  const menuFocusTimerRef = React.useRef(null);
   activeKeyRef.current = key;
   React.useEffect(() => {
     importRequestRef.current += 1;
@@ -164,6 +170,45 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     setReplacePending(false);
     return () => { generationRef.current += 1; importRequestRef.current += 1; };
   }, [key]);
+  React.useEffect(() => () => {
+    if (menuFocusTimerRef.current) clearTimeout(menuFocusTimerRef.current);
+  }, []);
+  const closeImportMenu = React.useCallback((restoreFocus = false) => {
+    setImportMenuOpen(false);
+    if (restoreFocus) importTriggerRef.current?.focus?.();
+  }, []);
+  React.useEffect(() => {
+    if (!compact || !importMenuOpen || typeof document === "undefined") return undefined;
+    menuFocusTimerRef.current = setTimeout(() => {
+      menuFocusTimerRef.current = null;
+      importMenuRef.current?.querySelector?.("button[role='menuitem']")?.focus?.();
+    }, 0);
+    const onKeyDown = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeImportMenu(true);
+    };
+    const onPointerDown = (event) => {
+      if (importTriggerRef.current?.contains?.(event.target) || importMenuRef.current?.contains?.(event.target)) return;
+      closeImportMenu(false);
+    };
+    const onClick = (event) => {
+      if (importTriggerRef.current?.contains?.(event.target) || importMenuRef.current?.contains?.(event.target)) return;
+      closeImportMenu(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("click", onClick);
+    return () => {
+      if (menuFocusTimerRef.current) {
+        clearTimeout(menuFocusTimerRef.current);
+        menuFocusTimerRef.current = null;
+      }
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("click", onClick);
+    };
+  }, [closeImportMenu, compact, importMenuOpen]);
   React.useEffect(() => {
     if (typeof store.actions.loadSkills !== "function" || (scope === "project" && !(Number.isSafeInteger(projectId) && projectId > 0))) return undefined;
     store.actions.loadSkills({ scope, ...(scope === "project" ? { projectId } : {}) }).catch?.(() => {});
@@ -272,11 +317,11 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   const rootUnavailable = (scope === "project" && !(Number.isSafeInteger(projectId) && projectId > 0)) || catalog.error?.code === "PROJECT_PATH_UNAVAILABLE" || catalog.error?.code === "SKILL_PERMISSION_DENIED";
   const rootPath = data?.rootPath || "";
   const selectDirectory = () => {
-    setImportMenuOpen(false);
+    closeImportMenu(false);
     directoryRef.current?.click?.();
   };
   const selectZip = () => {
-    setImportMenuOpen(false);
+    closeImportMenu(false);
     zipRef.current?.click?.();
   };
   return h("section", { className: "cpwb-skills-scope-manager" + (compact ? " cpwb-skills-compact" : ""), "aria-label": scopeLabel(scope) },
@@ -288,8 +333,8 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
       h("input", { ref: directoryRef, className: "cpwb-visually-hidden", type: "file", webkitdirectory: "", directory: "", multiple: true, onChange: chooseDirectory, tabIndex: -1, disabled: rootUnavailable, "aria-hidden": true }),
       h("input", { ref: zipRef, className: "cpwb-visually-hidden", type: "file", accept: ".zip,application/zip", onChange: chooseZip, tabIndex: -1, disabled: rootUnavailable, "aria-hidden": true }),
       compact ? h("div", { className: "cpwb-skills-import-menu" },
-        h("button", { type: "button", className: "cpwb-btn cpwb-btn-primary cpwb-button-content cpwb-skills-import-trigger", disabled: rootUnavailable, onClick: () => setImportMenuOpen((open) => !open), "aria-haspopup": "menu", "aria-expanded": importMenuOpen, "aria-controls": "cpwb-skills-import-menu" }, h(UploadSimple, { size: 15, "aria-hidden": true }), h("span", null, "导入 Skill")),
-        importMenuOpen ? h("div", { id: "cpwb-skills-import-menu", className: "cpwb-skills-import-options", role: "menu", "aria-label": "选择 Skill 导入来源" },
+        h("button", { id: importTriggerId, ref: importTriggerRef, type: "button", className: "cpwb-btn cpwb-btn-primary cpwb-button-content cpwb-skills-import-trigger", disabled: rootUnavailable, onClick: () => setImportMenuOpen((open) => !open), "aria-haspopup": "menu", "aria-expanded": importMenuOpen, "aria-controls": importMenuId }, h(UploadSimple, { size: 15, "aria-hidden": true }), h("span", null, "导入 Skill")),
+        importMenuOpen ? h("div", { id: importMenuId, ref: importMenuRef, className: "cpwb-skills-import-options", role: "menu", "aria-labelledby": importTriggerId, "aria-label": "选择 Skill 导入来源" },
           h("button", { type: "button", role: "menuitem", onClick: selectDirectory }, h(FolderOpen, { size: 14, "aria-hidden": true }), h("span", null, "从目录导入")),
           h("button", { type: "button", role: "menuitem", onClick: selectZip }, h(Package, { size: 14, "aria-hidden": true }), h("span", null, "从 ZIP 导入"))) : null)
         : h(React.Fragment, null,

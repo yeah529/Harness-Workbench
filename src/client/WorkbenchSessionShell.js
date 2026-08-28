@@ -291,6 +291,9 @@ function LinkedProjectsPanel({ knowledgeBaseId, state, store }) {
 
 /** Native rc.2 ConversationRoot remains the only conversation renderer. */
 export function WorkbenchSessionShell(props) {
+  const tabIdSeed = React.useId();
+  const tabIdPrefix = "cpwb-tool-tab-" + tabIdSeed.replace(/:/g, "-");
+  const tabRefs = React.useRef(new Map());
   const state = React.useSyncExternalStore(props.store.subscribe, props.store.getSnapshot, props.store.getSnapshot);
   const homeOpenSnapshot = useHomeOpen();
   const sessionSnapshot = React.useSyncExternalStore(
@@ -358,6 +361,26 @@ export function WorkbenchSessionShell(props) {
   if (!visible || !sessionId || !String(sessionId).startsWith("session-cpwb-")) return null;
 
   const toolTabs = projectId != null ? PROJECT_TOOL_TABS : knowledgeBaseId != null ? KNOWLEDGE_TOOL_TABS : INDEPENDENT_TOOL_TABS;
+  const tabIdFor = (id) => tabIdPrefix + "-" + id;
+  const tabPanelId = tabIdPrefix + "-panel";
+  const setTabRef = (id) => (node) => {
+    if (node) tabRefs.current.set(id, node);
+    else tabRefs.current.delete(id);
+  };
+  const onToolTabKeyDown = (event, id) => {
+    const currentIndex = toolTabs.findIndex(([tabId]) => tabId === id);
+    if (currentIndex < 0) return;
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1) % toolTabs.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (currentIndex - 1 + toolTabs.length) % toolTabs.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = toolTabs.length - 1;
+    else return;
+    event.preventDefault();
+    const nextId = toolTabs[nextIndex][0];
+    setActiveTool(nextId);
+    tabRefs.current.get(nextId)?.focus?.();
+  };
   let body = null;
   if (projectId != null) {
     if (activeTool === "todos") body = React.createElement(Todos, { store: props.store, projectId });
@@ -391,15 +414,19 @@ export function WorkbenchSessionShell(props) {
       React.createElement("nav", { className: "cpwb-project-tool-tabs", role: "tablist", "aria-label": "上下文工具", "data-tool-count": String(toolTabs.length) }, toolTabs.map(([id, label, IconComponent]) => React.createElement("button", {
         type: "button",
         role: "tab",
+        id: tabIdFor(id),
+        ref: setTabRef(id),
         key: id,
         className: activeTool === id ? "cpwb-active" : "",
         onClick: () => setActiveTool(id),
+        onKeyDown: (event) => onToolTabKeyDown(event, id),
+        tabIndex: activeTool === id ? 0 : -1,
         "aria-selected": activeTool === id,
-        "aria-controls": "cpwb-project-tool-panel",
+        "aria-controls": tabPanelId,
         "aria-current": activeTool === id ? "page" : undefined,
         title: label,
       }, React.createElement(IconComponent, { size: 18, weight: "regular", "aria-hidden": true }), React.createElement("span", null, label)))),
-      React.createElement("div", { id: "cpwb-project-tool-panel", className: "cpwb-project-tool-body", role: "tabpanel", "aria-label": activeTool }, body));
+      React.createElement("div", { id: tabPanelId, className: "cpwb-project-tool-body", role: "tabpanel", "aria-label": activeTool, "aria-labelledby": tabIdFor(activeTool) }, body));
   };
 
   const transitioning = opening || Boolean(openError);

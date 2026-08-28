@@ -527,6 +527,52 @@ test("project Skills panel binds to the current project without global controls"
   assert.doesNotMatch(html, /选择项目/);
 });
 
+test("right rail tabs use unique accessible ids and roving keyboard tab stops", () => {
+  const state = {
+    projects: [{ id: 7, name: "Research" }],
+    workbenchSessions: {
+      "session-cpwb-project-a": { sessionId: "session-cpwb-project-a", scope: { kind: "project", id: 7 }, title: "A" },
+      "session-cpwb-project-b": { sessionId: "session-cpwb-project-b", scope: { kind: "project", id: 7 }, title: "B" },
+    },
+    linkedKnowledgeBases: [],
+  };
+  const store = { subscribe: () => () => {}, getSnapshot: () => state, actions: { refreshProject: async () => {} } };
+  const html = renderToStaticMarkup(React.createElement(React.Fragment, null,
+    React.createElement(WorkbenchSessionShell, { sessionId: "session-cpwb-project-a", open: true, store, layoutMode: "desktop" }),
+    React.createElement(WorkbenchSessionShell, { sessionId: "session-cpwb-project-b", open: true, store, layoutMode: "desktop" })));
+  const tabMatches = [...html.matchAll(/<button type="button" role="tab" id="([^"]+)"[^>]*tabindex="(-?\d+)"[^>]*aria-selected="([^"]+)"/g)];
+  const panelMatches = [...html.matchAll(/<div id="([^"]+)" class="cpwb-project-tool-body" role="tabpanel" aria-label="([^"]+)" aria-labelledby="([^"]+)"/g)];
+  assert.equal(tabMatches.length, 10);
+  assert.equal(new Set(tabMatches.map((match) => match[1])).size, 10);
+  for (let offset = 0; offset < tabMatches.length; offset += 5) {
+    assert.equal(tabMatches[offset][2], "0");
+    assert.equal(tabMatches[offset][3], "true");
+    for (const match of tabMatches.slice(offset + 1, offset + 5)) assert.equal(match[2], "-1");
+  }
+  assert.equal(panelMatches.length, 2);
+  assert.equal(new Set(panelMatches.map((match) => match[1])).size, 2);
+  assert.ok(panelMatches.every((match) => tabMatches.some((tab) => tab[1] === match[3] && tab[3] === "true")));
+});
+
+test("server-rendered project skill managers allocate unique import menu ids", () => {
+  const snapshot = {
+    skillCatalogs: {
+      "project:7": { status: "ready", data: { rootPath: "/project-a/.dsh/skills", items: [], diagnostics: [] } },
+      "project:8": { status: "ready", data: { rootPath: "/project-b/.dsh/skills", items: [], diagnostics: [] } },
+    },
+  };
+  const store = { subscribe: () => () => {}, getSnapshot: () => snapshot, actions: {} };
+  const html = renderToStaticMarkup(React.createElement(React.Fragment, null,
+    React.createElement(ProjectSkillsPanel, { store, projectId: 7 }),
+    React.createElement(ProjectSkillsPanel, { store, projectId: 8 })));
+  const triggerIds = [...html.matchAll(/id="([^"]+-trigger)"[^>]*aria-haspopup="menu"/g)].map((match) => match[1]);
+  const menuIds = [...html.matchAll(/<div id="([^"]+)"[^>]*role="menu"/g)].map((match) => match[1]);
+  assert.equal(triggerIds.length, 2);
+  assert.equal(menuIds.length, 0, "closed SSR menus should not render menu nodes");
+  assert.equal(new Set(triggerIds).size, 2);
+  assert.ok(triggerIds.every((id) => id.includes("cpwb-skills-import-menu-")));
+});
+
 test("container deletion defaults to preserving sessions and discloses every cleanup boundary", () => {
   const snapshot = { action: null };
   const store = { subscribe: () => () => {}, getSnapshot: () => snapshot, actions: {} };
