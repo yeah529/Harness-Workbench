@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { strToU8, zipSync } from "fflate";
 
 import { createApi } from "../src/host/api.js";
 import { createIndexQueue } from "../src/host/queue.js";
@@ -22,6 +23,8 @@ import { createRepositories } from "../src/host/repositories.js";
 import { createWorkbenchSettings } from "../src/host/settings.js";
 import { localDateTimeParts } from "../src/host/timezone.js";
 import { WorkbenchSessionError, SESSION_ERROR_CODES } from "../src/host/session-errors.js";
+import { createSkillManager } from "../src/host/skill-manager.js";
+import { SkillManagerError, SKILL_ERROR_CODES } from "../src/host/skill-package.js";
 import { createTempDir, removeTempDir } from "./helpers.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -175,10 +178,14 @@ function makeFakeSessionService({ materializeResult, materializeError, confirmRe
 }
 
 /** Start the full stack (real SQLite + files, fake Ollama/indexer) in-process. */
-async function startApi(t, { ollama, retriever, indexer, services, sessions, settings, embeddingFactory, onEmbeddingConfigChange, credentials, codexAuth, dshAdapter, logger, networkEnv } = {}) {
+async function startApi(t, { ollama, retriever, indexer, services, sessions, settings, embeddingFactory, onEmbeddingConfigChange, credentials, codexAuth, dshAdapter, logger, networkEnv, skills, skillManagerFactory } = {}) {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
+  const dshHome = join(dataDir, "dsh-home");
+  const skillManager = skillManagerFactory
+    ? skillManagerFactory({ dshHome, repos })
+    : skills;
   const fakeOllama = ollama ?? makeFakeOllama();
   const fakeRetriever = retriever ?? makeFakeRetriever();
   const fakeIndexer = indexer ?? makeFakeIndexer(repos);
@@ -198,6 +205,7 @@ async function startApi(t, { ollama, retriever, indexer, services, sessions, set
     credentials,
     codexAuth,
     dshAdapter,
+    skills: skillManager,
     logger,
     networkEnv,
   });
@@ -210,7 +218,7 @@ async function startApi(t, { ollama, retriever, indexer, services, sessions, set
     closeDatabase(db);
     await removeTempDir(dataDir);
   });
-  return { base, repos, queue, fakeIndexer, fakeRetriever, dataDir, db };
+  return { base, repos, queue, fakeIndexer, fakeRetriever, dataDir, dshHome, db };
 }
 
 function uploadBody(name, scope, scopeId, body) {
@@ -224,6 +232,117 @@ function uploadBody(name, scope, scopeId, body) {
     body,
   };
 }
+
+const skillMd = (name, description = name) => `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
+
+function skillUploadBody(bytes, { scope, projectId, sourceName, replace } = {}) {
+  const headers = {
+    "content-type": "application/zip",
+    "x-cpwb-skill-scope": scope,
+    "x-cpwb-filename": encodeURIComponent(sourceName),
+  };
+  if (projectId !== undefined) headers["x-cpwb-project-id"] = String(projectId);
+  if (replace !== undefined) headers["x-cpwb-replace"] = String(replace);
+  return { method: "POST", headers, body: bytes };
+}
+
+test("skill API lists, imports, conflicts, replaces, disables, and deletes", async (t) => {
+  const { base } = await startApi(t, {
+    skillManagerFactory: ({ dshHome, repos }) => createSkillManager({
+      dshHome,
+      repos,
+      revealPath: async () => {},
+    }),
+  });
+  const bytes = zipSync({ "SKILL.md": strToU8(skillMd("api-skill")) });
+  let response = await fetch(base + "/skills/import", skillUploadBody(bytes, { scope: "global", sourceName: "api.zip" }));
+  assert.equal(response.status, 201);
+  response = await fetch(base + "/skills/import", skillUploadBody(bytes, { scope: "global", sourceName: "api.zip" }));
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "SKILL_CONFLICT");
+  response = await fetch(base + "/skills/import", skillUploadBody(bytes, { scope: "global", sourceName: "api.zip", replace: true }));
+  assert.equal(response.status, 200);
+  response = await fetch(base + "/skills/api-skill", {
+    method: "PATCH",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ scope: "global", operation: "disable" }),
+  });
+  assert.equal((await response.json()).state, "disabled");
+  response = await fetch(base + "/skills/api-skill?scope=global", { method: "DELETE" });
+  assert.equal(response.status, 200);
+});
+
+test("skill API never accepts an installation target path", async (t) => {
+  const fake = { list: async (input) => input };
+  const { base } = await startApi(t, { skills: fake });
+  const response = await fetch(base + "/skills?scope=global&path=%2Ftmp%2Fevil");
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "INVALID_FIELD");
+});
+
+test("skill routes return a stable unavailable error when the manager is absent", async (t) => {
+  const { base } = await startApi(t);
+  const response = await fetch(base + "/skills?scope=global");
+  assert.equal(response.status, 501);
+  assert.equal((await response.json()).error.code, "SKILL_MANAGER_UNAVAILABLE");
+});
+
+test("skill API rejects strict header, body, and query contract violations", async (t) => {
+  const calls = [];
+  const fake = {
+    list: async (input) => { calls.push(["list", input]); return input; },
+    importArchive: async (input) => { calls.push(["import", input]); return { name: "ok-skill" }; },
+    setEnabled: async (input) => { calls.push(["patch", input]); return input; },
+  };
+  const { base } = await startApi(t, { skills: fake });
+  let response = await fetch(base + "/skills?scope=global&extra=true");
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "INVALID_FIELD");
+
+  response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), { scope: "global", sourceName: "bad.zip" }));
+  assert.equal(response.status, 201);
+  assert.equal(calls.at(-1)[0], "import");
+  response = await fetch(base + "/skills/import", {
+    method: "POST",
+    headers: { "content-type": "application/zip; charset=binary", "x-cpwb-skill-scope": "global", "x-cpwb-filename": "bad.zip" },
+    body: new Uint8Array([1]),
+  });
+  assert.equal(response.status, 415);
+
+  response = await fetch(base + "/skills/ok-skill", {
+    method: "PATCH", headers: JSON_HEADERS,
+    body: JSON.stringify({ scope: "global", operation: "enable", path: "/tmp/evil" }),
+  });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "INVALID_FIELD");
+  assert.equal(calls.some(([kind]) => kind === "patch"), false);
+});
+
+test("skill import aborts a compressed body over 50 MiB", async (t) => {
+  const { base } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
+  const body = new Uint8Array(50 * 1024 * 1024 + 1);
+  const response = await fetch(base + "/skills/import", skillUploadBody(body, { scope: "global", sourceName: "large.zip" }));
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+});
+
+test("skill manager errors map to stable responses without filesystem path leakage", async (t) => {
+  const fake = {
+    importArchive: async () => {
+      throw new SkillManagerError(SKILL_ERROR_CODES.CONFLICT, "secret /private/workbench/skills/old", {
+        existing: { name: "same-skill", state: "enabled", path: "/private/workbench/skills/same-skill" },
+        incoming: { name: "same-skill", sourceName: "upload.zip", path: "/private/tmp/staging" },
+      });
+    },
+  };
+  const { base } = await startApi(t, { skills: fake });
+  const response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), { scope: "global", sourceName: "upload.zip" }));
+  assert.equal(response.status, 409);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "SKILL_CONFLICT");
+  assert.equal(payload.error.message.includes("/private"), false);
+  assert.equal(JSON.stringify(payload).includes("/private"), false);
+});
 
 // ---------------------------------------------------------------- health
 

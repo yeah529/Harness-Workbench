@@ -28,6 +28,7 @@ import { saveFile, FileStorageError, FILE_ERROR_CODES } from "./files.js";
 import { RetrievalError } from "./retrieval.js";
 import { WorkbenchSessionError, SESSION_ERROR_CODES } from "./session-errors.js";
 import { ContextSourceError } from "./context.js";
+import { SkillManagerError, SKILL_ERROR_CODES, SKILL_PACKAGE_LIMITS } from "./skill-package.js";
 import { nextScheduleOccurrence, scheduleRuleFromInput } from "./scheduler.js";
 import { DEFAULT_TIME_ZONE } from "./timezone.js";
 import { embeddingIdentity } from "./embedding.js";
@@ -76,6 +77,40 @@ const SESSION_ERROR_STATUS = {
   [SESSION_ERROR_CODES.SESSION_DELETE_UNAVAILABLE]: 501,
   [SESSION_ERROR_CODES.SESSION_RESUME_FAILED]: 500,
 };
+
+const SKILL_ERROR_STATUS = {
+  [SKILL_ERROR_CODES.INVALID_SCOPE]: 422,
+  [SKILL_ERROR_CODES.PROJECT_NOT_FOUND]: 404,
+  [SKILL_ERROR_CODES.PROJECT_PATH_UNAVAILABLE]: 422,
+  [SKILL_ERROR_CODES.ARCHIVE_TOO_LARGE]: 413,
+  [SKILL_ERROR_CODES.ARCHIVE_UNSAFE]: 422,
+  [SKILL_ERROR_CODES.PACKAGE_INVALID]: 422,
+  [SKILL_ERROR_CODES.NAME_INVALID]: 422,
+  [SKILL_ERROR_CODES.CONFLICT]: 409,
+  [SKILL_ERROR_CODES.STATE_CONFLICT]: 409,
+  [SKILL_ERROR_CODES.NOT_FOUND]: 404,
+  [SKILL_ERROR_CODES.PERMISSION_DENIED]: 403,
+  [SKILL_ERROR_CODES.RECOVERY_REQUIRED]: 409,
+  [SKILL_ERROR_CODES.FILE_MANAGER_UNAVAILABLE]: 501,
+};
+
+const SKILL_ERROR_MESSAGES = {
+  [SKILL_ERROR_CODES.INVALID_SCOPE]: "Skill 作用域无效",
+  [SKILL_ERROR_CODES.PROJECT_NOT_FOUND]: "项目不存在",
+  [SKILL_ERROR_CODES.PROJECT_PATH_UNAVAILABLE]: "项目目录不可用",
+  [SKILL_ERROR_CODES.ARCHIVE_TOO_LARGE]: "Skill ZIP 超过大小限制",
+  [SKILL_ERROR_CODES.ARCHIVE_UNSAFE]: "Skill ZIP 未通过安全校验",
+  [SKILL_ERROR_CODES.PACKAGE_INVALID]: "Skill 包格式无效",
+  [SKILL_ERROR_CODES.NAME_INVALID]: "Skill 名称无效",
+  [SKILL_ERROR_CODES.CONFLICT]: "Skill 已存在",
+  [SKILL_ERROR_CODES.STATE_CONFLICT]: "Skill 状态冲突",
+  [SKILL_ERROR_CODES.NOT_FOUND]: "Skill 不存在",
+  [SKILL_ERROR_CODES.PERMISSION_DENIED]: "Skill 目录无权访问",
+  [SKILL_ERROR_CODES.RECOVERY_REQUIRED]: "Skill 事务需要人工恢复",
+  [SKILL_ERROR_CODES.FILE_MANAGER_UNAVAILABLE]: "文件管理器不可用",
+};
+
+const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 // ------------------------------------------------------------- small helpers
 
@@ -167,6 +202,32 @@ function safeSessionErrorDetails(error) {
   return { sessionId, lifecycleStatus, pendingQuestion };
 }
 
+function safeSkillSummary(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const summary = {};
+  for (const field of ["name", "description", "state", "health", "fileCount", "sourceName"]) {
+    if (typeof value[field] === "string" || Number.isSafeInteger(value[field])) summary[field] = value[field];
+  }
+  return Object.keys(summary).length > 0 ? summary : undefined;
+}
+
+function safeSkillErrorDetails(error) {
+  const details = error?.details;
+  if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+  if (error.code === SKILL_ERROR_CODES.CONFLICT) {
+    const existing = safeSkillSummary(details.existing);
+    const incoming = safeSkillSummary(details.incoming);
+    return existing || incoming ? { ...(existing ? { existing } : {}), ...(incoming ? { incoming } : {}) } : undefined;
+  }
+  const safe = {};
+  if (Number.isSafeInteger(details.bytes)) safe.bytes = details.bytes;
+  if (Number.isSafeInteger(details.limit)) safe.limit = details.limit;
+  if (typeof details.name === "string" && SKILL_NAME_PATTERN.test(details.name)) safe.name = details.name;
+  if (typeof details.id === "string" && details.id.length <= 128 && /^[A-Za-z0-9-]+$/.test(details.id)) safe.id = details.id;
+  if (typeof details.operation === "string" && /^[a-z]+$/.test(details.operation)) safe.operation = details.operation;
+  return Object.keys(safe).length > 0 ? safe : undefined;
+}
+
 /** Map any thrown value into an ApiError with a stable, non-leaking code. */
 function toApiError(err) {
   if (err instanceof ApiError) return err;
@@ -187,6 +248,11 @@ function toApiError(err) {
   }
   if (err instanceof WorkbenchSessionError) {
     return new ApiError(SESSION_ERROR_STATUS[err.code] ?? 500, err.code, err.message, safeSessionErrorDetails(err));
+  }
+  if (err instanceof SkillManagerError) {
+    const status = SKILL_ERROR_STATUS[err.code];
+    if (status === undefined) return new ApiError(500, "INTERNAL_ERROR", "internal server error");
+    return new ApiError(status, err.code, SKILL_ERROR_MESSAGES[err.code] ?? "Skill 操作失败", safeSkillErrorDetails(err));
   }
   return new ApiError(500, "INTERNAL_ERROR", "internal server error");
 }
@@ -314,6 +380,32 @@ async function readJsonBody(req) {
   }
 }
 
+/** Read a raw ZIP request body without buffering beyond the compressed limit. */
+async function readRawBody(req, limit = SKILL_PACKAGE_LIMITS.archiveBytes) {
+  const declared = req.headers["content-length"];
+  if (declared != null && /^\d+$/.test(String(declared)) && Number(declared) > limit) {
+    req.destroy?.();
+    throw new ApiError(413, SKILL_ERROR_CODES.ARCHIVE_TOO_LARGE, "Skill ZIP exceeds the byte limit");
+  }
+  const chunks = [];
+  let total = 0;
+  try {
+    for await (const chunk of req) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buf.byteLength;
+      if (total > limit) {
+        req.destroy?.();
+        throw new ApiError(413, SKILL_ERROR_CODES.ARCHIVE_TOO_LARGE, "Skill ZIP exceeds the byte limit");
+      }
+      chunks.push(buf);
+    }
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw error;
+  }
+  return Buffer.concat(chunks, total);
+}
+
 // ----------------------------------------------------------- field validation
 
 function requireString(body, field, label = field) {
@@ -433,10 +525,11 @@ function matchParams(path, pattern) {
  * @param {{ health: Function }} deps.ollama
  * @param {{ search: Function }} deps.retriever
  * @param {string} deps.dataDir data root for file storage
+ * @param {{ list: Function, importArchive: Function, setEnabled: Function, remove: Function, reveal: Function }} [deps.skills]
  * @param {{ runSchedule?: Function, runSummary?: Function }} [deps.services]
  * @param {{ error?: Function }} [deps.logger]
  */
-export function createApi({ repos, queue, ollama, retriever, dataDir, services = {}, sessions, settings, embeddingFactory, onEmbeddingConfigChange, credentials, codexAuth, dshAdapter, logger = console, networkEnv = process.env }) {
+export function createApi({ repos, queue, ollama, retriever, dataDir, services = {}, sessions, settings, embeddingFactory, onEmbeddingConfigChange, credentials, codexAuth, dshAdapter, skills, logger = console, networkEnv = process.env }) {
   if (!repos || !queue || !ollama || !retriever || typeof dataDir !== "string") {
     throw new Error("createApi requires repos, queue, ollama, retriever, and dataDir");
   }
@@ -456,6 +549,98 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
   const maintenance = services.maintenance ?? null;
   const logError = typeof logger?.error === "function" ? logger.error.bind(logger) : () => {};
   const configuredTimeZone = () => settings?.get?.("timezone") ?? DEFAULT_TIME_ZONE;
+
+  function requireSkillMethod(method) {
+    if (typeof skills?.[method] !== "function") {
+      throw new ApiError(501, "SKILL_MANAGER_UNAVAILABLE", "Skill 管理服务不可用");
+    }
+  }
+
+  function parseSkillScope(scope, projectId) {
+    if (scope !== "global" && scope !== "project") {
+      throw new ApiError(422, SKILL_ERROR_CODES.INVALID_SCOPE, "scope must be global or project");
+    }
+    if (scope === "global") {
+      if (projectId !== undefined) throw new ApiError(422, "INVALID_FIELD", "projectId is only valid for project scope");
+      return { scope };
+    }
+    if (!isPositiveInt(projectId)) {
+      throw new ApiError(422, "INVALID_FIELD", "projectId must be a positive integer");
+    }
+    return { scope, projectId };
+  }
+
+  function parseSkillQuery(url) {
+    const allowed = new Set(["scope", "projectId"]);
+    for (const key of url.searchParams.keys()) {
+      if (!allowed.has(key)) throw new ApiError(422, "INVALID_FIELD", "unknown field: " + key);
+    }
+    const scope = url.searchParams.get("scope");
+    const projectIdRaw = url.searchParams.get("projectId");
+    const projectId = projectIdRaw == null ? undefined : queryPositiveInt(projectIdRaw, "projectId");
+    return parseSkillScope(scope, projectId);
+  }
+
+  function parseSkillJsonScope(body, fields) {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new ApiError(422, "INVALID_FIELD", "JSON body must be an object");
+    }
+    const allowed = new Set(fields);
+    const unknownField = Object.keys(body).find((field) => !allowed.has(field));
+    if (unknownField) throw new ApiError(422, "INVALID_FIELD", "unknown field: " + unknownField);
+    const scope = body.scope;
+    const projectId = body.projectId;
+    if (projectId !== undefined && !isPositiveInt(projectId)) {
+      throw new ApiError(422, "INVALID_FIELD", "projectId must be a positive integer");
+    }
+    return parseSkillScope(scope, projectId);
+  }
+
+  function parseSkillName(raw) {
+    if (typeof raw !== "string" || !SKILL_NAME_PATTERN.test(raw)) {
+      throw new ApiError(422, SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid");
+    }
+    return raw;
+  }
+
+  function parseSkillFilename(raw) {
+    if (typeof raw !== "string" || raw === "") {
+      throw new ApiError(422, "INVALID_FILENAME", "x-cpwb-filename header is required");
+    }
+    try {
+      const decoded = decodeURIComponent(raw);
+      if (decoded === "") throw new Error("empty");
+      return decoded;
+    } catch {
+      throw new ApiError(422, "INVALID_FILENAME", "x-cpwb-filename is not valid URI encoding");
+    }
+  }
+
+  function parseSkillImportHeaders(req) {
+    const mediaType = String(req.headers["content-type"] ?? "").toLowerCase().trim();
+    if (mediaType !== "application/zip") {
+      throw new ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/zip");
+    }
+    const scope = req.headers["x-cpwb-skill-scope"];
+    const projectRaw = req.headers["x-cpwb-project-id"];
+    let projectId;
+    if (projectRaw !== undefined) {
+      if (!/^[1-9]\d*$/.test(String(projectRaw))) {
+        throw new ApiError(422, "INVALID_FIELD", "projectId must be a positive integer");
+      }
+      projectId = Number(projectRaw);
+      if (!isPositiveInt(projectId)) throw new ApiError(422, "INVALID_FIELD", "projectId must be a positive integer");
+    }
+    const replaceRaw = req.headers["x-cpwb-replace"];
+    if (replaceRaw !== undefined && replaceRaw !== "true" && replaceRaw !== "false") {
+      throw new ApiError(422, "INVALID_FIELD", "replace must be true or false");
+    }
+    return {
+      ...parseSkillScope(scope, projectId),
+      sourceName: parseSkillFilename(req.headers["x-cpwb-filename"]),
+      replace: replaceRaw === "true",
+    };
+  }
 
   const permanentDeletionCapability = () => maintenance?.capability?.() ?? {
     available: false,
@@ -618,6 +803,47 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     const { scope, scopeId } = validateScope(params.scope, params.scopeId == null ? NaN : Number(params.scopeId));
     const removed = repos.documents.unlink({ documentId: id, scope, scopeId });
     ok(res, { removed });
+  }
+
+  // ----- Skills -----------------------------------------------------------
+
+  async function handleSkillsList(req, res, { url }) {
+    requireSkillMethod("list");
+    ok(res, await skills.list(parseSkillQuery(url)));
+  }
+
+  async function handleSkillImport(req, res) {
+    requireSkillMethod("importArchive");
+    const input = parseSkillImportHeaders(req);
+    const archiveBytes = await readRawBody(req);
+    const item = await skills.importArchive({ ...input, archiveBytes });
+    ok(res, item, input.replace ? 200 : 201);
+  }
+
+  async function handleSkillPatch(req, res, { params }) {
+    requireSkillMethod("setEnabled");
+    const name = parseSkillName(params.name);
+    const body = await readJsonBody(req);
+    const input = parseSkillJsonScope(body, ["scope", "projectId", "operation"]);
+    if (body.operation !== "enable" && body.operation !== "disable") {
+      throw new ApiError(422, "INVALID_FIELD", "operation must be enable or disable");
+    }
+    ok(res, await skills.setEnabled({ ...input, name, enabled: body.operation === "enable" }));
+  }
+
+  async function handleSkillDelete(req, res, { params, url }) {
+    requireSkillMethod("remove");
+    const name = parseSkillName(params.name);
+    ok(res, await skills.remove({ ...parseSkillQuery(url), name }));
+  }
+
+  async function handleSkillReveal(req, res, { params }) {
+    requireSkillMethod("reveal");
+    const name = parseSkillName(params.name);
+    const body = await readJsonBody(req);
+    const input = parseSkillJsonScope(body, ["scope", "projectId"]);
+    await skills.reveal({ ...input, name });
+    ok(res, { revealed: true });
   }
 
   // ----- search -----
@@ -1415,6 +1641,10 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
 
   const routes = [
     { pattern: "/health", methods: { GET: handleHealth } },
+    { pattern: "/skills", methods: { GET: handleSkillsList } },
+    { pattern: "/skills/import", methods: { POST: handleSkillImport } },
+    { pattern: "/skills/:name/reveal", methods: { POST: handleSkillReveal } },
+    { pattern: "/skills/:name", methods: { PATCH: handleSkillPatch, DELETE: handleSkillDelete } },
     { pattern: "/maintenance/purge-jobs", methods: { POST: handlePurgeJobCreate } },
     { pattern: "/maintenance/purge-jobs/:jobId", methods: { GET: handlePurgeJobGet } },
     { pattern: "/chat/sessions", methods: { GET: handleChatSessionList, POST: handleChatSessionCreate } },

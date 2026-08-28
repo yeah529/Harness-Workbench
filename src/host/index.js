@@ -30,6 +30,7 @@ import { createSessionIndexAdapter } from "./session-index.js";
 import { createMaintenanceService } from "./maintenance.js";
 import { createPurgeJobStore } from "../maintenance/purge-jobs.js";
 import { DEFAULT_DSH_HOME } from "./config.js";
+import { createSkillManager } from "./skill-manager.js";
 
 /**
  * Host plugin dependencies: the DSH web server, the LLM adapter registry, and
@@ -116,6 +117,7 @@ function apply(ctx, config = {}) {
     try {
       db = openDatabase({ dataDir });
       const repos = createRepositories(db);
+      const skillManager = createSkillManager({ dshHome, repos });
       const contextResolver = createContextResolver({ repos });
       const settings = createWorkbenchSettings({ repos, dshInitial: config.settings?.initial });
       const ollama = createOllamaClient();
@@ -231,6 +233,7 @@ function apply(ctx, config = {}) {
         credentials,
         codexAuth,
         dshAdapter: optionalContextService(ctx, "dshAdapter") ?? null,
+        skills: skillManager,
         services: {
           maintenance,
           deleteProject: ({ projectId, sessionPolicy }) => deleteContainer({ kind: "project", id: projectId, sessionPolicy }),
