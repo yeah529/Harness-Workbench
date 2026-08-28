@@ -1,5 +1,5 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join, posix } from "node:path";
+import { lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join, posix, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { load as loadYaml } from "js-yaml";
 
@@ -38,6 +38,8 @@ export class SkillManagerError extends Error {
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ZIP_CENTRAL_SIGNATURE = 0x02014b50;
 const ZIP_END_SIGNATURE = 0x06054b50;
+const ZIP64_END_SIGNATURE = 0x06064b50;
+const ZIP64_LOCATOR_SIGNATURE = 0x07064b50;
 const ZIP64_SENTINEL = 0xffffffff;
 const UNIX_SYMLINK_MODE = 0o120000;
 const UNIX_FILE_TYPE_MASK = 0o170000;
@@ -108,8 +110,15 @@ function inspectZipCentralDirectory(archiveBytes) {
   if (entryCount === 0xffff || centralSize === ZIP64_SENTINEL || centralOffset === ZIP64_SENTINEL) {
     throw unsafeArchive("ZIP64 archives are not supported");
   }
-  if (centralOffset + centralSize > endOffset || centralOffset + centralSize > bytes.length) {
+  const centralEnd = centralOffset + centralSize;
+  if (centralEnd > endOffset || centralEnd > bytes.length) {
     throw unsafeArchive("ZIP central directory is outside the archive");
+  }
+  for (let offset = centralEnd; offset + 4 <= endOffset; offset += 1) {
+    const signature = readUint32(view, offset);
+    if (signature === ZIP64_END_SIGNATURE || signature === ZIP64_LOCATOR_SIGNATURE) {
+      throw unsafeArchive("ZIP64 records are not supported");
+    }
   }
 
   const entries = [];
@@ -135,12 +144,11 @@ function inspectZipCentralDirectory(archiveBytes) {
     const extras = readZipExtraFields(bytes, offset + 46 + nameLength, extraLength);
     if (extras.some(([id]) => id === 0x0001)) throw unsafeArchive("ZIP64 entries are not supported", { index });
 
-    const madeByOperatingSystem = bytes[offset + 5];
     const unixType = (externalAttributes >>> 16) & UNIX_FILE_TYPE_MASK;
-    if (madeByOperatingSystem === 3 && unixType === UNIX_SYMLINK_MODE) {
+    if (unixType === UNIX_SYMLINK_MODE) {
       throw unsafeArchive("ZIP symbolic links are not supported", { index });
     }
-    if (madeByOperatingSystem === 3 && unixType !== 0 && unixType !== UNIX_REGULAR_MODE && unixType !== UNIX_DIRECTORY_MODE) {
+    if (unixType !== 0 && unixType !== UNIX_REGULAR_MODE && unixType !== UNIX_DIRECTORY_MODE) {
       throw unsafeArchive("Special ZIP file types are not supported", { index });
     }
     const name = decodeUtf8(bytes.subarray(offset + 46, offset + 46 + nameLength));
@@ -149,6 +157,35 @@ function inspectZipCentralDirectory(archiveBytes) {
   }
   if (offset !== centralOffset + centralSize) throw unsafeArchive("ZIP central directory size is invalid");
   return { bytes, entries };
+}
+
+async function assertDestinationPathSafe(destination) {
+  const absolute = resolve(destination);
+  let current = absolute;
+  while (true) {
+    try {
+      if ((await lstat(current)).isSymbolicLink()) {
+        throw unsafeArchive("Destination path contains a symbolic link");
+      }
+      const parent = dirname(current);
+      if (parent !== current && (await lstat(parent)).isSymbolicLink()) {
+        throw unsafeArchive("Destination path contains a symbolic link");
+      }
+      return absolute;
+    } catch (error) {
+      if (error instanceof SkillManagerError) throw error;
+      if (error.code !== "ENOENT") {
+        throw new SkillManagerError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Destination path cannot be inspected", { cause: error.code ?? "UNKNOWN" });
+      }
+      const parent = dirname(current);
+      if (parent === current) return absolute;
+      current = parent;
+    }
+  }
+}
+
+function materializationError(error) {
+  return new SkillManagerError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill package could not be materialized", { cause: error.code ?? "UNKNOWN" });
 }
 
 function normalizeEntryName(name) {
@@ -278,11 +315,25 @@ export async function extractSkillArchive({ archiveBytes, destination, limits })
   const identity = parseSkillMarkdown(markdown);
   const files = [...dataByPath.keys()].sort();
 
-  await mkdir(destination, { recursive: true });
-  for (const file of files) {
-    const target = join(destination, ...file.split("/"));
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, dataByPath.get(file));
+  const absoluteDestination = await assertDestinationPathSafe(destination);
+  const parent = dirname(absoluteDestination);
+  let staging;
+  try {
+    await mkdir(parent, { recursive: true });
+    await assertDestinationPathSafe(absoluteDestination);
+    staging = await mkdtemp(join(parent, ".cpwb-skill-package-"));
+    for (const file of files) {
+      const target = join(staging, ...file.split("/"));
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, dataByPath.get(file), { flag: "wx" });
+    }
+    await assertDestinationPathSafe(absoluteDestination);
+    await rename(staging, absoluteDestination);
+    staging = undefined;
+  } catch (error) {
+    if (staging) await rm(staging, { recursive: true, force: true }).catch(() => {});
+    if (error instanceof SkillManagerError) throw error;
+    throw materializationError(error);
   }
   return { ...identity, files, fileCount: files.length, totalBytes };
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { createTempDir, removeTempDir } from "./helpers.js";
@@ -31,10 +31,14 @@ function patchCentralEntry(bytes, patch) {
 }
 
 function symlinkArchive() {
+  return specialFileArchive(3);
+}
+
+function specialFileArchive(operatingSystem) {
   return patchCentralEntry(zipSync({
     "SKILL.md": skillMd(),
   }), (bytes, offset) => {
-    bytes[offset + 5] = 3;
+    bytes[offset + 5] = operatingSystem;
     new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
       .setUint32(offset + 38, 0o120777 << 16, true);
   });
@@ -56,6 +60,28 @@ function zip64Archive() {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     view.setUint32(offset + 20, 0xffffffff, true);
   });
+}
+
+function insertZip64Records(bytes) {
+  let endOffset = -1;
+  for (let offset = bytes.length - 22; offset >= 0; offset -= 1) {
+    if (bytes[offset] === 0x50 && bytes[offset + 1] === 0x4b
+      && bytes[offset + 2] === 0x05 && bytes[offset + 3] === 0x06) {
+      endOffset = offset;
+      break;
+    }
+  }
+  assert.notEqual(endOffset, -1);
+  const zip64End = new Uint8Array(56);
+  new DataView(zip64End.buffer).setUint32(0, 0x06064b50, true);
+  const zip64Locator = new Uint8Array(20);
+  new DataView(zip64Locator.buffer).setUint32(0, 0x07064b50, true);
+  const result = new Uint8Array(bytes.length + zip64End.length + zip64Locator.length);
+  result.set(bytes.subarray(0, endOffset));
+  result.set(zip64End, endOffset);
+  result.set(zip64Locator, endOffset + zip64End.length);
+  result.set(bytes.subarray(endOffset), endOffset + zip64End.length + zip64Locator.length);
+  return result;
 }
 
 test("extractSkillArchive accepts one wrapper and returns the frontmatter identity", async (t) => {
@@ -124,6 +150,80 @@ test("extractSkillArchive rejects symlink, encrypted, and ZIP64 entries before w
   }
 });
 
+test("extractSkillArchive rejects special file modes even without a Unix creator", async (t) => {
+  const root = await createTempDir("cpwb-skill-special-mode-");
+  t.after(() => removeTempDir(root));
+  const destination = join(root, "out");
+  await assert.rejects(
+    () => extractSkillArchive({ archiveBytes: specialFileArchive(0), destination }),
+    (error) => error instanceof Error && error.code === SKILL_ERROR_CODES.ARCHIVE_UNSAFE,
+  );
+  await assert.rejects(() => lstat(destination), { code: "ENOENT" });
+});
+
+test("extractSkillArchive rejects ZIP64 records even when classic EOCD fields are usable", async (t) => {
+  const root = await createTempDir("cpwb-skill-zip64-records-");
+  t.after(() => removeTempDir(root));
+  const destination = join(root, "out");
+  await assert.rejects(
+    () => extractSkillArchive({ archiveBytes: insertZip64Records(zipSync({ "SKILL.md": skillMd() })), destination }),
+    (error) => error instanceof Error && error.code === SKILL_ERROR_CODES.ARCHIVE_UNSAFE,
+  );
+  await assert.rejects(() => lstat(destination), { code: "ENOENT" });
+});
+
+test("extractSkillArchive rejects destination symlinks without writing through them", async (t) => {
+  const root = await createTempDir("cpwb-skill-destination-links-");
+  const outside = await createTempDir("cpwb-skill-outside-");
+  t.after(() => Promise.all([removeTempDir(root), removeTempDir(outside)]));
+  const archiveBytes = zipSync({ "SKILL.md": skillMd() });
+  const destination = join(root, "out");
+  await symlink(outside, destination);
+  await assert.rejects(
+    () => extractSkillArchive({ archiveBytes, destination }),
+    (error) => error instanceof Error && error.code === SKILL_ERROR_CODES.ARCHIVE_UNSAFE,
+  );
+  await assert.rejects(() => lstat(join(outside, "SKILL.md")), { code: "ENOENT" });
+});
+
+test("extractSkillArchive rejects nested destination symlinks without writing through them", async (t) => {
+  const root = await createTempDir("cpwb-skill-nested-link-");
+  const outside = await createTempDir("cpwb-skill-nested-outside-");
+  t.after(() => Promise.all([removeTempDir(root), removeTempDir(outside)]));
+  const parent = join(root, "parent");
+  await mkdir(parent);
+  await symlink(outside, join(parent, "link"));
+  await mkdir(join(outside, "out"));
+  const destination = join(parent, "link", "out");
+  await assert.rejects(
+    () => extractSkillArchive({ archiveBytes: zipSync({ "SKILL.md": skillMd() }), destination }),
+    (error) => error instanceof Error && error.code === SKILL_ERROR_CODES.ARCHIVE_UNSAFE,
+  );
+  await assert.rejects(() => lstat(join(outside, "out", "SKILL.md")), { code: "ENOENT" });
+});
+
+test("extractSkillArchive cleans a failed materialization and maps the I/O error", async (t) => {
+  const root = await createTempDir("cpwb-skill-materialize-failure-");
+  t.after(() => removeTempDir(root));
+  const destination = join(root, "out");
+  await mkdir(destination);
+  await mkdir(join(destination, "references"));
+  const blockingFile = join(destination, "references", "example.md");
+  await writeFile(blockingFile, "existing");
+  await assert.rejects(
+    () => extractSkillArchive({
+      archiveBytes: zipSync({ "SKILL.md": skillMd(), "references/example.md": strToU8("new") }),
+      destination,
+    }),
+    (error) => error instanceof Error
+      && error.name === "SkillManagerError"
+      && error.code === SKILL_ERROR_CODES.PERMISSION_DENIED,
+  );
+  assert.equal(await readFile(blockingFile, "utf8"), "existing");
+  await assert.rejects(() => lstat(join(destination, "SKILL.md")), { code: "ENOENT" });
+  assert.deepEqual(await readdir(root), ["out"]);
+});
+
 test("extractSkillArchive enforces single-file and expanded-byte limits", async (t) => {
   const root = await createTempDir("cpwb-skill-limits-");
   t.after(() => removeTempDir(root));
@@ -144,4 +244,3 @@ test("extractSkillArchive enforces single-file and expanded-byte limits", async 
     (error) => error.code === SKILL_ERROR_CODES.ARCHIVE_TOO_LARGE,
   );
 });
-
