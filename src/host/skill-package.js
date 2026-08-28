@@ -1,5 +1,6 @@
 import { lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join, posix, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, parse, posix, resolve, sep } from "node:path";
 import { unzipSync } from "fflate";
 import { load as loadYaml } from "js-yaml";
 
@@ -161,27 +162,26 @@ function inspectZipCentralDirectory(archiveBytes) {
 
 async function assertDestinationPathSafe(destination) {
   const absolute = resolve(destination);
-  let current = absolute;
-  while (true) {
+  const trustedRoots = [tmpdir(), homedir()].map((root) => resolve(root));
+  const trustedRoot = trustedRoots.find((root) => absolute === root || absolute.startsWith(`${root}${sep}`))
+    ?? parse(absolute).root;
+  let current = trustedRoot;
+  const components = absolute.slice(trustedRoot.length).split(sep).filter(Boolean);
+  for (const component of components) {
+    current = join(current, component);
     try {
       if ((await lstat(current)).isSymbolicLink()) {
         throw unsafeArchive("Destination path contains a symbolic link");
       }
-      const parent = dirname(current);
-      if (parent !== current && (await lstat(parent)).isSymbolicLink()) {
-        throw unsafeArchive("Destination path contains a symbolic link");
-      }
-      return absolute;
     } catch (error) {
       if (error instanceof SkillManagerError) throw error;
       if (error.code !== "ENOENT") {
         throw new SkillManagerError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Destination path cannot be inspected", { cause: error.code ?? "UNKNOWN" });
       }
-      const parent = dirname(current);
-      if (parent === current) return absolute;
-      current = parent;
+      break;
     }
   }
+  return absolute;
 }
 
 function materializationError(error) {

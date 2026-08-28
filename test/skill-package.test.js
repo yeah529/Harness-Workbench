@@ -202,6 +202,22 @@ test("extractSkillArchive rejects nested destination symlinks without writing th
   await assert.rejects(() => lstat(join(outside, "out", "SKILL.md")), { code: "ENOENT" });
 });
 
+test("extractSkillArchive rejects deeper existing destination ancestors through a symlink", async (t) => {
+  const root = await createTempDir("cpwb-skill-deep-link-");
+  const outside = await createTempDir("cpwb-skill-deep-outside-");
+  t.after(() => Promise.all([removeTempDir(root), removeTempDir(outside)]));
+  const parent = join(root, "parent");
+  await mkdir(parent);
+  await symlink(outside, join(parent, "link"));
+  await mkdir(join(outside, "deep", "out"), { recursive: true });
+  const destination = join(parent, "link", "deep", "out");
+  await assert.rejects(
+    () => extractSkillArchive({ archiveBytes: zipSync({ "SKILL.md": skillMd() }), destination }),
+    (error) => error instanceof Error && error.code === SKILL_ERROR_CODES.ARCHIVE_UNSAFE,
+  );
+  await assert.rejects(() => lstat(join(outside, "deep", "out", "SKILL.md")), { code: "ENOENT" });
+});
+
 test("extractSkillArchive cleans a failed materialization and maps the I/O error", async (t) => {
   const root = await createTempDir("cpwb-skill-materialize-failure-");
   t.after(() => removeTempDir(root));
