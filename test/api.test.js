@@ -11,6 +11,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createServer, request as httpRequest } from "node:http";
 import { Readable } from "node:stream";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -218,7 +219,19 @@ async function startApi(t, { ollama, retriever, indexer, services, sessions, set
     closeDatabase(db);
     await removeTempDir(dataDir);
   });
-  return { base, repos, queue, fakeIndexer, fakeRetriever, dataDir, dshHome, db };
+  return { base, repos, queue, fakeIndexer, fakeRetriever, dataDir, dshHome, db, api };
+}
+
+function requestHttp(port, options, body) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({ port, ...options }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({ statusCode: response.statusCode, body: Buffer.concat(chunks) }));
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
 }
 
 function uploadBody(name, scope, scopeId, body) {
@@ -316,14 +329,70 @@ test("skill API rejects strict header, body, and query contract violations", asy
   assert.equal(response.status, 422);
   assert.equal((await response.json()).error.code, "INVALID_FIELD");
   assert.equal(calls.some(([kind]) => kind === "patch"), false);
+
+  response = await fetch(base + "/skills?scope=global&scope=project", { method: "GET" });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "INVALID_FIELD");
+  response = await fetch(base + "/skills?scope=global&projectId=1&projectId=2", { method: "GET" });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "INVALID_FIELD");
+  assert.equal(calls.filter(([kind]) => kind === "list").length, 0);
 });
 
 test("skill import aborts a compressed body over 50 MiB", async (t) => {
   const { base } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
-  const body = new Uint8Array(50 * 1024 * 1024 + 1);
-  const response = await fetch(base + "/skills/import", skillUploadBody(body, { scope: "global", sourceName: "large.zip" }));
+  const body = new Uint8Array([1]);
+  const input = skillUploadBody(body, { scope: "global", sourceName: "large.zip" });
+  input.headers["content-length"] = String(50 * 1024 * 1024 + 1);
+  const response = await fetch(base + "/skills/import", input);
   assert.equal(response.status, 413);
   assert.equal((await response.json()).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+});
+
+test("real HTTP Skill upload keeps a 413 response when declared length is oversized", async (t) => {
+  const { api } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
+  const server = createServer(api.handler);
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const port = server.address().port;
+  const response = await requestHttp(port, {
+    method: "POST",
+    path: "/api/cpwb/skills/import",
+    headers: {
+      "content-type": "application/zip",
+      "content-length": String(50 * 1024 * 1024 + 1),
+      "x-cpwb-skill-scope": "global",
+      "x-cpwb-filename": "large.zip",
+    },
+  }, Buffer.alloc(50 * 1024 * 1024 + 1));
+  assert.equal(response.statusCode, 413);
+  assert.equal(JSON.parse(response.body).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+});
+
+test("real HTTP Skill upload keeps a 413 response when streamed body overflows", async (t) => {
+  const { api } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
+  const server = createServer(api.handler);
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const port = server.address().port;
+  const body = Buffer.alloc(50 * 1024 * 1024 + 1);
+  const response = await requestHttp(port, {
+    method: "POST",
+    path: "/api/cpwb/skills/import",
+    headers: {
+      "content-type": "application/zip",
+      "x-cpwb-skill-scope": "global",
+      "x-cpwb-filename": "large.zip",
+    },
+  }, body);
+  assert.equal(response.statusCode, 413);
+  assert.equal(JSON.parse(response.body).error.code, "SKILL_ARCHIVE_TOO_LARGE");
 });
 
 test("skill manager errors map to stable responses without filesystem path leakage", async (t) => {

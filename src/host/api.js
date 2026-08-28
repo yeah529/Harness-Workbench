@@ -384,26 +384,58 @@ async function readJsonBody(req) {
 async function readRawBody(req, limit = SKILL_PACKAGE_LIMITS.archiveBytes) {
   const declared = req.headers["content-length"];
   if (declared != null && /^\d+$/.test(String(declared)) && Number(declared) > limit) {
-    req.destroy?.();
+    req.resume?.();
     throw new ApiError(413, SKILL_ERROR_CODES.ARCHIVE_TOO_LARGE, "Skill ZIP exceeds the byte limit");
   }
-  const chunks = [];
-  let total = 0;
-  try {
-    for await (const chunk of req) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const chunks = [];
+    let total = 0;
+    let settled = false;
+    const noop = () => {};
+    const discard = () => {
+      // Keep the socket alive for the response while discarding the rest of
+      // an oversized request. The one-shot error listener prevents a late
+      // client abort from becoming an uncaught stream error.
+      req.once?.("error", noop);
+      // Do not change stream mode from inside a data callback: Node can
+      // re-enter the stream machinery while the callback is still unwinding.
+      setImmediate(() => req.resume?.());
+    };
+    const cleanup = () => {
+      req.off?.("data", onData);
+      req.off?.("end", onEnd);
+      req.off?.("error", onError);
+      req.off?.("aborted", onAborted);
+    };
+    const fail = (error, drain = false) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (drain) discard();
+      rejectPromise(error);
+    };
+    const onData = (chunk) => {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       total += buf.byteLength;
       if (total > limit) {
-        req.destroy?.();
-        throw new ApiError(413, SKILL_ERROR_CODES.ARCHIVE_TOO_LARGE, "Skill ZIP exceeds the byte limit");
+        fail(new ApiError(413, SKILL_ERROR_CODES.ARCHIVE_TOO_LARGE, "Skill ZIP exceeds the byte limit"), true);
+        return;
       }
       chunks.push(buf);
-    }
-  } catch (error) {
-    if (error instanceof ApiError) throw error;
-    throw error;
-  }
-  return Buffer.concat(chunks, total);
+    };
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise(Buffer.concat(chunks, total));
+    };
+    const onError = (error) => fail(error);
+    const onAborted = () => fail(new Error("request body was aborted"));
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", onError);
+    req.once("aborted", onAborted);
+  });
 }
 
 // ----------------------------------------------------------- field validation
@@ -574,6 +606,9 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     const allowed = new Set(["scope", "projectId"]);
     for (const key of url.searchParams.keys()) {
       if (!allowed.has(key)) throw new ApiError(422, "INVALID_FIELD", "unknown field: " + key);
+      if (url.searchParams.getAll(key).length !== 1) {
+        throw new ApiError(422, "INVALID_FIELD", key + " must be provided once");
+      }
     }
     const scope = url.searchParams.get("scope");
     const projectIdRaw = url.searchParams.get("projectId");
