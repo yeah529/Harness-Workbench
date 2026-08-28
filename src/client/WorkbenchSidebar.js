@@ -9,6 +9,7 @@ import {
   ListBullets,
   ClockCountdown,
   Plus,
+  Sparkle,
 } from "@phosphor-icons/react";
 import { HarnessWordmark, SidebarBrand, WorkbenchNodeMark } from "./SidebarBrand.js";
 import { DEFAULT_TIME_ZONE, localDateTimeParts } from "./timezone.js";
@@ -164,6 +165,12 @@ export function WorkbenchSidebar({
         React.createElement("button", { type: "button", className: "cpwb-sidebar-all", onClick: () => onNavigate?.("sessions") },
           "查看全部会话"))),
     React.createElement("div", { className: "cpwb-sidebar-fixed-footer" },
+      React.createElement("button", {
+        type: "button",
+        className: "cpwb-sidebar-settings cpwb-sidebar-skills" + (page === "skills" ? " cpwb-active" : ""),
+        "aria-current": page === "skills" ? "page" : undefined,
+        onClick: () => onNavigate?.("skills"),
+      }, React.createElement(NavIcon, { component: Sparkle }), React.createElement("span", null, "Skills")),
       React.createElement("button", { type: "button", className: "cpwb-sidebar-settings", onClick: settingsTrigger },
         React.createElement(NavIcon, { component: GearSix }), React.createElement("span", null, "设置")),
       React.createElement(SidebarBrand, { status: "INTELLIGENCE ONLINE" })));

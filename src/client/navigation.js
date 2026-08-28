@@ -1,4 +1,4 @@
-const PAGES = new Set(["home", "knowledge", "sessions", "draft", "conversation"]);
+const PAGES = new Set(["home", "knowledge", "sessions", "skills", "draft", "conversation"]);
 
 export function createNavigationStore({ initialPage = "home" } = {}) {
   if (!PAGES.has(initialPage)) throw new TypeError("unknown Workbench page: " + initialPage);
@@ -32,6 +32,7 @@ export function createNavigationStore({ initialPage = "home" } = {}) {
     openHome() { openPage("home"); },
     openKnowledge() { openPage("knowledge"); },
     openSessions() { openPage("sessions"); },
+    openSkills() { openPage("skills"); },
     openDraft() { openPage("draft"); },
     openConversation(sessionId) {
       if (typeof sessionId !== "string" || sessionId.length === 0) {

@@ -14,6 +14,7 @@ import {
 import { WorkbenchNodeMark } from "../src/client/SidebarBrand.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
 import { createNavigationStore } from "../src/client/navigation.js";
+import { SkillsPage, SkillConflictDialog } from "../src/client/SkillsPage.js";
 import {
   WorkbenchSessionShell,
   PROJECT_TOOL_TABS,
@@ -269,6 +270,42 @@ test("sidebar separates the compact Workbench node from the footer wordmark", ()
   assert.doesNotMatch(html, /DEEPSEEK/);
   assert.match(html, /class="cpwb-sidebar-brand-footer"/);
   assert.match(html, /aria-label="Harness Workbench"/);
+});
+
+test("skills navigation is mutually exclusive and sidebar entry sits above settings", () => {
+  const navigation = createNavigationStore();
+  navigation.openSkills();
+  assert.equal(navigation.getSnapshot().page, "skills");
+  const html = renderToStaticMarkup(React.createElement(WorkbenchSidebar, { page: "skills", recentSessions: [] }));
+  assert.match(html, /aria-current="page"[^>]*>[\s\S]*Skills/);
+  assert.ok(html.indexOf(">Skills<") < html.indexOf(">设置<"));
+});
+
+test("SkillsPage defaults to global scope and exposes directory plus ZIP import", () => {
+  const state = {
+    projects: [{ id: 7, name: "Research" }],
+    skillCatalogs: { global: { status: "ready", data: { scope: { kind: "global" }, rootPath: "/dsh/skills", items: [], diagnostics: [] }, error: null } },
+    skillAction: null,
+  };
+  const store = { subscribe: () => () => {}, getSnapshot: () => state, actions: { loadSkills: async () => {} } };
+  const html = renderToStaticMarkup(React.createElement(SkillsPage, { store }));
+  assert.match(html, /SKILL MANAGEMENT/);
+  assert.match(html, /role="tab" aria-selected="true"[^>]*>全局/);
+  assert.match(html, /\/dsh\/skills/);
+  assert.match(html, /导入目录/);
+  assert.match(html, /导入 ZIP/);
+  assert.doesNotMatch(html, /替换 Skill/);
+});
+
+test("Skill conflict dialog is only an import decision", () => {
+  const html = renderToStaticMarkup(React.createElement(SkillConflictDialog, {
+    existing: { name: "x", description: "old", state: "enabled", files: ["SKILL.md"] },
+    incoming: { name: "x", description: "new", files: ["SKILL.md", "references/a.md"] },
+    onCancel() {}, onReplace() {},
+  }));
+  assert.match(html, /同名 Skill 已存在/);
+  assert.match(html, /取消/);
+  assert.match(html, /确认替换/);
 });
 
 test("only the footer wordmark renders the static cyberpunk fracture layer", () => {

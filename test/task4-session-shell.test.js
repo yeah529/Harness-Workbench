@@ -88,7 +88,7 @@ test("home metrics fall back to loaded Workbench projects and use the paged sess
 });
 
 test("unified shell renders one mutually exclusive center page and no duplicate home sidebar", () => {
-  for (const page of ["home", "knowledge", "sessions", "conversation"]) {
+  for (const page of ["home", "knowledge", "sessions", "skills", "conversation"]) {
     const navigation = createNavigationStore({ initialPage: page === "conversation" ? "home" : page });
     if (page === "conversation") navigation.openConversation("session-cpwb-i");
     const html = renderToStaticMarkup(React.createElement(WorkbenchShell, {
@@ -103,6 +103,7 @@ test("unified shell renders one mutually exclusive center page and no duplicate 
     }));
     assert.match(html, new RegExp('class="cpwb-app-shell cpwb-layout-desktop" data-page="' + page + '"'));
     assert.equal((html.match(/class="cpwb-global-sidebar"/g) || []).length, 1);
+    assert.equal((html.match(/class="cpwb-workbench-stage"/g) || []).length, 1);
     assert.doesNotMatch(html, /cpwb-home-identity/);
     if (page === "home") {
       assert.match(html, /接入知识芯片/);
