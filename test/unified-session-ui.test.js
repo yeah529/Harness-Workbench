@@ -15,6 +15,7 @@ import { WorkbenchNodeMark } from "../src/client/SidebarBrand.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
 import { createNavigationStore } from "../src/client/navigation.js";
 import { SkillsPage, SkillConflictDialog } from "../src/client/SkillsPage.js";
+import { actionMatches, copySkillPath, shouldRetainSkillInput, skillScopeKey } from "../src/client/SkillsManager.js";
 import {
   WorkbenchSessionShell,
   PROJECT_TOOL_TABS,
@@ -306,6 +307,29 @@ test("Skill conflict dialog is only an import decision", () => {
   assert.match(html, /同名 Skill 已存在/);
   assert.match(html, /取消/);
   assert.match(html, /确认替换/);
+});
+
+test("skill action matching is bound to the canonical scope key", () => {
+  const action = { type: "setSkillEnabled", name: "same-skill", key: "project:7", status: "running" };
+  assert.equal(skillScopeKey("global"), "global");
+  assert.equal(skillScopeKey("project", 7), "project:7");
+  assert.equal(actionMatches(action, "setSkillEnabled", "same-skill", "project:7"), true);
+  assert.equal(actionMatches(action, "setSkillEnabled", "same-skill", "global"), false);
+  assert.equal(actionMatches({ ...action, key: "global" }, "setSkillEnabled", "same-skill", "project:7"), false);
+});
+
+test("only same-scope conflicts retain an import payload", () => {
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT" }, "global", "global"), true);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT" }, "project:7", "global"), false);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_PACKAGE_INVALID" }, "global", "global"), false);
+});
+
+test("copySkillPath reports missing and rejected clipboard writers instead of false success", async () => {
+  await assert.rejects(() => copySkillPath(undefined, "/dsh/skills"), /不支持复制/);
+  await assert.rejects(() => copySkillPath(async () => { throw new Error("denied"); }, "/dsh/skills"), /denied/);
+  let copied = "";
+  assert.equal(await copySkillPath(async (path) => { copied = path; }, "/dsh/skills"), true);
+  assert.equal(copied, "/dsh/skills");
 });
 
 test("only the footer wordmark renders the static cyberpunk fracture layer", () => {

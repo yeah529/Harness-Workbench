@@ -1,6 +1,6 @@
 import React from "react";
 import { Sparkle } from "@phosphor-icons/react";
-import { SkillConflictDialog, SkillDeleteDialog, SkillScopeManager } from "./SkillsManager.js";
+import { SkillConflictDialog, SkillDeleteDialog, SkillScopeManager, skillScopeKey } from "./SkillsManager.js";
 
 const h = React.createElement;
 export { SkillConflictDialog, SkillDeleteDialog, SkillScopeManager };
@@ -20,5 +20,5 @@ export function SkillsPage({ store }) {
         h("button", { type: "button", role: "tab", "aria-selected": scope === "global", className: scope === "global" ? "cpwb-active" : "", onClick: () => setScope("global") }, "全局"),
         h("button", { type: "button", role: "tab", "aria-selected": scope === "project", className: scope === "project" ? "cpwb-active" : "", onClick: () => setScope("project") }, "项目")),
       scope === "project" ? h("label", { className: "cpwb-skills-project-select" }, h("span", null, "选择项目"), h("select", { value: projectId ?? "", onChange: (event) => setProjectId(Number(event.target.value) || null), "aria-label": "选择 Skill 所属项目" }, projects.length ? projects.map((project) => h("option", { key: project.id, value: project.id }, project.name)) : h("option", { value: "" }, "暂无项目"))) : null,
-      h(SkillScopeManager, { store, scope, projectId }))); 
+      h(SkillScopeManager, { key: skillScopeKey(scope, projectId), store, scope, projectId })));
 }

@@ -1,5 +1,5 @@
 import React from "react";
-import { Check, ClipboardText, Eye, FolderOpen, Package, Pause, Play, Trash, UploadSimple, WarningCircle, X } from "@phosphor-icons/react";
+import { Check, ClipboardText, Eye, FolderOpen, Package, Pause, Play, Trash, UploadSimple, WarningCircle } from "@phosphor-icons/react";
 import { GlobalModal } from "./globalModal.js";
 import { packSkillDirectory, SKILL_IMPORT_LIMITS } from "./skill-import.js";
 
@@ -14,18 +14,65 @@ function errorMessage(error) {
   return error.message || String(error);
 }
 
-function actionMatches(action, type, name) {
-  return action?.type === type && action?.name === name && action.status === "running";
+export function skillScopeKey(scope = "global", projectId = null) {
+  return scope === "project" ? `project:${projectId}` : "global";
 }
 
-function CopyPath({ path }) {
+export function actionMatches(action, type, name, targetKey) {
+  return action?.key === targetKey && action?.type === type && action?.name === name && action.status === "running";
+}
+
+export function shouldRetainSkillInput(error, currentKey, capturedKey) {
+  return error?.code === "SKILL_CONFLICT" && currentKey === capturedKey;
+}
+
+export async function copySkillPath(writeText, path) {
+  if (typeof writeText !== "function") throw new Error("当前浏览器不支持复制，请手动选择安装路径。");
+  await writeText(path);
+  return true;
+}
+
+function actionLabel(action) {
+  if (action?.type === "importSkill") return action.status === "done" ? "Skill 导入完成。" : action.status === "running" ? "正在导入 Skill。" : "Skill 导入失败。";
+  if (action?.type === "setSkillEnabled") return action.status === "done" ? "Skill 状态已更新。" : action.status === "running" ? "正在更新 Skill 状态。" : "Skill 状态更新失败。";
+  if (action?.type === "deleteSkill") return action.status === "done" ? "Skill 已删除。" : action.status === "running" ? "正在删除 Skill。" : "Skill 删除失败。";
+  if (action?.type === "revealSkill") return action.status === "done" ? "已请求在文件管理器中显示 Skill。" : action.status === "running" ? "正在打开文件管理器。" : "无法打开文件管理器。";
+  return "Skill 操作已完成。";
+}
+
+function CopyPath({ path, targetKey, onError }) {
   const [copied, setCopied] = React.useState(false);
+  const timerRef = React.useRef(null);
+  const aliveRef = React.useRef(true);
+  const generationRef = React.useRef(0);
+  React.useEffect(() => () => {
+    aliveRef.current = false;
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+  React.useEffect(() => {
+    generationRef.current += 1;
+    setCopied(false);
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, [targetKey, path]);
   const copy = async function () {
+    const generation = generationRef.current;
+    const writer = globalThis.navigator?.clipboard?.writeText;
+    if (typeof writer !== "function") {
+      onError?.("当前浏览器不支持复制，请手动选择安装路径。");
+      return;
+    }
     try {
-      await globalThis.navigator?.clipboard?.writeText?.(path);
+      await copySkillPath(writer.bind(globalThis.navigator.clipboard), path);
+      if (!aliveRef.current || generationRef.current !== generation) return;
       setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    } catch { setCopied(false); }
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => { if (aliveRef.current) setCopied(false); }, 1200);
+    } catch {
+      if (aliveRef.current && generationRef.current === generation) {
+        setCopied(false);
+        onError?.("复制安装路径失败，请手动选择路径文本。");
+      }
+    }
   };
   return h("button", { type: "button", className: "cpwb-skills-copy", onClick: copy, "aria-label": "复制安装路径", title: copied ? "已复制" : "复制安装路径" },
     copied ? h(Check, { size: 14, "aria-hidden": true }) : h(ClipboardText, { size: 14, "aria-hidden": true }), h("span", null, copied ? "已复制" : "复制路径"));
@@ -67,11 +114,11 @@ function StatusBadge({ item }) {
   return h("span", { className: "cpwb-skill-status cpwb-skill-status-" + item.state }, item.health !== "valid" ? "无效" : state);
 }
 
-function SkillRow({ item, scope, store, onDelete }) {
+function SkillRow({ item, scope, targetKey, store, onDelete }) {
   const state = store.getSnapshot();
   const action = state.skillAction;
-  const busy = action?.status === "running" && action.key === `${scope === "project" ? "project:" + item.projectId : "global"}`;
-  const stateBusy = actionMatches(action, "setSkillEnabled", item.name) || actionMatches(action, "deleteSkill", item.name) || actionMatches(action, "revealSkill", item.name);
+  const busy = action?.status === "running" && action.key === targetKey;
+  const stateBusy = actionMatches(action, "setSkillEnabled", item.name, targetKey) || actionMatches(action, "deleteSkill", item.name, targetKey) || actionMatches(action, "revealSkill", item.name, targetKey);
   const disabled = item.health !== "valid";
   const run = (fn) => Promise.resolve(fn()).catch(() => {});
   return h("article", { className: "cpwb-skill-row" + (busy ? " cpwb-skill-row-busy" : ""), "data-skill-state": item.state, "data-skill-health": item.health, "aria-busy": busy ? "true" : undefined },
@@ -85,71 +132,110 @@ function SkillRow({ item, scope, store, onDelete }) {
 
 export function SkillScopeManager({ store, scope = "global", projectId = null, compact = false }) {
   const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
-  const key = scope === "project" ? `project:${projectId}` : "global";
+  const key = skillScopeKey(scope, projectId);
   const catalog = state.skillCatalogs?.[key] || { status: "loading", data: null, error: null };
   const [conflict, setConflict] = React.useState(null);
   const [deleteTarget, setDeleteTarget] = React.useState(null);
   const [selectedInput, setSelectedInput] = React.useState(null);
   const [localError, setLocalError] = React.useState(null);
+  const activeKeyRef = React.useRef(key);
+  const generationRef = React.useRef(0);
   const directoryRef = React.useRef(null);
   const zipRef = React.useRef(null);
+  activeKeyRef.current = key;
+  React.useEffect(() => {
+    generationRef.current += 1;
+    setConflict(null);
+    setDeleteTarget(null);
+    setSelectedInput(null);
+    setLocalError(null);
+    return () => { generationRef.current += 1; };
+  }, [key]);
   React.useEffect(() => {
     if (typeof store.actions.loadSkills !== "function" || (scope === "project" && !(Number.isSafeInteger(projectId) && projectId > 0))) return undefined;
     store.actions.loadSkills({ scope, ...(scope === "project" ? { projectId } : {}) }).catch?.(() => {});
     return undefined;
   }, [store, scope, projectId]);
 
-  const target = { scope, ...(scope === "project" ? { projectId } : {}) };
+  const target = Object.freeze({ scope, ...(scope === "project" ? { projectId } : {}) });
+  const isCurrent = (capturedKey, capturedGeneration) => activeKeyRef.current === capturedKey && generationRef.current === capturedGeneration;
   const importArchive = async (archive, sourceName, input) => {
     if (!archive) return;
+    const capturedKey = key;
+    const capturedGeneration = generationRef.current;
+    const capturedTarget = target;
+    if (!isCurrent(capturedKey, capturedGeneration)) return;
     setLocalError(null);
+    setConflict(null);
+    setSelectedInput(null);
     if (archive.size > SKILL_IMPORT_LIMITS.archiveBytes) {
       setLocalError("ZIP 文件超过 50 MiB，未开始导入。");
       input.value = "";
       return;
     }
-    setSelectedInput({ archive, sourceName, input });
+    setSelectedInput({ archive, sourceName, input, target: capturedTarget, key: capturedKey, generation: capturedGeneration });
     try {
-      await store.actions.importSkill({ ...target, archive, sourceName });
-      setSelectedInput(null);
-      setConflict(null);
+      await store.actions.importSkill({ ...capturedTarget, archive, sourceName });
+      if (isCurrent(capturedKey, capturedGeneration)) {
+        setSelectedInput(null);
+        setConflict(null);
+      }
     } catch (error) {
-      if (error?.code === "SKILL_CONFLICT") {
-        setConflict({ existing: error.details?.existing, incoming: error.details?.incoming || { name: sourceName } });
-      } else setLocalError(errorMessage(error) || "Skill 导入失败，请检查文件后重试。" );
+      if (!isCurrent(capturedKey, capturedGeneration)) return;
+      if (shouldRetainSkillInput(error, activeKeyRef.current, capturedKey)) {
+        setConflict({ existing: error.details?.existing, incoming: error.details?.incoming || { name: sourceName }, key: capturedKey, generation: capturedGeneration });
+      } else {
+        setSelectedInput(null);
+        setLocalError(errorMessage(error) || "Skill 导入失败，请检查文件后重试。");
+      }
     } finally {
       input.value = "";
     }
   };
   const chooseDirectory = async (event) => {
     const input = event.currentTarget;
+    const capturedKey = key;
+    const capturedGeneration = generationRef.current;
+    if (!isCurrent(capturedKey, capturedGeneration)) return;
+    setConflict(null);
+    setSelectedInput(null);
     try {
       const packed = await packSkillDirectory(input.files);
-      await importArchive(packed.archive, packed.sourceName, input);
+      if (isCurrent(capturedKey, capturedGeneration)) await importArchive(packed.archive, packed.sourceName, input);
     } catch (error) {
+      if (!isCurrent(capturedKey, capturedGeneration)) return;
       setSelectedInput(null);
       input.value = "";
-      setLocalError(errorMessage(error) || "目录打包失败，请检查 Skill 文件。" );
+      setLocalError(errorMessage(error) || "目录打包失败，请检查 Skill 文件。");
     }
   };
   const chooseZip = (event) => {
     const input = event.currentTarget;
+    setConflict(null);
+    setSelectedInput(null);
     const file = input.files?.[0];
     if (file) void importArchive(file, file.name, input);
   };
   const replace = () => {
-    if (!selectedInput) return;
-    store.actions.importSkill({ ...target, archive: selectedInput.archive, sourceName: selectedInput.sourceName, replace: true })
-      .then(() => { setConflict(null); setSelectedInput(null); })
-      .catch(() => {});
+    const selected = selectedInput;
+    if (!selected || selected.key !== key || !isCurrent(selected.key, selected.generation)) return;
+    setLocalError(null);
+    store.actions.importSkill({ ...selected.target, archive: selected.archive, sourceName: selected.sourceName, replace: true })
+      .then(() => {
+        if (isCurrent(selected.key, selected.generation)) { setConflict(null); setSelectedInput(null); }
+      })
+      .catch((error) => {
+        if (isCurrent(selected.key, selected.generation)) setLocalError(errorMessage(error) || "Skill 替换失败，请重试。");
+      });
   };
   const data = catalog.data;
   const items = Array.isArray(data?.items) ? data.items : [];
   const action = state.skillAction;
-  const actionError = action?.key === key && action.status === "error" ? action.error : null;
+  const currentAction = action?.key === key ? action : null;
+  const actionError = currentAction?.status === "error" ? currentAction.error : null;
   const rootUnavailable = (scope === "project" && !(Number.isSafeInteger(projectId) && projectId > 0)) || catalog.error?.code === "PROJECT_PATH_UNAVAILABLE" || catalog.error?.code === "SKILL_PERMISSION_DENIED";
   return h("section", { className: "cpwb-skills-scope-manager" + (compact ? " cpwb-skills-compact" : ""), "aria-label": scopeLabel(scope) },
-    h("div", { className: "cpwb-skills-path" }, h(FolderOpen, { size: 16, "aria-hidden": true }), h("code", { title: data?.rootPath || "" }, data?.rootPath || "正在读取安装根路径"), data?.rootPath ? h(CopyPath, { path: data.rootPath }) : null),
+    h("div", { className: "cpwb-skills-path" }, h(FolderOpen, { size: 16, "aria-hidden": true }), h("code", { title: data?.rootPath || "" }, data?.rootPath || "正在读取安装根路径"), data?.rootPath ? h(CopyPath, { path: data.rootPath, targetKey: key, onError: (message) => { if (activeKeyRef.current === key) setLocalError(message); } }) : null),
     h("div", { className: "cpwb-skills-toolbar" },
       h("input", { ref: directoryRef, className: "cpwb-visually-hidden", type: "file", webkitdirectory: "", directory: "", multiple: true, onChange: chooseDirectory, tabIndex: -1, "aria-hidden": true }),
       h("input", { ref: zipRef, className: "cpwb-visually-hidden", type: "file", accept: ".zip,application/zip", onChange: chooseZip, tabIndex: -1, "aria-hidden": true }),
@@ -160,9 +246,16 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     rootUnavailable ? h("div", { className: "cpwb-skills-state cpwb-skills-error", role: "alert" }, scope === "project" ? "当前项目目录不可用，无法管理项目 Skill。" : "全局 Skill 目录不可用，无法继续管理。") : null,
     catalog.status === "ready" && !rootUnavailable && items.length === 0 && !(data?.diagnostics?.length) ? h("div", { className: "cpwb-skills-empty" }, h(Package, { size: 24, "aria-hidden": true }), h("strong", null, scope === "project" ? "当前项目尚未安装 Skill" : "尚未安装全局 Skill"), h("p", null, "从本地目录或 ZIP 导入一个 Skill。")) : null,
     Array.isArray(data?.diagnostics) && data.diagnostics.length ? h("div", { className: "cpwb-skills-diagnostics", role: "alert" }, h("strong", null, `${data.diagnostics.length} 个条目需要处理`), data.diagnostics.map((diagnostic, index) => h("p", { key: `${diagnostic.path}-${index}` }, diagnostic.message || "条目无效"))) : null,
-    items.length ? h("div", { className: "cpwb-skills-list" }, items.map((item) => h(SkillRow, { key: item.name, item: { ...item, projectId }, scope, store, onDelete: setDeleteTarget }))) : null,
+    items.length ? h("div", { className: "cpwb-skills-list" }, items.map((item) => h(SkillRow, { key: item.name, item: { ...item, projectId }, scope, targetKey: key, store, onDelete: (next) => setDeleteTarget({ item: next, target, key, generation: generationRef.current }) }))) : null,
+    currentAction && (currentAction.status === "running" || currentAction.status === "done") ? h("div", { className: "cpwb-skills-action-status", role: "status", "aria-live": "polite" }, actionLabel(currentAction)) : null,
     actionError ? h("div", { className: "cpwb-skills-action-error", role: "alert" }, errorMessage(actionError)) : null,
     localError ? h("div", { className: "cpwb-skills-action-error", role: "alert" }, localError) : null,
-    conflict ? h(SkillConflictDialog, { ...conflict, busy: action?.status === "running", onCancel: () => { setConflict(null); setSelectedInput(null); }, onReplace: replace }) : null,
-    deleteTarget ? h(SkillDeleteDialog, { item: deleteTarget, scope, busy: action?.status === "running", onCancel: () => setDeleteTarget(null), onConfirm: () => store.actions.deleteSkill({ ...target, name: deleteTarget.name }).then(() => setDeleteTarget(null)).catch(() => {}) }) : null);
+    conflict && conflict.key === key ? h(SkillConflictDialog, { existing: conflict.existing, incoming: conflict.incoming, busy: currentAction?.status === "running", onCancel: () => { setConflict(null); setSelectedInput(null); }, onReplace: replace }) : null,
+    deleteTarget && deleteTarget.key === key ? h(SkillDeleteDialog, { item: deleteTarget.item, scope: deleteTarget.target.scope, busy: currentAction?.status === "running", onCancel: () => setDeleteTarget(null), onConfirm: () => {
+      const captured = deleteTarget;
+      if (!isCurrent(captured.key, captured.generation)) return;
+      store.actions.deleteSkill({ ...captured.target, name: captured.item.name }).then(() => {
+        if (isCurrent(captured.key, captured.generation)) setDeleteTarget(null);
+      }).catch(() => {});
+    } }) : null);
 }
