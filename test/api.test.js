@@ -429,6 +429,54 @@ test("oversized declared uploads absorb a disconnect while draining", async (t) 
   t.after(() => request.removeAllListeners());
 });
 
+test("streamed overflow installs its drain guard before a nextTick disconnect", async (t) => {
+  const { api } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
+  class RacyRequest extends EventEmitter {
+    method = "POST";
+    url = "/api/cpwb/skills/import";
+    headers = {
+      "content-type": "application/zip",
+      "x-cpwb-skill-scope": "global",
+      "x-cpwb-filename": "large.zip",
+    };
+    unhandledError = null;
+    emit(event, ...args) {
+      if (event === "error" && this.listenerCount("error") === 0) {
+        this.unhandledError = args[0];
+        return false;
+      }
+      return super.emit(event, ...args);
+    }
+    on(event, listener) {
+      super.on(event, listener);
+      if (event === "data") {
+        process.nextTick(() => {
+          listener(Buffer.alloc(50 * 1024 * 1024 + 1));
+          process.nextTick(() => this.emit("error", new Error("client disconnected before drain")));
+        });
+      }
+      return this;
+    }
+    resume() {}
+  }
+  const request = new RacyRequest();
+  let status;
+  let body;
+  const response = {
+    headersSent: false,
+    writeHead(nextStatus) { status = nextStatus; this.headersSent = true; },
+    end(value = "") { body = Buffer.from(String(value)); },
+    destroy() { throw new Error("response must not be destroyed"); },
+  };
+  await api.handler(request, response);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(status, 413);
+  assert.equal(JSON.parse(body).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+  assert.equal(request.unhandledError, null);
+  assert.equal(request.listenerCount("error"), 0);
+  t.after(() => request.removeAllListeners());
+});
+
 test("skill manager errors map to stable responses without filesystem path leakage", async (t) => {
   const fake = {
     importArchive: async () => {

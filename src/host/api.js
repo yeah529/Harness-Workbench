@@ -380,7 +380,7 @@ async function readJsonBody(req) {
   }
 }
 
-function discardRequestBody(req) {
+function discardRequestBody(req, { defer = false } = {}) {
   if (req.readableEnded || req.destroyed) return;
   let active = true;
   const cleanup = () => {
@@ -394,12 +394,11 @@ function discardRequestBody(req) {
   req.once?.("error", onError);
   req.once?.("end", cleanup);
   req.once?.("aborted", cleanup);
-  try {
-    req.resume?.();
-  } catch (error) {
-    cleanup();
-    throw error;
-  }
+  const resume = () => {
+    try { req.resume?.(); } catch { cleanup(); }
+  };
+  if (defer) setImmediate(resume);
+  else resume();
 }
 
 /** Read a raw ZIP request body without buffering beyond the compressed limit. */
@@ -415,10 +414,8 @@ async function readRawBody(req, limit = SKILL_PACKAGE_LIMITS.archiveBytes) {
     let settled = false;
     const discard = () => {
       // Keep the socket alive for the response while discarding the rest of
-      // an oversized request. Defer the mode switch until data unwinds.
-      setImmediate(() => {
-        try { discardRequestBody(req); } catch { /* the request is already ending */ }
-      });
+      // an oversized request. Install guards before data unwinds.
+      discardRequestBody(req, { defer: true });
     };
     const cleanup = () => {
       req.off?.("data", onData);
