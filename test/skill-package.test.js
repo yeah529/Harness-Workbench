@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { createTempDir, removeTempDir } from "./helpers.js";
@@ -85,7 +85,7 @@ function insertZip64Records(bytes) {
 }
 
 test("extractSkillArchive accepts one wrapper and returns the frontmatter identity", async (t) => {
-  const root = await createTempDir("cpwb-skill-package-");
+  const root = await realpath(await createTempDir("cpwb-skill-package-"));
   t.after(() => removeTempDir(root));
   const bytes = zipSync({
     "wrapper/SKILL.md": skillMd(),
@@ -114,7 +114,7 @@ test("parseSkillMarkdown requires canonical name and description", () => {
 });
 
 test("extractSkillArchive rejects unsafe or ambiguous archives", async (t) => {
-  const root = await createTempDir("cpwb-skill-unsafe-");
+  const root = await realpath(await createTempDir("cpwb-skill-unsafe-"));
   t.after(() => removeTempDir(root));
   const cases = [
     ["path traversal", { "../escape": strToU8("x"), "SKILL.md": skillMd() }, SKILL_ERROR_CODES.ARCHIVE_UNSAFE],
@@ -133,7 +133,7 @@ test("extractSkillArchive rejects unsafe or ambiguous archives", async (t) => {
 });
 
 test("extractSkillArchive rejects symlink, encrypted, and ZIP64 entries before writing", async (t) => {
-  const root = await createTempDir("cpwb-skill-zip-boundary-");
+  const root = await realpath(await createTempDir("cpwb-skill-zip-boundary-"));
   t.after(() => removeTempDir(root));
   for (const [label, archiveBytes] of [
     ["symlink", symlinkArchive()],
@@ -151,7 +151,7 @@ test("extractSkillArchive rejects symlink, encrypted, and ZIP64 entries before w
 });
 
 test("extractSkillArchive rejects special file modes even without a Unix creator", async (t) => {
-  const root = await createTempDir("cpwb-skill-special-mode-");
+  const root = await realpath(await createTempDir("cpwb-skill-special-mode-"));
   t.after(() => removeTempDir(root));
   const destination = join(root, "out");
   await assert.rejects(
@@ -162,7 +162,7 @@ test("extractSkillArchive rejects special file modes even without a Unix creator
 });
 
 test("extractSkillArchive rejects ZIP64 records even when classic EOCD fields are usable", async (t) => {
-  const root = await createTempDir("cpwb-skill-zip64-records-");
+  const root = await realpath(await createTempDir("cpwb-skill-zip64-records-"));
   t.after(() => removeTempDir(root));
   const destination = join(root, "out");
   await assert.rejects(
@@ -173,8 +173,8 @@ test("extractSkillArchive rejects ZIP64 records even when classic EOCD fields ar
 });
 
 test("extractSkillArchive rejects destination symlinks without writing through them", async (t) => {
-  const root = await createTempDir("cpwb-skill-destination-links-");
-  const outside = await createTempDir("cpwb-skill-outside-");
+  const root = await realpath(await createTempDir("cpwb-skill-destination-links-"));
+  const outside = await realpath(await createTempDir("cpwb-skill-outside-"));
   t.after(() => Promise.all([removeTempDir(root), removeTempDir(outside)]));
   const archiveBytes = zipSync({ "SKILL.md": skillMd() });
   const destination = join(root, "out");
@@ -187,8 +187,8 @@ test("extractSkillArchive rejects destination symlinks without writing through t
 });
 
 test("extractSkillArchive rejects nested destination symlinks without writing through them", async (t) => {
-  const root = await createTempDir("cpwb-skill-nested-link-");
-  const outside = await createTempDir("cpwb-skill-nested-outside-");
+  const root = await realpath(await createTempDir("cpwb-skill-nested-link-"));
+  const outside = await realpath(await createTempDir("cpwb-skill-nested-outside-"));
   t.after(() => Promise.all([removeTempDir(root), removeTempDir(outside)]));
   const parent = join(root, "parent");
   await mkdir(parent);
@@ -203,8 +203,8 @@ test("extractSkillArchive rejects nested destination symlinks without writing th
 });
 
 test("extractSkillArchive rejects deeper existing destination ancestors through a symlink", async (t) => {
-  const root = await createTempDir("cpwb-skill-deep-link-");
-  const outside = await createTempDir("cpwb-skill-deep-outside-");
+  const root = await realpath(await createTempDir("cpwb-skill-deep-link-"));
+  const outside = await realpath(await createTempDir("cpwb-skill-deep-outside-"));
   t.after(() => Promise.all([removeTempDir(root), removeTempDir(outside)]));
   const parent = join(root, "parent");
   await mkdir(parent);
@@ -218,8 +218,31 @@ test("extractSkillArchive rejects deeper existing destination ancestors through 
   await assert.rejects(() => lstat(join(outside, "deep", "out", "SKILL.md")), { code: "ENOENT" });
 });
 
+test("extractSkillArchive does not trust a symlinked TMPDIR anchor", async (t) => {
+  const root = await realpath(await createTempDir("cpwb-skill-env-link-"));
+  const outside = await realpath(await createTempDir("cpwb-skill-env-outside-"));
+  t.after(() => Promise.all([removeTempDir(root), removeTempDir(outside)]));
+  const target = join(root, "real-temp");
+  const linkedTemp = join(root, "tmp-link");
+  await mkdir(target);
+  await symlink(target, linkedTemp);
+  const destination = join(linkedTemp, "anchor", "out");
+  const previousTmpDir = process.env.TMPDIR;
+  process.env.TMPDIR = linkedTemp;
+  try {
+    await assert.rejects(
+      () => extractSkillArchive({ archiveBytes: zipSync({ "SKILL.md": skillMd() }), destination }),
+      (error) => error instanceof Error && error.code === SKILL_ERROR_CODES.ARCHIVE_UNSAFE,
+    );
+  } finally {
+    if (previousTmpDir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmpDir;
+  }
+  await assert.rejects(() => lstat(join(target, "anchor", "out", "SKILL.md")), { code: "ENOENT" });
+});
+
 test("extractSkillArchive cleans a failed materialization and maps the I/O error", async (t) => {
-  const root = await createTempDir("cpwb-skill-materialize-failure-");
+  const root = await realpath(await createTempDir("cpwb-skill-materialize-failure-"));
   t.after(() => removeTempDir(root));
   const destination = join(root, "out");
   await mkdir(destination);
@@ -241,7 +264,7 @@ test("extractSkillArchive cleans a failed materialization and maps the I/O error
 });
 
 test("extractSkillArchive enforces single-file and expanded-byte limits", async (t) => {
-  const root = await createTempDir("cpwb-skill-limits-");
+  const root = await realpath(await createTempDir("cpwb-skill-limits-"));
   t.after(() => removeTempDir(root));
   await assert.rejects(
     () => extractSkillArchive({

@@ -1,6 +1,5 @@
 import { lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { dirname, join, parse, posix, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, parse, posix, resolve, sep } from "node:path";
 import { unzipSync } from "fflate";
 import { load as loadYaml } from "js-yaml";
 
@@ -161,12 +160,14 @@ function inspectZipCentralDirectory(archiveBytes) {
 }
 
 async function assertDestinationPathSafe(destination) {
+  if (typeof destination !== "string" || !isAbsolute(destination)) {
+    throw unsafeArchive("Destination must be an absolute canonical path");
+  }
   const absolute = resolve(destination);
-  const trustedRoots = [tmpdir(), homedir()].map((root) => resolve(root));
-  const trustedRoot = trustedRoots.find((root) => absolute === root || absolute.startsWith(`${root}${sep}`))
-    ?? parse(absolute).root;
-  let current = trustedRoot;
-  const components = absolute.slice(trustedRoot.length).split(sep).filter(Boolean);
+  if (absolute !== destination) throw unsafeArchive("Destination must be an absolute canonical path");
+  const root = parse(absolute).root;
+  let current = root;
+  const components = absolute.slice(root.length).split(sep).filter(Boolean);
   for (const component of components) {
     current = join(current, component);
     try {
