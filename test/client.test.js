@@ -126,6 +126,113 @@ test("packSkillDirectory rejects invalid roots, paths, counts, and source limits
   );
 });
 
+test("packSkillDirectory maps file read failures without leaking causes", async () => {
+  const thrown = new Error("/Users/private/secret should not escape");
+  const syncFailure = {
+    size: 1,
+    webkitRelativePath: "skill/SKILL.md",
+    arrayBuffer() { throw thrown; },
+  };
+  const rejectedFailure = {
+    size: 1,
+    webkitRelativePath: "skill/SKILL.md",
+    arrayBuffer() { return Promise.reject(new DOMException("permission denied: /Users/private", "NotReadableError")); },
+  };
+  for (const file of [syncFailure, rejectedFailure]) {
+    await assert.rejects(
+      () => packSkillDirectory([file]),
+      (error) => {
+        assert.equal(error.code, "SKILL_PACKAGE_INVALID");
+        assert.deepEqual(error.details, { path: "skill/SKILL.md" });
+        assert.equal(error.message.includes("/Users/private"), false);
+        return true;
+      },
+    );
+  }
+});
+
+test("packSkillDirectory reads files serially and stops after actual file limits", async () => {
+  let active = 0;
+  let maxActive = 0;
+  const delayedFile = (path, contents) => ({
+    size: 1,
+    webkitRelativePath: path,
+    async arrayBuffer() {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active -= 1;
+      return new TextEncoder().encode(contents).buffer;
+    },
+  });
+  await packSkillDirectory([
+    delayedFile("skill/a.md", "a"),
+    delayedFile("skill/b.md", "b"),
+    delayedFile("skill/c.md", "c"),
+  ]);
+  assert.equal(maxActive, 1);
+
+  let laterReads = 0;
+  const overLimit = {
+    size: 1,
+    webkitRelativePath: "skill/large.bin",
+    async arrayBuffer() { return new ArrayBuffer(50 * 1024 * 1024 + 1); },
+  };
+  const later = {
+    size: 1,
+    webkitRelativePath: "skill/later.md",
+    async arrayBuffer() { laterReads += 1; return new TextEncoder().encode("later").buffer; },
+  };
+  await assert.rejects(
+    () => packSkillDirectory([overLimit, later]),
+    (error) => error.code === "SKILL_ARCHIVE_TOO_LARGE",
+  );
+  assert.equal(laterReads, 0);
+
+  let cumulativeLaterReads = 0;
+  const actual = (path) => ({
+    size: 1,
+    webkitRelativePath: path,
+    async arrayBuffer() { return new ArrayBuffer(34 * 1024 * 1024); },
+  });
+  const cumulativeLater = {
+    size: 1,
+    webkitRelativePath: "skill/never.md",
+    async arrayBuffer() { cumulativeLaterReads += 1; return new ArrayBuffer(1); },
+  };
+  await assert.rejects(
+    () => packSkillDirectory([actual("skill/a.bin"), actual("skill/b.bin"), actual("skill/c.bin"), cumulativeLater]),
+    (error) => error.code === "SKILL_ARCHIVE_TOO_LARGE",
+  );
+  assert.equal(cumulativeLaterReads, 0);
+});
+
+test("packSkillDirectory validates array-like length before touching its items", async () => {
+  let touched = false;
+  const selection = {
+    length: 1001,
+    get 0() { touched = true; return fakeBrowserFile("skill/SKILL.md", "x"); },
+  };
+  await assert.rejects(
+    () => packSkillDirectory(selection),
+    (error) => error.code === "SKILL_PACKAGE_INVALID",
+  );
+  assert.equal(touched, false);
+});
+
+test("packSkillDirectory maps an unavailable Blob constructor", async () => {
+  const originalBlob = globalThis.Blob;
+  try {
+    globalThis.Blob = undefined;
+    await assert.rejects(
+      () => packSkillDirectory([fakeBrowserFile("skill/SKILL.md", "x")]),
+      (error) => error.code === "SKILL_PACKAGE_INVALID" && !error.message.includes("Blob"),
+    );
+  } finally {
+    globalThis.Blob = originalBlob;
+  }
+});
+
 test("api: skills expose all scoped methods with encoded names and preserved details", async () => {
   const archive = new Blob(["zip"], { type: "application/zip" });
   const signal = new AbortController().signal;
