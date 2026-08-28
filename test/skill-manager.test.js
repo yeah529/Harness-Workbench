@@ -311,7 +311,7 @@ test("replacement rolls back the previous directory after an incoming rename fai
   let failIncoming = false;
   const fileOps = {
     rename: async (source, destination) => {
-      if (failIncoming && source.endsWith("/incoming") && destination === finalPath) {
+      if (failIncoming && basename(source) === "incoming" && destination === finalPath) {
         const error = new Error("injected incoming rename failure");
         error.code = "EIO";
         throw error;
@@ -849,7 +849,7 @@ test("a parent-symlink alias does not recover another manager's live transaction
     repos: projectRepos(root),
     fileOps: {
       rename: async (source, destination) => {
-        if (source === finalPath && destination.endsWith("/previous")) {
+        if (source === finalPath && basename(destination) === "previous") {
           startedResolve();
           await paused;
         }
