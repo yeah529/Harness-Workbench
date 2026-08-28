@@ -42,6 +42,8 @@ const defaultFileOps = Object.freeze({
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const TRANSACTION_ID_PATTERN = /^[A-Za-z0-9-]+$/;
 const locks = new Map();
+const recoveryLocks = new Map();
+const activeTransactions = new Set();
 
 function serialize(key, operation) {
   const previous = locks.get(key) ?? Promise.resolve();
@@ -123,6 +125,29 @@ async function assertRootPathSafe(ops, rootPath) {
   }
 }
 
+async function assertRecoveryPathsSafe(ops, rootPath, paths, descriptor) {
+  for (const current of [
+    dirname(rootPath),
+    rootPath,
+    join(rootPath, ".disabled"),
+    join(rootPath, ".staging"),
+    join(rootPath, ".transactions"),
+  ]) {
+    const stat = await optionalInspect(ops, current, "lstat");
+    if (stat?.isSymbolicLink()) throw recoveryError(descriptor);
+  }
+  for (const path of Object.values(paths)) {
+    const pathRelative = relative(rootPath, path);
+    if (pathRelative.startsWith("..") || pathRelative.startsWith("/")) throw recoveryError(descriptor);
+    let current = rootPath;
+    for (const component of pathRelative.split(/[\\/]/).filter(Boolean)) {
+      current = join(current, component);
+      const stat = await optionalInspect(ops, current, "lstat");
+      if (stat?.isSymbolicLink()) throw recoveryError(descriptor);
+    }
+  }
+}
+
 function diagnostic(path, kind, message) {
   return { kind, path, message };
 }
@@ -190,7 +215,7 @@ async function syncFile(ops, path) {
   let handle;
   try {
     handle = await ops.open(path, "r");
-    await handle.sync();
+    if (typeof handle.sync === "function") await handle.sync();
   } catch (error) {
     if (!(["EINVAL", "EISDIR", "ENOTSUP"].includes(error?.code))) throwMapped(error, "fsync");
   } finally {
@@ -438,7 +463,7 @@ function recoveryError(descriptor) {
   );
 }
 
-async function recoverTransactions({ rootPath, ops, activeTransactions }) {
+async function recoverTransactions({ rootPath, ops }) {
   const rootStat = await optionalInspect(ops, rootPath, "lstat");
   if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) return;
   const transactionsPath = join(rootPath, ".transactions");
@@ -458,9 +483,23 @@ async function recoverTransactions({ rootPath, ops, activeTransactions }) {
     } catch {
       throw recoveryError({ name });
     }
-    if (activeTransactions.has(descriptor?.id)) continue;
     const paths = transactionPaths(rootPath, descriptor);
     if (!paths || name !== `${descriptor.id}.json`) throw recoveryError(descriptor);
+
+    if (activeTransactions.has(`${rootPath}\0${descriptor.id}`)) continue;
+    const alternate = descriptor.state === "disabled"
+      ? join(rootPath, descriptor.name)
+      : join(rootPath, ".disabled", descriptor.name);
+    await assertRecoveryPathsSafe(ops, rootPath, {
+      final: paths.final,
+      incoming: paths.incoming,
+      previous: paths.previous,
+      staging: paths.staging,
+      descriptor: descriptorPath,
+      alternate,
+    }, descriptor);
+    const alternateStat = await optionalInspect(ops, alternate, "lstat");
+    if (alternateStat) throw recoveryError(descriptor);
 
     const finalStat = await optionalInspect(ops, paths.final, "lstat");
     const previousStat = await optionalInspect(ops, paths.previous, "lstat");
@@ -484,6 +523,16 @@ async function recoverTransactions({ rootPath, ops, activeTransactions }) {
     await removePath(ops, paths.staging);
     await removePath(ops, descriptorPath);
   }
+}
+
+function recoverTransactionsShared({ rootPath, ops }) {
+  const existing = recoveryLocks.get(rootPath);
+  if (existing) return existing;
+  const current = recoverTransactions({ rootPath, ops }).finally(() => {
+    if (recoveryLocks.get(rootPath) === current) recoveryLocks.delete(rootPath);
+  });
+  recoveryLocks.set(rootPath, current);
+  return current;
 }
 
 async function defaultRevealPath(path) {
@@ -539,16 +588,16 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
       });
     }
 
-    const temporaryRoot = await fsMkdtemp(join(tmpdir(), ".cpwb-skill-import-"));
+    const temporaryRoot = await callFs("mkdtemp", ops.mkdtemp, join(tmpdir(), ".cpwb-skill-import-"));
     let extractedRoot;
     try {
-      const canonicalTempRoot = await fsRealpath(temporaryRoot);
+      const canonicalTempRoot = await callFs("realpath", ops.realpath, temporaryRoot);
       extractedRoot = join(canonicalTempRoot, "incoming");
       const summary = await extractSkillArchive({ archiveBytes: bytes, destination: extractedRoot });
       const key = `${target.rootPath}\0${summary.name}`;
       return await serialize(key, async () => {
         await assertRootPathSafe(ops, target.rootPath);
-        await recoverTransactions({ rootPath: target.rootPath, ops, activeTransactions });
+        await recoverTransactionsShared({ rootPath: target.rootPath, ops });
         const existing = await readState(target, summary.name);
         const incoming = {
           name: summary.name,
@@ -592,7 +641,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
             previousRelative: `.staging/${transactionId}/previous`,
           };
           await callFs("mkdir", ops.mkdir, transactionsPath, { recursive: true });
-          activeTransactions.add(transactionId);
+          activeTransactions.add(`${target.rootPath}\0${transactionId}`);
           let descriptorPath;
           let movedPrevious = false;
           let movedIncoming = false;
@@ -633,7 +682,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
             }
             throwMapped(error, "mutation");
           } finally {
-            activeTransactions.delete(transactionId);
+            activeTransactions.delete(`${target.rootPath}\0${transactionId}`);
             if (cleanupAllowed || !movedPrevious) {
               await removePath(ops, stagingRoot).catch(() => {});
               if (descriptorPath) await removePath(ops, descriptorPath).catch(() => {});
@@ -647,7 +696,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
         return installed.item;
       });
     } finally {
-      await fsRm(temporaryRoot, { recursive: true, force: true }).catch(() => {});
+      await removePath(ops, temporaryRoot).catch(() => {});
     }
   }
 
@@ -656,7 +705,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
     if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
     return serialize(`${target.rootPath}\0${name}`, async () => {
       await assertRootPathSafe(ops, target.rootPath);
-      await recoverTransactions({ rootPath: target.rootPath, ops, activeTransactions });
+      await recoverTransactionsShared({ rootPath: target.rootPath, ops });
       const current = await readState(target, name);
       if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
       const desired = enabled ? "enabled" : "disabled";
@@ -679,7 +728,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
     if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
     return serialize(`${target.rootPath}\0${name}`, async () => {
       await assertRootPathSafe(ops, target.rootPath);
-      await recoverTransactions({ rootPath: target.rootPath, ops, activeTransactions });
+      await recoverTransactionsShared({ rootPath: target.rootPath, ops });
       const current = await readState(target, name);
       if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
       await removePath(ops, current.path);
@@ -692,7 +741,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
     if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
     return serialize(`${target.rootPath}\0${name}`, async () => {
       await assertRootPathSafe(ops, target.rootPath);
-      await recoverTransactions({ rootPath: target.rootPath, ops, activeTransactions });
+      await recoverTransactionsShared({ rootPath: target.rootPath, ops });
       const current = await readState(target, name);
       if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
       try {
@@ -706,14 +755,13 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
     });
   }
 
-  const activeTransactions = new Set();
   async function list({ scope, projectId } = {}) {
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
-    await recoverTransactions({ rootPath: target.rootPath, ops, activeTransactions });
+    await recoverTransactionsShared({ rootPath: target.rootPath, ops });
     const catalog = await scanCatalogRoot({ rootPath: target.rootPath, ops });
     if (scope === "project") {
       const globalRoot = resolve(dshHome, "skills");
-      await recoverTransactions({ rootPath: globalRoot, ops, activeTransactions });
+      await recoverTransactionsShared({ rootPath: globalRoot, ops });
       const globalCatalog = await scanCatalogRoot({ rootPath: globalRoot, ops });
       const globalNames = new Set(globalCatalog.items.map((item) => item.name));
       for (const item of catalog.items) item.shadowsGlobal = globalNames.has(item.name);
