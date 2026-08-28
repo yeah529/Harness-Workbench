@@ -215,7 +215,7 @@ async function syncFile(ops, path) {
   let handle;
   try {
     handle = await ops.open(path, "r");
-    if (typeof handle.sync === "function") await handle.sync();
+    if (typeof handle?.sync === "function") await handle.sync();
   } catch (error) {
     if (!(["EINVAL", "EISDIR", "ENOTSUP"].includes(error?.code))) throwMapped(error, "fsync");
   } finally {

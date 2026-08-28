@@ -548,3 +548,17 @@ test("transaction syncing tolerates a file handle without sync", async (t) => {
   const replaced = await manager.importArchive({ scope: "global", archiveBytes: archive("sync-seam", "new"), sourceName: "new.zip", replace: true });
   assert.equal(replaced.description, "new");
 });
+
+test("transaction syncing tolerates a missing file handle", async (t) => {
+  const root = await createTempDir("cpwb-skill-sync-missing-handle-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const manager = createSkillManager({
+    dshHome,
+    repos: projectRepos(root),
+    fileOps: { open: async () => null },
+  });
+  await manager.importArchive({ scope: "global", archiveBytes: archive("sync-missing", "old"), sourceName: "old.zip" });
+  const replaced = await manager.importArchive({ scope: "global", archiveBytes: archive("sync-missing", "new"), sourceName: "new.zip", replace: true });
+  assert.equal(replaced.description, "new");
+});
