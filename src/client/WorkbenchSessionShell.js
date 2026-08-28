@@ -361,6 +361,7 @@ export function WorkbenchSessionShell(props) {
   if (!visible || !sessionId || !String(sessionId).startsWith("session-cpwb-")) return null;
 
   const toolTabs = projectId != null ? PROJECT_TOOL_TABS : knowledgeBaseId != null ? KNOWLEDGE_TOOL_TABS : INDEPENDENT_TOOL_TABS;
+  const effectiveActiveTool = toolTabs.some(([id]) => id === activeTool) ? activeTool : toolTabs[0]?.[0];
   const tabIdFor = (id) => tabIdPrefix + "-" + id;
   const tabPanelId = tabIdPrefix + "-panel";
   const setTabRef = (id) => (node) => {
@@ -368,7 +369,8 @@ export function WorkbenchSessionShell(props) {
     else tabRefs.current.delete(id);
   };
   const onToolTabKeyDown = (event, id) => {
-    const currentIndex = toolTabs.findIndex(([tabId]) => tabId === id);
+    const currentId = toolTabs.some(([tabId]) => tabId === id) ? id : effectiveActiveTool;
+    const currentIndex = toolTabs.findIndex(([tabId]) => tabId === currentId);
     if (currentIndex < 0) return;
     let nextIndex = currentIndex;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1) % toolTabs.length;
@@ -383,23 +385,23 @@ export function WorkbenchSessionShell(props) {
   };
   let body = null;
   if (projectId != null) {
-    if (activeTool === "todos") body = React.createElement(Todos, { store: props.store, projectId });
-    else if (activeTool === "schedule") body = React.createElement(Automation, { store: props.store, projectId, view: "schedule" });
-    else if (activeTool === "knowledge") body = React.createElement(KnowledgeBase, { store: props.store, projectId, view: "linked" });
-    else if (activeTool === "summary") body = React.createElement(Automation, { store: props.store, projectId, view: "summary" });
-    else if (activeTool === "skills") body = React.createElement(ProjectSkillsPanel, { store: props.store, projectId });
+    if (effectiveActiveTool === "todos") body = React.createElement(Todos, { store: props.store, projectId });
+    else if (effectiveActiveTool === "schedule") body = React.createElement(Automation, { store: props.store, projectId, view: "schedule" });
+    else if (effectiveActiveTool === "knowledge") body = React.createElement(KnowledgeBase, { store: props.store, projectId, view: "linked" });
+    else if (effectiveActiveTool === "summary") body = React.createElement(Automation, { store: props.store, projectId, view: "summary" });
+    else if (effectiveActiveTool === "skills") body = React.createElement(ProjectSkillsPanel, { store: props.store, projectId });
   } else if (knowledgeBaseId != null) {
-    if (activeTool === "documents") body = React.createElement(KnowledgeBase, { store: props.store, knowledgeBaseId, view: "documents" });
-    else if (activeTool === "index") body = React.createElement(KnowledgeIndexPanel, { knowledgeBaseId, state, store: props.store });
-    else if (activeTool === "projects") body = React.createElement(LinkedProjectsPanel, { knowledgeBaseId, state, store: props.store });
-    else if (activeTool === "global_schedule") body = React.createElement(GlobalSchedulesPanel, { state, store: props.store });
+    if (effectiveActiveTool === "documents") body = React.createElement(KnowledgeBase, { store: props.store, knowledgeBaseId, view: "documents" });
+    else if (effectiveActiveTool === "index") body = React.createElement(KnowledgeIndexPanel, { knowledgeBaseId, state, store: props.store });
+    else if (effectiveActiveTool === "projects") body = React.createElement(LinkedProjectsPanel, { knowledgeBaseId, state, store: props.store });
+    else if (effectiveActiveTool === "global_schedule") body = React.createElement(GlobalSchedulesPanel, { state, store: props.store });
   } else {
-    if (activeTool === "context") body = React.createElement(SessionContextPanel, { sessionId, scope: scope || { kind: "independent", id: null }, state, store: props.store });
-    else if (activeTool === "files") body = React.createElement(SessionFilesPanel);
-    else if (activeTool === "subagents") body = React.createElement("div", { className: "cpwb-context-list" },
+    if (effectiveActiveTool === "context") body = React.createElement(SessionContextPanel, { sessionId, scope: scope || { kind: "independent", id: null }, state, store: props.store });
+    else if (effectiveActiveTool === "files") body = React.createElement(SessionFilesPanel);
+    else if (effectiveActiveTool === "subagents") body = React.createElement("div", { className: "cpwb-context-list" },
       React.createElement("article", { className: "cpwb-context-card cpwb-context-card-primary" }, React.createElement("span", null, "SUBAGENT ACTIVITY"), React.createElement("strong", null, subagentCount + " 个子智能体"), React.createElement("small", null, "查看会话、状态与运行详情")),
       React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-primary", onClick: () => setSubagentOpen(true) }, "打开 Subagent 抽屉"));
-    else if (activeTool === "global_schedule") body = React.createElement(GlobalSchedulesPanel, { state, store: props.store });
+    else if (effectiveActiveTool === "global_schedule") body = React.createElement(GlobalSchedulesPanel, { state, store: props.store });
   }
 
   const contextRail = function (drawer = false) {
@@ -417,16 +419,16 @@ export function WorkbenchSessionShell(props) {
         id: tabIdFor(id),
         ref: setTabRef(id),
         key: id,
-        className: activeTool === id ? "cpwb-active" : "",
+        className: effectiveActiveTool === id ? "cpwb-active" : "",
         onClick: () => setActiveTool(id),
         onKeyDown: (event) => onToolTabKeyDown(event, id),
-        tabIndex: activeTool === id ? 0 : -1,
-        "aria-selected": activeTool === id,
+        tabIndex: effectiveActiveTool === id ? 0 : -1,
+        "aria-selected": effectiveActiveTool === id,
         "aria-controls": tabPanelId,
-        "aria-current": activeTool === id ? "page" : undefined,
+        "aria-current": effectiveActiveTool === id ? "page" : undefined,
         title: label,
       }, React.createElement(IconComponent, { size: 18, weight: "regular", "aria-hidden": true }), React.createElement("span", null, label)))),
-      React.createElement("div", { id: tabPanelId, className: "cpwb-project-tool-body", role: "tabpanel", "aria-label": activeTool, "aria-labelledby": tabIdFor(activeTool) }, body));
+      React.createElement("div", { id: tabPanelId, className: "cpwb-project-tool-body", role: "tabpanel", "aria-label": effectiveActiveTool, "aria-labelledby": tabIdFor(effectiveActiveTool) }, body));
   };
 
   const transitioning = opening || Boolean(openError);

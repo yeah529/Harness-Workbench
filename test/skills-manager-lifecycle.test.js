@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
+import { flushSync } from "react-dom";
 import { SkillScopeManager } from "../src/client/SkillsManager.js";
 import { WorkbenchSessionShell } from "../src/client/WorkbenchSessionShell.js";
 
@@ -320,6 +321,7 @@ test("compact import menu has stable focus, outside dismissal, and chooser seman
   assert.equal(document.activeElement, trigger);
   assert.equal(document.listeners.get("keydown"), undefined);
   assert.equal(document.listeners.get("pointerdown"), undefined);
+  assert.equal(document.listeners.get("click"), undefined);
 
   await act(async () => { await invokeProp(trigger, "onClick", {}); });
   const reopened = findNodes(container, (node) => node.getAttribute?.("role") === "menu")[0];
@@ -342,6 +344,7 @@ test("compact import menu has stable focus, outside dismissal, and chooser seman
   await act(async () => { root.unmount(); });
   assert.equal(document.listeners.get("keydown"), undefined);
   assert.equal(document.listeners.get("pointerdown"), undefined);
+  assert.equal(document.listeners.get("click"), undefined);
 });
 
 test("mounted project rail tabs activate and move focus with roving keyboard navigation", async () => {
@@ -379,5 +382,39 @@ test("mounted project rail tabs activate and move focus with roving keyboard nav
   assert.equal(document.activeElement, tabs()[4]);
   const panel = findNodes(container, (node) => node.getAttribute?.("role") === "tabpanel")[0];
   assert.equal(panel.getAttribute("aria-labelledby"), last.getAttribute("id"));
+  await act(async () => { root.unmount(); });
+});
+
+test("project rail keeps one current tab and body during an immediate scope transition", async () => {
+  const document = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { act } = React;
+  const state = {
+    projects: [{ id: 7, name: "Research" }],
+    workbenchSessions: { "session-cpwb-transition": { sessionId: "session-cpwb-transition", scope: { kind: "project", id: 7 }, title: "Transition" } },
+    linkedKnowledgeBases: [],
+    contextBySession: {},
+    skillCatalogs: { "project:7": { status: "ready", data: { rootPath: "/project/.dsh/skills", items: [], diagnostics: [] } } },
+  };
+  const store = { getSnapshot: () => state, subscribe: () => () => {}, actions: { refreshProject: async () => {}, loadSkills: async () => {}, loadSessionContext: async () => {} } };
+  const sessionsSnapshot = { subagentsByParent: {} };
+  const sessions = { list: { getSnapshot: () => sessionsSnapshot, subscribe: () => () => {} } };
+  const props = { sessionId: "session-cpwb-transition", open: true, store, sessions, layoutMode: "desktop" };
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () => { root.render(React.createElement(WorkbenchSessionShell, props)); });
+  const tabs = () => findNodes(container, (node) => node.tagName === "BUTTON" && node.getAttribute?.("role") === "tab");
+  await act(async () => { invokeProp(tabs()[4], "onClick", {}); });
+  assert.equal(tabs()[4].getAttribute("aria-selected"), "true");
+
+  state.workbenchSessions["session-cpwb-transition"] = { ...state.workbenchSessions["session-cpwb-transition"], scope: { kind: "independent", id: null } };
+  flushSync(() => { root.render(React.createElement(WorkbenchSessionShell, props)); });
+  const currentTabs = tabs();
+  const selected = currentTabs.filter((tab) => tab.getAttribute("aria-selected") === "true");
+  const panel = findNodes(container, (node) => node.getAttribute?.("role") === "tabpanel")[0];
+  const labelledBy = panel.getAttribute("aria-labelledby");
+  assert.equal(selected.length, 1);
+  assert.ok(currentTabs.some((tab) => tab.getAttribute("id") === labelledBy));
+  assert.notEqual(panel.textContent, "");
   await act(async () => { root.unmount(); });
 });
