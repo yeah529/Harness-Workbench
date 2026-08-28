@@ -98,6 +98,48 @@ test("list returns an empty catalog for a missing root without creating it", asy
   await assert.rejects(() => lstat(join(dshHome, "skills")), { code: "ENOENT" });
 });
 
+test("project list fails closed when .dsh is a symlink and never scans its target", async (t) => {
+  const root = await createTempDir("cpwb-skill-project-symlink-");
+  t.after(() => removeTempDir(root));
+  const projectPath = join(root, "project");
+  const outside = join(root, "outside");
+  await mkdir(projectPath);
+  await makeBundle(join(outside, "skills"), "outside-skill", "outside-skill");
+  await symlink(outside, join(projectPath, ".dsh"));
+
+  const manager = createSkillManager({ dshHome: join(root, "dsh"), repos: projectRepos(projectPath) });
+  await assert.rejects(
+    () => manager.list({ scope: "project", projectId: 7 }),
+    (error) => error.code === SKILL_ERROR_CODES.PERMISSION_DENIED,
+  );
+});
+
+test("global list fails closed when DSH_HOME is a symlink", async (t) => {
+  const root = await createTempDir("cpwb-skill-dshhome-symlink-");
+  t.after(() => removeTempDir(root));
+  const outside = join(root, "outside");
+  const dshHome = join(root, "dsh-link");
+  await makeBundle(join(outside, "skills"), "outside-skill", "outside-skill");
+  await symlink(outside, dshHome);
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  await assert.rejects(() => manager.list({ scope: "global" }), (error) => error.code === SKILL_ERROR_CODES.PERMISSION_DENIED);
+});
+
+test("project roots remain usable beneath an ancestor symlink", async (t) => {
+  const root = await createTempDir("cpwb-skill-ancestor-link-");
+  t.after(() => removeTempDir(root));
+  const realParent = join(root, "real-parent");
+  const project = join(realParent, "project");
+  await mkdir(project, { recursive: true });
+  await symlink(realParent, join(root, "alias-parent"));
+  const manager = createSkillManager({
+    dshHome: join(root, "dsh"),
+    repos: projectRepos(join(root, "alias-parent", "project")),
+  });
+  const catalog = await manager.list({ scope: "project", projectId: 7 });
+  assert.deepEqual(catalog.items, []);
+});
+
 test("list ignores the empty disabled storage root", async (t) => {
   const root = await createTempDir("cpwb-skill-disabled-root-");
   t.after(() => removeTempDir(root));
@@ -287,6 +329,137 @@ test("list recovers a committed previous directory and removes transaction resid
   await assert.rejects(() => lstat(join(skillsRoot, ".staging", transactionId)), { code: "ENOENT" });
 });
 
+test("recovery rejects a non-directory incoming entry without changing transaction evidence", async (t) => {
+  const root = await createTempDir("cpwb-skill-recovery-file-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  const transactionId = "recovery-file-incoming";
+  const staging = join(skillsRoot, ".staging", transactionId);
+  const previous = join(staging, "previous");
+  const incoming = join(staging, "incoming");
+  const descriptorPath = join(skillsRoot, ".transactions", `${transactionId}.json`);
+  await mkdir(previous, { recursive: true });
+  await writeFile(join(previous, "SKILL.md"), markdown("recover-file", "old"));
+  await mkdir(join(skillsRoot, ".transactions"), { recursive: true });
+  await writeFile(incoming, "not a directory");
+  await writeFile(descriptorPath, JSON.stringify({
+    version: 1,
+    id: transactionId,
+    name: "recover-file",
+    state: "enabled",
+    finalRelative: "recover-file",
+    stagingRelative: `.staging/${transactionId}/incoming`,
+    previousRelative: `.staging/${transactionId}/previous`,
+  }));
+
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  await assert.rejects(() => manager.list({ scope: "global" }), (error) => error.code === SKILL_ERROR_CODES.RECOVERY_REQUIRED);
+  assert.equal(await readFile(incoming, "utf8"), "not a directory");
+  assert.equal(await readFile(join(previous, "SKILL.md"), "utf8"), markdown("recover-file", "old"));
+  assert.equal(await readFile(descriptorPath, "utf8").then(Boolean), true);
+  await assert.rejects(() => lstat(join(skillsRoot, "recover-file")), { code: "ENOENT" });
+});
+
+test("initial install removes a new directory when post-install scan fails", async (t) => {
+  const root = await createTempDir("cpwb-skill-initial-rollback-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  const finalPath = join(skillsRoot, "new-skill");
+  let failScan = false;
+  const manager = createSkillManager({
+    dshHome,
+    repos: projectRepos(root),
+    fileOps: {
+      readFile: async (path, ...args) => {
+        if (failScan && path === join(finalPath, "SKILL.md")) {
+          const error = new Error("injected scan failure");
+          error.code = "EIO";
+          throw error;
+        }
+        return readFile(path, ...args);
+      },
+    },
+  });
+  await manager.importArchive({ scope: "global", archiveBytes: archive("sibling-skill"), sourceName: "sibling.zip" });
+  failScan = true;
+  await assert.rejects(
+    () => manager.importArchive({ scope: "global", archiveBytes: archive("new-skill"), sourceName: "new.zip" }),
+    (error) => error.code === "EIO",
+  );
+  await assert.rejects(() => lstat(finalPath), { code: "ENOENT" });
+  assert.equal((await manager.list({ scope: "global" })).items[0].name, "sibling-skill");
+});
+
+test("enable and disable restore the original directory when post-move scan fails", async (t) => {
+  const root = await createTempDir("cpwb-skill-state-rollback-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  const enabledPath = join(skillsRoot, "state-skill");
+  const disabledPath = join(skillsRoot, ".disabled", "state-skill");
+  let failPath = null;
+  const manager = createSkillManager({
+    dshHome,
+    repos: projectRepos(root),
+    fileOps: {
+      readFile: async (path, ...args) => {
+        if (path === failPath) {
+          const error = new Error("injected state scan failure");
+          error.code = "EIO";
+          throw error;
+        }
+        return readFile(path, ...args);
+      },
+    },
+  });
+  await manager.importArchive({ scope: "global", archiveBytes: archive("state-skill"), sourceName: "state.zip" });
+  failPath = join(disabledPath, "SKILL.md");
+  await assert.rejects(() => manager.setEnabled({ scope: "global", name: "state-skill", enabled: false }), (error) => error.code === "EIO");
+  assert.equal(await readFile(join(enabledPath, "SKILL.md"), "utf8").then(Boolean), true);
+  failPath = null;
+  await manager.setEnabled({ scope: "global", name: "state-skill", enabled: false });
+  failPath = join(enabledPath, "SKILL.md");
+  await assert.rejects(() => manager.setEnabled({ scope: "global", name: "state-skill", enabled: true }), (error) => error.code === "EIO");
+  assert.equal(await readFile(join(disabledPath, "SKILL.md"), "utf8").then(Boolean), true);
+});
+
+test("malformed transaction descriptors return stable recovery errors and preserve evidence", async (t) => {
+  for (const [index, value] of [null, [], 1, "descriptor", true].entries()) {
+    const root = await createTempDir(`cpwb-skill-recovery-shape-${index}-`);
+    t.after(() => removeTempDir(root));
+    const skillsRoot = join(root, "dsh", "skills");
+    const descriptorPath = join(skillsRoot, ".transactions", `malformed-${index}.json`);
+    await mkdir(join(skillsRoot, ".transactions"), { recursive: true });
+    await writeFile(descriptorPath, JSON.stringify(value));
+    const manager = createSkillManager({ dshHome: join(root, "dsh"), repos: projectRepos(root) });
+    await assert.rejects(
+      () => manager.list({ scope: "global" }),
+      (error) => error.code === SKILL_ERROR_CODES.RECOVERY_REQUIRED,
+    );
+    assert.equal(await readFile(descriptorPath, "utf8"), JSON.stringify(value));
+  }
+  const root = await createTempDir("cpwb-skill-recovery-malformed-object-");
+  t.after(() => removeTempDir(root));
+  const skillsRoot = join(root, "dsh", "skills");
+  const descriptorPath = join(skillsRoot, ".transactions", "malformed-object.json");
+  const value = {
+    version: 1,
+    id: "malformed-object",
+    name: "malformed-object",
+    state: "enabled",
+    finalRelative: null,
+    stagingRelative: ".staging/malformed-object/incoming",
+    previousRelative: ".staging/malformed-object/previous",
+  };
+  await mkdir(join(skillsRoot, ".transactions"), { recursive: true });
+  await writeFile(descriptorPath, JSON.stringify(value));
+  const manager = createSkillManager({ dshHome: join(root, "dsh"), repos: projectRepos(root) });
+  await assert.rejects(() => manager.list({ scope: "global" }), (error) => error.code === SKILL_ERROR_CODES.RECOVERY_REQUIRED);
+  assert.equal(await readFile(descriptorPath, "utf8"), JSON.stringify(value));
+});
+
 test("ambiguous enabled and disabled state rejects every lifecycle mutation", async (t) => {
   const root = await createTempDir("cpwb-skill-ambiguous-");
   t.after(() => removeTempDir(root));
@@ -432,6 +605,18 @@ async function writeTransactionFixture(skillsRoot, id, name, state, previous = t
     previousRelative: `.staging/${id}/previous`,
   }));
 }
+
+test("recovery accepts the POSIX disabled transaction path", async (t) => {
+  const root = await createTempDir("cpwb-skill-recovery-disabled-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  await writeTransactionFixture(skillsRoot, "disabled-recovery", "disabled-recovery", "disabled");
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  const catalog = await manager.list({ scope: "global" });
+  assert.equal(catalog.items[0].state, "disabled");
+  assert.equal(await readFile(join(skillsRoot, ".disabled", "disabled-recovery", "SKILL.md"), "utf8"), markdown("disabled-recovery", "old"));
+});
 
 test("recovery refuses symlinked disabled and staging transaction paths", async (t) => {
   const root = await createTempDir("cpwb-skill-recovery-links-");

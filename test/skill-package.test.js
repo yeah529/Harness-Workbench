@@ -62,6 +62,22 @@ function zip64Archive() {
   });
 }
 
+function underReportedEntryArchive(declaredSize = null, content = skillMd()) {
+  return patchCentralEntry(zipSync({
+    "SKILL.md": content,
+  }), (bytes, offset) => {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const actualSize = view.getUint32(offset + 24, true);
+    assert.ok(actualSize > 4);
+    view.setUint32(offset + 24, declaredSize ?? actualSize - 4, true);
+  });
+}
+
+function largeSkillMd() {
+  const body = Array.from({ length: 30_000 }, (_, index) => `line-${String(index).padStart(5, "0")}-${(index * 2654435761 >>> 0).toString(16)}\n`).join("");
+  return strToU8(`---\nname: example-skill\ndescription: Example description.\n---\n${body}`);
+}
+
 function insertZip64Records(bytes) {
   let endOffset = -1;
   for (let offset = bytes.length - 22; offset >= 0; offset -= 1) {
@@ -148,6 +164,31 @@ test("extractSkillArchive rejects symlink, encrypted, and ZIP64 entries before w
     );
     await assert.rejects(() => lstat(destination), { code: "ENOENT" }, `${label} destination`);
   }
+});
+
+test("extractSkillArchive rejects central metadata that under-reports decompressed bytes", async (t) => {
+  const root = await createTempDir("cpwb-skill-zip-integrity-");
+  t.after(() => removeTempDir(root));
+  const destination = join(root, "out");
+  await assert.rejects(
+    () => extractSkillArchive({ archiveBytes: underReportedEntryArchive(), destination }),
+    (error) => error.code === SKILL_ERROR_CODES.ARCHIVE_UNSAFE,
+  );
+  await assert.rejects(() => lstat(destination), { code: "ENOENT" });
+});
+
+test("extractSkillArchive bounds a low-declared deflate entry before it exceeds small limits", async (t) => {
+  const root = await createTempDir("cpwb-skill-zip-bounded-");
+  t.after(() => removeTempDir(root));
+  await assert.rejects(
+    () => extractSkillArchive({
+      // The compressed payload spans multiple bounded Inflate pushes.
+      archiveBytes: underReportedEntryArchive(8, largeSkillMd()),
+      destination: join(root, "out"),
+      limits: { singleFileBytes: 8, expandedBytes: 8 },
+    }),
+    (error) => error.code === SKILL_ERROR_CODES.ARCHIVE_UNSAFE,
+  );
 });
 
 test("extractSkillArchive rejects special file modes even without a Unix creator", async (t) => {

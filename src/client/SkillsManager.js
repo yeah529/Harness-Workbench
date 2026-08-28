@@ -14,8 +14,20 @@ function errorMessage(error) {
   return error.message || String(error);
 }
 
+function conflictFiles(value) {
+  const files = Array.isArray(value?.files) ? value.files.filter((file) => typeof file === "string") : [];
+  if (files.length === 0) return `${value?.fileCount ?? 0} 个文件`;
+  const visible = files.slice(0, 4).join("、");
+  return `文件：${visible}${files.length > 4 ? ` 等 ${files.length} 个` : ""}`;
+}
+
 export function skillScopeKey(scope = "global", projectId = null) {
   return scope === "project" ? `project:${projectId}` : "global";
+}
+
+export function skillCatalogCount(state, scope = "global", projectId = null) {
+  const items = state?.skillCatalogs?.[skillScopeKey(scope, projectId)]?.data?.items;
+  return Array.isArray(items) ? items.length : 0;
 }
 
 export function actionMatches(action, type, name, targetKey) {
@@ -91,8 +103,18 @@ export function SkillConflictDialog({ existing, incoming, onCancel, onReplace, b
       h("h3", { id: "cpwb-skill-conflict-title" }, "同名 Skill 已存在"),
       h("p", { className: "cpwb-skills-dialog-lead" }, "此作用域已有同名 Skill。确认后将用本次导入内容替换现有目录。"),
       h("div", { className: "cpwb-skills-conflict-grid" },
-        h("div", null, h("span", null, "现有版本"), h("strong", null, existing.name), h("small", null, existing.description || "无描述"), h("small", null, `${existing.state === "disabled" ? "已停用" : "已启用"} · ${existing.files?.length || existing.fileCount || 0} 个文件`)),
-        h("div", null, h("span", null, "待导入版本"), h("strong", null, incoming.name), h("small", null, incoming.description || "无描述"), h("small", null, `${incoming.files?.length || incoming.fileCount || 0} 个文件`))),
+        h("div", null,
+          h("span", null, "现有版本"),
+          h("strong", null, existing.name),
+          h("small", null, existing.description || "无描述"),
+          h("small", null, `${existing.state === "disabled" ? "已停用" : "已启用"} · ${conflictFiles(existing)}`),
+          existing.installedPath ? h("small", null, `安装路径：${existing.installedPath}`) : null),
+        h("div", null,
+          h("span", null, "待导入版本"),
+          h("strong", null, incoming.name),
+          h("small", null, incoming.description || "无描述"),
+          h("small", null, conflictFiles(incoming)),
+          incoming.sourceName ? h("small", null, `来源：${incoming.sourceName}`) : null)),
       h("div", { className: "cpwb-modal-actions" },
         h("button", { type: "button", className: "cpwb-btn", disabled: busy, onClick: onCancel }, "取消"),
         h("button", { type: "button", className: "cpwb-btn cpwb-btn-primary", disabled: busy, onClick: onReplace }, busy ? "替换中" : "确认替换"))));

@@ -110,10 +110,29 @@ async function callFs(operation, callback, ...args) {
   }
 }
 
-async function assertRootPathSafe(ops, rootPath) {
+async function assertRootPathSafe(ops, rootPath, anchorPath = dirname(rootPath), { checkInternals = true } = {}) {
+  const absoluteRoot = resolve(rootPath);
+  const absoluteAnchor = resolve(anchorPath);
+  const descendant = relative(absoluteAnchor, absoluteRoot);
+  if (descendant.startsWith("..") || isAbsolute(descendant)) {
+    throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root is outside its trusted anchor");
+  }
+  let current = absoluteAnchor;
+  const anchorStat = await optionalInspect(ops, current, "lstat");
+  if (anchorStat?.isSymbolicLink()) {
+    throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a symbolic link");
+  }
+  const components = descendant.split(/[\\/]/).filter(Boolean);
+  for (const component of components) {
+    current = join(current, component);
+    const stat = await optionalInspect(ops, current, "lstat");
+    if (stat?.isSymbolicLink()) {
+      throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a symbolic link");
+    }
+    if (!stat) break;
+  }
+  if (!checkInternals) return;
   for (const current of [
-    dirname(rootPath),
-    rootPath,
     join(rootPath, ".disabled"),
     join(rootPath, ".staging"),
     join(rootPath, ".transactions"),
@@ -242,12 +261,16 @@ async function removePath(ops, path, operation = "rm") {
 }
 
 function transactionPaths(rootPath, descriptor) {
+  if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) return null;
   const name = descriptor.name;
   const id = descriptor.id;
   if (!safeName(name) || !safeTransactionId(id)) return null;
   const state = descriptor.state === "disabled" ? "disabled" : descriptor.state === "enabled" ? "enabled" : null;
   if (!state || descriptor.version !== 1) return null;
-  const finalRelative = state === "disabled" ? join(".disabled", name) : name;
+  const finalRelative = state === "disabled" ? `.disabled/${name}` : name;
+  if (descriptor.finalRelative !== finalRelative
+    || descriptor.stagingRelative !== `.staging/${id}/incoming`
+    || descriptor.previousRelative !== `.staging/${id}/previous`) return null;
   return {
     final: join(rootPath, finalRelative),
     incoming: join(rootPath, ".staging", id, "incoming"),
@@ -426,7 +449,7 @@ async function resolveTarget({ scope, projectId, dshHome, repos, ops }) {
     if (typeof dshHome !== "string" || dshHome.length === 0) {
       throw new SkillManagerError(SKILL_ERROR_CODES.INVALID_SCOPE, "DSH_HOME is unavailable");
     }
-    return { scope: { kind: "global" }, rootPath: resolve(dshHome, "skills") };
+    return { scope: { kind: "global" }, rootPath: resolve(dshHome, "skills"), anchorPath: resolve(dshHome) };
   }
   if (!Number.isSafeInteger(projectId) || projectId <= 0) {
     throw new SkillManagerError(SKILL_ERROR_CODES.INVALID_SCOPE, "Project scope requires a positive projectId");
@@ -452,6 +475,7 @@ async function resolveTarget({ scope, projectId, dshHome, repos, ops }) {
   return {
     scope: { kind: "project", projectId },
     rootPath: resolve(projectPath, ".dsh", "skills"),
+    anchorPath: projectPath,
   };
 }
 
@@ -504,7 +528,7 @@ async function recoverTransactions({ rootPath, ops }) {
     const finalStat = await optionalInspect(ops, paths.final, "lstat");
     const previousStat = await optionalInspect(ops, paths.previous, "lstat");
     const incomingStat = await optionalInspect(ops, paths.incoming, "lstat");
-    if ([finalStat, previousStat, incomingStat].some((stat) => stat && (stat.isSymbolicLink() || (!stat.isDirectory() && stat !== incomingStat)))) {
+    if ([finalStat, previousStat, incomingStat].some((stat) => stat && (stat.isSymbolicLink() || !stat.isDirectory()))) {
       throw recoveryError(descriptor);
     }
 
@@ -596,7 +620,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
       const summary = await extractSkillArchive({ archiveBytes: bytes, destination: extractedRoot });
       const key = `${target.rootPath}\0${summary.name}`;
       return await serialize(key, async () => {
-        await assertRootPathSafe(ops, target.rootPath);
+        await assertRootPathSafe(ops, target.rootPath, target.anchorPath);
         await recoverTransactionsShared({ rootPath: target.rootPath, ops });
         const existing = await readState(target, summary.name);
         const incoming = {
@@ -608,7 +632,10 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
           state: existing?.state ?? "enabled",
         };
         if (existing && !replace) {
-          throw mutationError(SKILL_ERROR_CODES.CONFLICT, "A Skill with this name already exists", { existing, incoming });
+          throw mutationError(SKILL_ERROR_CODES.CONFLICT, "A Skill with this name already exists", {
+            existing: { ...existing, installedPath: existing.path, conflictSummary: "catalog-entry-v1" },
+            incoming,
+          });
         }
 
         await callFs("mkdir", ops.mkdir, target.rootPath, { recursive: true });
@@ -689,11 +716,20 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
             }
           }
         }
-        const installed = await scanBundle({ rootPath: target.rootPath, bundlePath: finalPath, state: "enabled", ops });
-        if (!installed.item || installed.diagnostics.length > 0) {
-          throw mutationError(SKILL_ERROR_CODES.PACKAGE_INVALID, "Installed Skill could not be scanned");
+        try {
+          const installed = await scanBundle({ rootPath: target.rootPath, bundlePath: finalPath, state: "enabled", ops });
+          if (!installed.item || installed.diagnostics.length > 0) {
+            throw mutationError(SKILL_ERROR_CODES.PACKAGE_INVALID, "Installed Skill could not be scanned");
+          }
+          return installed.item;
+        } catch (error) {
+          try {
+            await removePath(ops, finalPath);
+          } catch {
+            throw recoveryError({ name: summary.name });
+          }
+          throwMapped(error, "mutation");
         }
-        return installed.item;
       });
     } finally {
       await removePath(ops, temporaryRoot).catch(() => {});
@@ -704,7 +740,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
     if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
     return serialize(`${target.rootPath}\0${name}`, async () => {
-      await assertRootPathSafe(ops, target.rootPath);
+      await assertRootPathSafe(ops, target.rootPath, target.anchorPath);
       await recoverTransactionsShared({ rootPath: target.rootPath, ops });
       const current = await readState(target, name);
       if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
@@ -717,9 +753,18 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
       } catch (error) {
         throwMapped(error, "rename");
       }
-      const result = await scanBundle({ rootPath: target.rootPath, bundlePath: destination, state: desired, ops });
-      if (!result.item || result.diagnostics.length > 0) throw mutationError(SKILL_ERROR_CODES.PACKAGE_INVALID, "Skill could not be scanned after state change");
-      return result.item;
+      try {
+        const result = await scanBundle({ rootPath: target.rootPath, bundlePath: destination, state: desired, ops });
+        if (!result.item || result.diagnostics.length > 0) throw mutationError(SKILL_ERROR_CODES.PACKAGE_INVALID, "Skill could not be scanned after state change");
+        return result.item;
+      } catch (error) {
+        try {
+          await ops.rename(destination, current.path);
+        } catch {
+          throw recoveryError({ name });
+        }
+        throwMapped(error, "mutation");
+      }
     });
   }
 
@@ -727,7 +772,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
     if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
     return serialize(`${target.rootPath}\0${name}`, async () => {
-      await assertRootPathSafe(ops, target.rootPath);
+      await assertRootPathSafe(ops, target.rootPath, target.anchorPath);
       await recoverTransactionsShared({ rootPath: target.rootPath, ops });
       const current = await readState(target, name);
       if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
@@ -740,7 +785,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
     if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
     return serialize(`${target.rootPath}\0${name}`, async () => {
-      await assertRootPathSafe(ops, target.rootPath);
+      await assertRootPathSafe(ops, target.rootPath, target.anchorPath);
       await recoverTransactionsShared({ rootPath: target.rootPath, ops });
       const current = await readState(target, name);
       if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
@@ -757,10 +802,12 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
 
   async function list({ scope, projectId } = {}) {
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
+    await assertRootPathSafe(ops, target.rootPath, target.anchorPath, { checkInternals: false });
     await recoverTransactionsShared({ rootPath: target.rootPath, ops });
     const catalog = await scanCatalogRoot({ rootPath: target.rootPath, ops });
     if (scope === "project") {
       const globalRoot = resolve(dshHome, "skills");
+      await assertRootPathSafe(ops, globalRoot, dshHome, { checkInternals: false });
       await recoverTransactionsShared({ rootPath: globalRoot, ops });
       const globalCatalog = await scanCatalogRoot({ rootPath: globalRoot, ops });
       const globalNames = new Set(globalCatalog.items.map((item) => item.name));

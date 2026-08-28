@@ -1,6 +1,6 @@
 import { lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, parse, posix, resolve, sep } from "node:path";
-import { unzipSync } from "fflate";
+import { Inflate } from "fflate";
 import { load as loadYaml } from "js-yaml";
 
 export const SKILL_PACKAGE_LIMITS = Object.freeze({
@@ -45,6 +45,19 @@ const UNIX_SYMLINK_MODE = 0o120000;
 const UNIX_FILE_TYPE_MASK = 0o170000;
 const UNIX_REGULAR_MODE = 0o100000;
 const UNIX_DIRECTORY_MODE = 0o040000;
+
+const CRC32_TABLE = new Uint32Array(256);
+for (let index = 0; index < CRC32_TABLE.length; index += 1) {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) value = value & 1 ? (value >>> 1) ^ 0xedb88320 : value >>> 1;
+  CRC32_TABLE[index] = value >>> 0;
+}
+
+function crc32(bytes) {
+  let value = 0xffffffff;
+  for (const byte of bytes) value = CRC32_TABLE[(value ^ byte) & 0xff] ^ (value >>> 8);
+  return (value ^ 0xffffffff) >>> 0;
+}
 
 function packageError(message, details) {
   return new SkillManagerError(SKILL_ERROR_CODES.PACKAGE_INVALID, message, details);
@@ -128,6 +141,8 @@ function inspectZipCentralDirectory(archiveBytes) {
       throw unsafeArchive("ZIP central directory entry is invalid", { index });
     }
     const flags = readUint16(view, offset + 8);
+    const method = readUint16(view, offset + 10);
+    const crc = readUint32(view, offset + 16);
     const compressedSize = readUint32(view, offset + 20);
     const originalSize = readUint32(view, offset + 24);
     const nameLength = readUint16(view, offset + 28);
@@ -152,11 +167,75 @@ function inspectZipCentralDirectory(archiveBytes) {
       throw unsafeArchive("Special ZIP file types are not supported", { index });
     }
     const name = decodeUtf8(bytes.subarray(offset + 46, offset + 46 + nameLength));
-    entries.push({ name, compressedSize, originalSize, localOffset });
+    entries.push({ name, flags, method, crc, compressedSize, originalSize, localOffset });
     offset += recordLength;
   }
   if (offset !== centralOffset + centralSize) throw unsafeArchive("ZIP central directory size is invalid");
-  return { bytes, entries };
+  return { bytes, entries, centralOffset };
+}
+
+function inflateBounded(compressed, limit) {
+  const chunks = [];
+  let total = 0;
+  const stream = new Inflate((chunk) => {
+    total += chunk.byteLength;
+    if (total > limit) throw unsafeArchive("ZIP entry exceeds its declared size");
+    chunks.push(chunk.slice());
+  });
+  // Feed bounded chunks so fflate cannot allocate a whole deflate bomb before
+  // the callback enforces the output limit. An empty stream still needs final.
+  const chunkSize = 1024;
+  if (compressed.byteLength === 0) {
+    stream.push(compressed, true);
+  } else {
+    for (let offset = 0; offset < compressed.byteLength; offset += chunkSize) {
+      const end = Math.min(offset + chunkSize, compressed.byteLength);
+      stream.push(compressed.subarray(offset, end), end === compressed.byteLength);
+    }
+  }
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+function extractZipEntry(bytes, entry, maxOutput, archiveEnd) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const localOffset = entry.localOffset;
+  if (localOffset + 30 > bytes.length || readUint32(view, localOffset) !== 0x04034b50) {
+    throw unsafeArchive("ZIP local file header is invalid");
+  }
+  const localFlags = readUint16(view, localOffset + 6);
+  const localMethod = readUint16(view, localOffset + 8);
+  const localNameLength = readUint16(view, localOffset + 26);
+  const localExtraLength = readUint16(view, localOffset + 28);
+  const localHeaderEnd = localOffset + 30 + localNameLength + localExtraLength;
+  if (localHeaderEnd > bytes.length || localFlags !== entry.flags || localMethod !== entry.method) {
+    throw unsafeArchive("ZIP local file header does not match central directory");
+  }
+  const localName = decodeUtf8(bytes.subarray(localOffset + 30, localOffset + 30 + localNameLength));
+  if (localName !== entry.name) throw unsafeArchive("ZIP local file name does not match central directory");
+  const dataEnd = localHeaderEnd + entry.compressedSize;
+  if (dataEnd > archiveEnd) throw unsafeArchive("ZIP entry data overlaps the central directory");
+  const compressed = bytes.subarray(localHeaderEnd, dataEnd);
+  let data;
+  try {
+    if (entry.method === 0) {
+      if (compressed.byteLength > maxOutput) throw unsafeArchive("ZIP entry exceeds its declared size");
+      data = compressed.slice();
+    } else if (entry.method === 8) data = inflateBounded(compressed, maxOutput);
+    else throw unsafeArchive("ZIP compression method is not supported");
+  } catch (error) {
+    if (error instanceof SkillManagerError) throw error;
+    throw unsafeArchive("ZIP entry could not be decompressed");
+  }
+  if (data.byteLength !== entry.originalSize || crc32(data) !== entry.crc) {
+    throw unsafeArchive("ZIP entry integrity check failed");
+  }
+  return data;
 }
 
 async function assertDestinationPathSafe(destination) {
@@ -257,31 +336,18 @@ export async function extractSkillArchive({ archiveBytes, destination, limits })
   const relativeSkill = relativeEntries.find((entry) => entry.path === "SKILL.md");
   if (!relativeSkill) throw packageError("ZIP archive wrapper is invalid");
 
-  let declaredCount = 0;
+  if (inspected.entries.length > effectiveLimits.entries) throw tooLarge("ZIP archive contains too many entries", { limit: effectiveLimits.entries });
   let declaredBytes = 0;
-  let extracted;
-  try {
-    extracted = unzipSync(bytes, {
-      filter(file) {
-        declaredCount += 1;
-        if (declaredCount > effectiveLimits.entries) throw tooLarge("ZIP archive contains too many entries", { limit: effectiveLimits.entries });
-        if (file.originalSize > effectiveLimits.singleFileBytes) {
-          throw tooLarge("ZIP entry exceeds the single-file byte limit", { name: file.name, bytes: file.originalSize, limit: effectiveLimits.singleFileBytes });
-        }
-        declaredBytes += file.originalSize;
-        if (declaredBytes > effectiveLimits.expandedBytes) {
-          throw tooLarge("ZIP archive exceeds the expanded byte limit", { bytes: declaredBytes, limit: effectiveLimits.expandedBytes });
-        }
-        return true;
-      },
-    });
-  } catch (error) {
-    if (error instanceof SkillManagerError) throw error;
-    throw unsafeArchive("ZIP archive could not be extracted", { cause: String(error.message) });
-  }
-
-  const actualEntries = Object.entries(extracted);
-  if (actualEntries.length !== declaredCount) throw unsafeArchive("ZIP entry count changed during extraction");
+  const actualEntries = inspected.entries.map((entry) => {
+    if (entry.originalSize > effectiveLimits.singleFileBytes) {
+      throw tooLarge("ZIP entry exceeds the single-file byte limit", { name: entry.name, bytes: entry.originalSize, limit: effectiveLimits.singleFileBytes });
+    }
+    declaredBytes += entry.originalSize;
+    if (declaredBytes > effectiveLimits.expandedBytes) {
+      throw tooLarge("ZIP archive exceeds the expanded byte limit", { bytes: declaredBytes, limit: effectiveLimits.expandedBytes });
+    }
+    return [entry.name, extractZipEntry(bytes, entry, Math.min(entry.originalSize, effectiveLimits.singleFileBytes, effectiveLimits.expandedBytes - (declaredBytes - entry.originalSize)), inspected.centralOffset)];
+  });
   let totalBytes = 0;
   for (const [, data] of actualEntries) {
     if (data.byteLength > effectiveLimits.singleFileBytes) {

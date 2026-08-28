@@ -208,6 +208,19 @@ function safeSkillSummary(value) {
   for (const field of ["name", "description", "state", "health", "fileCount", "sourceName"]) {
     if (typeof value[field] === "string" || Number.isSafeInteger(value[field])) summary[field] = value[field];
   }
+  if (Array.isArray(value.files) && value.files.length <= SKILL_PACKAGE_LIMITS.entries
+    && value.files.every((file) => typeof file === "string"
+      && file.length > 0
+      && file.length <= 1024
+      && !file.includes("\0")
+      && !file.startsWith("/")
+      && !/^[A-Za-z]:[\\/]/.test(file)
+      && !file.split(/[\\/]/).some((part) => part === "" || part === "." || part === ".."))) {
+    summary.files = [...value.files];
+  }
+  if (value.conflictSummary === "catalog-entry-v1" && typeof value.installedPath === "string" && value.installedPath.length <= 4096) {
+    summary.installedPath = value.installedPath;
+  }
   return Object.keys(summary).length > 0 ? summary : undefined;
 }
 
@@ -359,6 +372,7 @@ async function readJsonBody(req) {
   // lookalike like "application/json-evil" is rejected, not accepted.
   const mediaType = contentType.toLowerCase().split(";")[0].trim();
   if (mediaType !== "application/json") {
+    discardRequestBody(req);
     throw new ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json");
   }
   const chunks = [];
@@ -668,29 +682,34 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
   }
 
   function parseSkillImportHeaders(req) {
-    const mediaType = String(req.headers["content-type"] ?? "").toLowerCase().trim();
-    if (mediaType !== "application/zip") {
-      throw new ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/zip");
-    }
-    const scope = req.headers["x-cpwb-skill-scope"];
-    const projectRaw = req.headers["x-cpwb-project-id"];
-    let projectId;
-    if (projectRaw !== undefined) {
-      if (!/^[1-9]\d*$/.test(String(projectRaw))) {
-        throw new ApiError(422, "INVALID_FIELD", "projectId must be a positive integer");
+    try {
+      const mediaType = String(req.headers["content-type"] ?? "").toLowerCase().trim();
+      if (mediaType !== "application/zip") {
+        throw new ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/zip");
       }
-      projectId = Number(projectRaw);
-      if (!isPositiveInt(projectId)) throw new ApiError(422, "INVALID_FIELD", "projectId must be a positive integer");
+      const scope = req.headers["x-cpwb-skill-scope"];
+      const projectRaw = req.headers["x-cpwb-project-id"];
+      let projectId;
+      if (projectRaw !== undefined) {
+        if (!/^[1-9]\d*$/.test(String(projectRaw))) {
+          throw new ApiError(422, "INVALID_FIELD", "projectId must be a positive integer");
+        }
+        projectId = Number(projectRaw);
+        if (!isPositiveInt(projectId)) throw new ApiError(422, "INVALID_FIELD", "projectId must be a positive integer");
+      }
+      const replaceRaw = req.headers["x-cpwb-replace"];
+      if (replaceRaw !== undefined && replaceRaw !== "true" && replaceRaw !== "false") {
+        throw new ApiError(422, "INVALID_FIELD", "replace must be true or false");
+      }
+      return {
+        ...parseSkillScope(scope, projectId),
+        sourceName: parseSkillFilename(req.headers["x-cpwb-filename"]),
+        replace: replaceRaw === "true",
+      };
+    } catch (error) {
+      discardRequestBody(req);
+      throw error;
     }
-    const replaceRaw = req.headers["x-cpwb-replace"];
-    if (replaceRaw !== undefined && replaceRaw !== "true" && replaceRaw !== "false") {
-      throw new ApiError(422, "INVALID_FIELD", "replace must be true or false");
-    }
-    return {
-      ...parseSkillScope(scope, projectId),
-      sourceName: parseSkillFilename(req.headers["x-cpwb-filename"]),
-      replace: replaceRaw === "true",
-    };
   }
 
   const permanentDeletionCapability = () => maintenance?.capability?.() ?? {

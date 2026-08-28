@@ -286,6 +286,104 @@ test("skill API lists, imports, conflicts, replaces, disables, and deletes", asy
   assert.equal(response.status, 200);
 });
 
+test("skill conflict API exposes safe catalog file summaries and installed path only", async (t) => {
+  const conflict = new SkillManagerError("SKILL_CONFLICT", "same skill", {
+      existing: {
+        name: "same-skill",
+        description: "installed",
+        state: "enabled",
+        files: ["SKILL.md", "references/readme.md"],
+        installedPath: "/dsh/skills/same-skill",
+        conflictSummary: "catalog-entry-v1",
+      },
+      incoming: {
+        name: "same-skill",
+        description: "incoming",
+        files: ["SKILL.md", "scripts/run.sh"],
+        sourceName: "same.zip",
+      },
+  });
+  const { base } = await startApi(t, { skills: { importArchive: async () => { throw conflict; } } });
+  const response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), { scope: "global", sourceName: "same.zip" }));
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.deepEqual(body.error.details, {
+    existing: {
+      name: "same-skill",
+      description: "installed",
+      state: "enabled",
+      files: ["SKILL.md", "references/readme.md"],
+      installedPath: "/dsh/skills/same-skill",
+    },
+    incoming: {
+      name: "same-skill",
+      description: "incoming",
+      files: ["SKILL.md", "scripts/run.sh"],
+      sourceName: "same.zip",
+    },
+  });
+});
+
+test("skill conflict API drops untrusted outside and staging paths", async (t) => {
+  const conflict = new SkillManagerError("SKILL_CONFLICT", "same skill", {
+      existing: { name: "same-skill", path: "/tmp/evil", installedPath: "/tmp/evil", files: ["../secret"] },
+      incoming: { name: "same-skill", path: "/tmp/staging", files: ["/absolute"] },
+  });
+  const { base } = await startApi(t, { skills: { importArchive: async () => { throw conflict; } } });
+  const response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), { scope: "global", sourceName: "same.zip" }));
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.deepEqual(body.error.details, { existing: { name: "same-skill" }, incoming: { name: "same-skill" } });
+  assert.doesNotMatch(JSON.stringify(body), /tmp|secret|absolute/);
+});
+
+test("invalid Skill import headers drain chunked request bodies before responding", async (t) => {
+  const { api } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); }, setEnabled: async () => ({}) } });
+  class InvalidSkillRequest extends EventEmitter {
+    method = "POST";
+    url = "/api/cpwb/skills/import";
+    headers = { "content-type": "text/plain", "x-cpwb-skill-scope": "global", "x-cpwb-filename": "bad.zip" };
+    resumed = 0;
+    resume() { this.resumed += 1; this.emit("end"); }
+  }
+  const request = new InvalidSkillRequest();
+  let status;
+  let body;
+  const response = {
+    headersSent: false,
+    writeHead(nextStatus) { status = nextStatus; this.headersSent = true; },
+    end(value = "") { body = Buffer.from(String(value)); },
+    destroy() { throw new Error("response must not be destroyed"); },
+  };
+  await api.handler(request, response);
+  assert.equal(status, 415);
+  assert.equal(JSON.parse(body).error.code, "UNSUPPORTED_MEDIA_TYPE");
+  assert.equal(request.resumed, 1);
+  assert.equal(request.listenerCount("error"), 0);
+  assert.equal(request.listenerCount("end"), 0);
+  assert.equal(request.listenerCount("aborted"), 0);
+  t.after(() => request.removeAllListeners());
+
+  const patchRequest = new InvalidSkillRequest();
+  patchRequest.method = "PATCH";
+  patchRequest.url = "/api/cpwb/skills/demo-skill";
+  patchRequest.headers = { "content-type": "text/plain" };
+  const patchResponse = {
+    headersSent: false,
+    writeHead(nextStatus) { status = nextStatus; this.headersSent = true; },
+    end(value = "") { body = Buffer.from(String(value)); },
+    destroy() { throw new Error("response must not be destroyed"); },
+  };
+  await api.handler(patchRequest, patchResponse);
+  assert.equal(status, 415);
+  assert.equal(JSON.parse(body).error.code, "UNSUPPORTED_MEDIA_TYPE");
+  assert.equal(patchRequest.resumed, 1);
+  assert.equal(patchRequest.listenerCount("error"), 0);
+  assert.equal(patchRequest.listenerCount("end"), 0);
+  assert.equal(patchRequest.listenerCount("aborted"), 0);
+  t.after(() => patchRequest.removeAllListeners());
+});
+
 test("skill API never accepts an installation target path", async (t) => {
   const fake = { list: async (input) => input };
   const { base } = await startApi(t, { skills: fake });

@@ -15,7 +15,7 @@ import { WorkbenchNodeMark } from "../src/client/SidebarBrand.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
 import { createNavigationStore } from "../src/client/navigation.js";
 import { SkillsPage, SkillConflictDialog } from "../src/client/SkillsPage.js";
-import { actionMatches, copySkillPath, shouldRetainSkillInput, skillScopeKey, ProjectSkillsPanel, SkillScopeManager } from "../src/client/SkillsManager.js";
+import { actionMatches, copySkillPath, shouldRetainSkillInput, skillCatalogCount, skillScopeKey, ProjectSkillsPanel, SkillScopeManager } from "../src/client/SkillsManager.js";
 import {
   WorkbenchSessionShell,
   PROJECT_TOOL_TABS,
@@ -300,13 +300,30 @@ test("SkillsPage defaults to global scope and exposes directory plus ZIP import"
 
 test("Skill conflict dialog is only an import decision", () => {
   const html = renderToStaticMarkup(React.createElement(SkillConflictDialog, {
-    existing: { name: "x", description: "old", state: "enabled", files: ["SKILL.md"] },
-    incoming: { name: "x", description: "new", files: ["SKILL.md", "references/a.md"] },
+    existing: { name: "x", description: "old", state: "enabled", files: ["SKILL.md"], installedPath: "/dsh/skills/x" },
+    incoming: { name: "x", description: "new", files: ["SKILL.md", "references/a.md"], sourceName: "x.zip" },
     onCancel() {}, onReplace() {},
   }));
   assert.match(html, /同名 Skill 已存在/);
   assert.match(html, /取消/);
   assert.match(html, /确认替换/);
+  assert.match(html, /SKILL\.md/);
+  assert.match(html, /\/dsh\/skills\/x/);
+});
+
+test("SkillsPage count follows the active project catalog", () => {
+  const state = {
+    projects: [{ id: 7, name: "Research" }],
+    skillCatalogs: {
+      global: { status: "ready", data: { items: [{ name: "global" }] }, error: null },
+      "project:7": { status: "ready", data: { items: [{ name: "project-a" }, { name: "project-b" }] }, error: null },
+    },
+  };
+  const store = { subscribe: () => () => {}, getSnapshot: () => state, actions: { loadSkills: async () => {} } };
+  assert.equal(skillCatalogCount(state, "global"), 1);
+  assert.equal(skillCatalogCount(state, "project", 7), 2);
+  const html = renderToStaticMarkup(React.createElement(SkillsPage, { store }));
+  assert.match(html, /class="cpwb-skills-count">01/);
 });
 
 test("skill action matching is bound to the canonical scope key", () => {
