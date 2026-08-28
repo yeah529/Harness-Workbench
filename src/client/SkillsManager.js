@@ -1,5 +1,5 @@
 import React from "react";
-import { Check, ClipboardText, Eye, FolderOpen, Package, Pause, Play, Trash, UploadSimple, WarningCircle } from "@phosphor-icons/react";
+import { Check, ClipboardText, Eye, FolderOpen, Package, Pause, Play, Sparkle, Trash, UploadSimple, WarningCircle } from "@phosphor-icons/react";
 import { GlobalModal } from "./globalModal.js";
 import { packSkillDirectory, SKILL_IMPORT_LIMITS } from "./skill-import.js";
 
@@ -119,7 +119,7 @@ function StatusBadge({ item }) {
   return h("span", { className: "cpwb-skill-status cpwb-skill-status-" + item.state }, item.health !== "valid" ? "无效" : state);
 }
 
-function SkillRow({ item, scope, targetKey, store, onDelete }) {
+function SkillRow({ item, scope, targetKey, store, onDelete, compact = false }) {
   const state = store.getSnapshot();
   const action = state.skillAction;
   const busy = action?.status === "running" && action.key === targetKey;
@@ -128,7 +128,7 @@ function SkillRow({ item, scope, targetKey, store, onDelete }) {
   const run = (fn) => Promise.resolve(fn()).catch(() => {});
   return h("article", { className: "cpwb-skill-row" + (busy ? " cpwb-skill-row-busy" : ""), "data-skill-state": item.state, "data-skill-health": item.health, "aria-busy": busy ? "true" : undefined },
     h("div", { className: "cpwb-skill-identity" }, h("strong", null, item.name), h(StatusBadge, { item }), item.shadowsGlobal ? h("span", { className: "cpwb-skill-shadow" }, "覆盖全局版本") : null),
-    h("div", { className: "cpwb-skill-summary" }, h("p", null, item.description || "无描述"), h("small", null, `${item.fileCount ?? item.files?.length ?? 0} 个文件 · ${item.path}`)),
+    h("div", { className: "cpwb-skill-summary" }, h("p", null, item.description || "无描述"), h("small", { title: compact ? item.path : undefined }, `${item.fileCount ?? item.files?.length ?? 0} 个文件 · ${compact ? `.dsh/skills/${item.name}` : item.path}`)),
     h("div", { className: "cpwb-skill-actions", "aria-label": item.name + "操作" },
       disabled ? null : h("button", { type: "button", className: "cpwb-icon-button", disabled: stateBusy, onClick: () => run(() => store.actions.setSkillEnabled({ scope, ...(scope === "project" ? { projectId: item.projectId } : {}), name: item.name, enabled: item.state === "disabled" })), "aria-label": item.state === "disabled" ? `启用 ${item.name}` : `停用 ${item.name}`, title: item.state === "disabled" ? "启用" : "停用" }, item.state === "disabled" ? h(Play, { size: 15, "aria-hidden": true }) : h(Pause, { size: 15, "aria-hidden": true })),
       h("button", { type: "button", className: "cpwb-icon-button", disabled: stateBusy, onClick: () => run(() => store.actions.revealSkill({ scope, ...(scope === "project" ? { projectId: item.projectId } : {}), name: item.name })), "aria-label": `在文件管理器中显示 ${item.name}`, title: "在文件管理器中显示" }, h(Eye, { size: 15, "aria-hidden": true })),
@@ -144,6 +144,7 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   const [selectedInput, setSelectedInput] = React.useState(null);
   const [localError, setLocalError] = React.useState(null);
   const [replacePending, setReplacePending] = React.useState(false);
+  const [importMenuOpen, setImportMenuOpen] = React.useState(false);
   const activeKeyRef = React.useRef(key);
   const generationRef = React.useRef(0);
   const importRequestRef = React.useRef(0);
@@ -158,6 +159,7 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     setDeleteTarget(null);
     setSelectedInput(null);
     setLocalError(null);
+    setImportMenuOpen(false);
     replacePendingRef.current = false;
     setReplacePending(false);
     return () => { generationRef.current += 1; importRequestRef.current += 1; };
@@ -268,19 +270,37 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   const currentAction = action?.key === key ? action : null;
   const actionError = currentAction?.status === "error" ? currentAction.error : null;
   const rootUnavailable = (scope === "project" && !(Number.isSafeInteger(projectId) && projectId > 0)) || catalog.error?.code === "PROJECT_PATH_UNAVAILABLE" || catalog.error?.code === "SKILL_PERMISSION_DENIED";
+  const rootPath = data?.rootPath || "";
+  const selectDirectory = () => {
+    setImportMenuOpen(false);
+    directoryRef.current?.click?.();
+  };
+  const selectZip = () => {
+    setImportMenuOpen(false);
+    zipRef.current?.click?.();
+  };
   return h("section", { className: "cpwb-skills-scope-manager" + (compact ? " cpwb-skills-compact" : ""), "aria-label": scopeLabel(scope) },
-    h("div", { className: "cpwb-skills-path" }, h(FolderOpen, { size: 16, "aria-hidden": true }), h("code", { title: data?.rootPath || "" }, data?.rootPath || "正在读取安装根路径"), data?.rootPath ? h(CopyPath, { path: data.rootPath, targetKey: key, onError: (message) => { if (activeKeyRef.current === key) setLocalError(message); } }) : null),
+    compact ? h("header", { className: "cpwb-skills-compact-head" },
+      h("div", { className: "cpwb-skills-compact-title" }, h(Sparkle, { size: 16, "aria-hidden": true }), h("div", null, h("span", null, "PROJECT TOOL"), h("h3", null, "项目 Skills"))),
+      h("span", { className: "cpwb-skills-compact-count" }, String(items.length).padStart(2, "0"))) : null,
+    h("div", { className: "cpwb-skills-path", "aria-label": rootPath ? `${scope === "project" ? "项目" : "全局"} Skill 安装根路径：${rootPath}` : "正在读取 Skill 安装根路径" }, h(FolderOpen, { size: 16, "aria-hidden": true }), h("code", { title: rootPath }, compact ? ".dsh/skills/" : rootPath || "正在读取安装根路径"), rootPath ? h(CopyPath, { path: rootPath, targetKey: key, onError: (message) => { if (activeKeyRef.current === key) setLocalError(message); } }) : null),
     h("div", { className: "cpwb-skills-toolbar" },
       h("input", { ref: directoryRef, className: "cpwb-visually-hidden", type: "file", webkitdirectory: "", directory: "", multiple: true, onChange: chooseDirectory, tabIndex: -1, disabled: rootUnavailable, "aria-hidden": true }),
       h("input", { ref: zipRef, className: "cpwb-visually-hidden", type: "file", accept: ".zip,application/zip", onChange: chooseZip, tabIndex: -1, disabled: rootUnavailable, "aria-hidden": true }),
-      h("button", { type: "button", className: "cpwb-btn cpwb-btn-primary cpwb-button-content", disabled: rootUnavailable, onClick: () => directoryRef.current?.click?.() }, h(UploadSimple, { size: 15, "aria-hidden": true }), h("span", null, "导入目录")),
-      h("button", { type: "button", className: "cpwb-btn cpwb-button-content", disabled: rootUnavailable, onClick: () => zipRef.current?.click?.() }, h(Package, { size: 15, "aria-hidden": true }), h("span", null, "导入 ZIP"))),
+      compact ? h("div", { className: "cpwb-skills-import-menu" },
+        h("button", { type: "button", className: "cpwb-btn cpwb-btn-primary cpwb-button-content cpwb-skills-import-trigger", disabled: rootUnavailable, onClick: () => setImportMenuOpen((open) => !open), "aria-haspopup": "menu", "aria-expanded": importMenuOpen, "aria-controls": "cpwb-skills-import-menu" }, h(UploadSimple, { size: 15, "aria-hidden": true }), h("span", null, "导入 Skill")),
+        importMenuOpen ? h("div", { id: "cpwb-skills-import-menu", className: "cpwb-skills-import-options", role: "menu", "aria-label": "选择 Skill 导入来源" },
+          h("button", { type: "button", role: "menuitem", onClick: selectDirectory }, h(FolderOpen, { size: 14, "aria-hidden": true }), h("span", null, "从目录导入")),
+          h("button", { type: "button", role: "menuitem", onClick: selectZip }, h(Package, { size: 14, "aria-hidden": true }), h("span", null, "从 ZIP 导入"))) : null)
+        : h(React.Fragment, null,
+          h("button", { type: "button", className: "cpwb-btn cpwb-btn-primary cpwb-button-content", disabled: rootUnavailable, onClick: selectDirectory }, h(UploadSimple, { size: 15, "aria-hidden": true }), h("span", null, "导入目录")),
+          h("button", { type: "button", className: "cpwb-btn cpwb-button-content", disabled: rootUnavailable, onClick: selectZip }, h(Package, { size: 15, "aria-hidden": true }), h("span", null, "导入 ZIP")))),
     catalog.status === "loading" ? h("div", { className: "cpwb-skills-state", role: "status" }, h("span", { className: "cpwb-skills-skeleton" }), "正在读取 Skill 目录") : null,
     catalog.status === "error" ? h("div", { className: "cpwb-skills-state cpwb-skills-error", role: "alert" }, h(WarningCircle, { size: 18, "aria-hidden": true }), errorMessage(catalog.error) || "Skill 目录读取失败", h("button", { type: "button", className: "cpwb-btn", onClick: () => store.actions.loadSkills(target) }, "重试")) : null,
     rootUnavailable ? h("div", { className: "cpwb-skills-state cpwb-skills-error", role: "alert" }, scope === "project" ? "当前项目目录不可用，无法管理项目 Skill。" : "全局 Skill 目录不可用，无法继续管理。") : null,
     catalog.status === "ready" && !rootUnavailable && items.length === 0 && !(data?.diagnostics?.length) ? h("div", { className: "cpwb-skills-empty" }, h(Package, { size: 24, "aria-hidden": true }), h("strong", null, scope === "project" ? "当前项目尚未安装 Skill" : "尚未安装全局 Skill"), h("p", null, "从本地目录或 ZIP 导入一个 Skill。")) : null,
     Array.isArray(data?.diagnostics) && data.diagnostics.length ? h("div", { className: "cpwb-skills-diagnostics", role: "alert" }, h("strong", null, `${data.diagnostics.length} 个条目需要处理`), data.diagnostics.map((diagnostic, index) => h("p", { key: `${diagnostic.path}-${index}` }, diagnostic.message || "条目无效"))) : null,
-    items.length ? h("div", { className: "cpwb-skills-list" }, items.map((item) => h(SkillRow, { key: item.name, item: { ...item, projectId }, scope, targetKey: key, store, onDelete: (next) => setDeleteTarget({ item: next, target, key, generation: generationRef.current }) }))) : null,
+    items.length ? h("div", { className: "cpwb-skills-list" }, items.map((item) => h(SkillRow, { key: item.name, item: { ...item, projectId }, scope, targetKey: key, store, compact, onDelete: (next) => setDeleteTarget({ item: next, target, key, generation: generationRef.current }) }))) : null,
     currentAction && (currentAction.status === "running" || currentAction.status === "done") ? h("div", { className: "cpwb-skills-action-status", role: "status", "aria-live": "polite" }, actionLabel(currentAction)) : null,
     actionError ? h("div", { className: "cpwb-skills-action-error", role: "alert" }, errorMessage(actionError)) : null,
     localError ? h("div", { className: "cpwb-skills-action-error", role: "alert" }, localError) : null,
@@ -299,4 +319,9 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
         if (isCurrent(captured.key, captured.generation)) setDeleteTarget(null);
       }).catch(() => {});
     } }) : null);
+}
+
+/** Project rail entry point. It deliberately exposes no scope or project selector. */
+export function ProjectSkillsPanel({ store, projectId }) {
+  return h(SkillScopeManager, { store, scope: "project", projectId, compact: true });
 }

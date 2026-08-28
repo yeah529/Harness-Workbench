@@ -152,6 +152,7 @@ test("project rail contains only the approved project-owned tools", () => {
     ["schedule", "定时任务"],
     ["knowledge", "关联知识库"],
     ["summary", "每日总结"],
+    ["skills", "Skills"],
   ]);
   assert.equal(PROJECT_TOOL_TABS.some(([, label]) => label === "任务" || label === "计划"), false);
 });

@@ -15,7 +15,7 @@ import { WorkbenchNodeMark } from "../src/client/SidebarBrand.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
 import { createNavigationStore } from "../src/client/navigation.js";
 import { SkillsPage, SkillConflictDialog } from "../src/client/SkillsPage.js";
-import { actionMatches, copySkillPath, shouldRetainSkillInput, skillScopeKey, SkillScopeManager } from "../src/client/SkillsManager.js";
+import { actionMatches, copySkillPath, shouldRetainSkillInput, skillScopeKey, ProjectSkillsPanel, SkillScopeManager } from "../src/client/SkillsManager.js";
 import {
   WorkbenchSessionShell,
   PROJECT_TOOL_TABS,
@@ -461,9 +461,17 @@ test("project session list keeps a visible locked project scope", () => {
 });
 
 test("right rail follows the project, knowledge-base, and independent tool matrix", () => {
-  assert.deepEqual(PROJECT_TOOL_TABS.map((item) => item[1]), ["待办", "定时任务", "关联知识库", "每日总结"]);
+  assert.deepEqual(PROJECT_TOOL_TABS.map(([id, label]) => [id, label]), [
+    ["todos", "待办"],
+    ["schedule", "定时任务"],
+    ["knowledge", "关联知识库"],
+    ["summary", "每日总结"],
+    ["skills", "Skills"],
+  ]);
   assert.deepEqual(KNOWLEDGE_TOOL_TABS.map((item) => item[1]), ["文档", "索引", "关联项目", "全局定时"]);
   assert.deepEqual(INDEPENDENT_TOOL_TABS.map((item) => item[1]), ["上下文", "文件", "Subagent", "全局定时"]);
+  assert.equal(KNOWLEDGE_TOOL_TABS.some(([id]) => id === "skills"), false);
+  assert.equal(INDEPENDENT_TOOL_TABS.some(([id]) => id === "skills"), false);
 
   for (const [kind, id, labels] of [
     ["project", 7, PROJECT_TOOL_TABS],
@@ -481,6 +489,42 @@ test("right rail follows the project, knowledge-base, and independent tool matri
     const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, { sessionId, open: true, store, layoutMode: "desktop" }));
     for (const [, label] of labels) assert.match(html, new RegExp(label));
   }
+});
+
+test("project Skills panel binds to the current project without global controls", () => {
+  const state = {
+    skillCatalogs: {
+      "project:7": {
+        status: "ready",
+        data: {
+          scope: { kind: "project", projectId: 7 },
+          rootPath: "/project/.dsh/skills",
+          items: [{
+            name: "release-notes",
+            description: "Draft release notes from the current project context.",
+            state: "enabled",
+            health: "valid",
+            path: "/project/.dsh/skills/release-notes",
+            fileCount: 2,
+            shadowsGlobal: true,
+          }],
+          diagnostics: [],
+        },
+        error: null,
+      },
+    },
+  };
+  const store = { subscribe: () => () => {}, getSnapshot: () => state, actions: { loadSkills: async () => {} } };
+  const html = renderToStaticMarkup(React.createElement(ProjectSkillsPanel, { store, projectId: 7 }));
+  assert.match(html, /项目 Skills/);
+  assert.match(html, /\.dsh\/skills\//);
+  assert.match(html, /title="\/project\/\.dsh\/skills"/);
+  assert.match(html, /title="\/project\/\.dsh\/skills\/release-notes"/);
+  assert.match(html, /2 个文件 · \.dsh\/skills\/release-notes/);
+  assert.match(html, /release-notes/);
+  assert.match(html, /覆盖全局版本/);
+  assert.match(html, /导入 Skill/);
+  assert.doesNotMatch(html, /选择项目/);
 });
 
 test("container deletion defaults to preserving sessions and discloses every cleanup boundary", () => {

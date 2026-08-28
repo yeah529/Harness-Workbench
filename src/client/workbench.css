@@ -474,6 +474,7 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
 .cpwb-project-tool-tabs button:hover,
 .cpwb-project-tool-tabs button.cpwb-active { color: var(--cpwb-amber); background: linear-gradient(to top, rgba(255,181,27,.07), transparent); }
 .cpwb-project-tool-tabs button.cpwb-active::after { transform: scaleX(1); box-shadow: 0 0 10px rgba(255,181,27,.35); }
+.cpwb-project-tool-tabs[data-tool-count="5"] { grid-template-columns: repeat(5, minmax(0,1fr)); }
 .cpwb-project-tool-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 15px; scrollbar-width: thin; scrollbar-color: rgba(77,232,244,.28) transparent; }
 .cpwb-context-list { display: grid; align-content: start; gap: 9px; }
 .cpwb-context-card { display: grid; gap: 6px; padding: 11px 12px; border: 1px solid rgba(77,232,244,.14); border-left: 2px solid rgba(77,232,244,.45); background: rgba(255,255,255,.018); clip-path: var(--cpwb-cut-sm); }
@@ -630,6 +631,42 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
 .cpwb-skills-delete-facts dt { color: var(--cpwb-muted); font: 650 9px/1.4 var(--cpwb-code); }
 .cpwb-skills-delete-facts dd { margin: 0; overflow-wrap: anywhere; color: var(--cpwb-text-secondary); font-size: 10px; }
 .cpwb-skills-dialog .cpwb-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+
+/* The project rail is a compact projection of the same manager. Keep its
+   actions and state model shared with the full page, while making the dense
+   320px surface scannable and keeping the installed root out of the visible
+   label (it remains available through the title and accessible path label). */
+.cpwb-project-rail .cpwb-skills-compact { margin-top: 0; }
+.cpwb-skills-compact-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 13px; padding-bottom: 11px; border-bottom: 1px solid rgba(77,232,244,.16); }
+.cpwb-skills-compact-title { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--cpwb-cyan); }
+.cpwb-skills-compact-title svg { flex: 0 0 auto; }
+.cpwb-skills-compact-title span { display: block; color: var(--cpwb-cyan-dim); font: 650 7px/1 var(--cpwb-code); letter-spacing: .16em; }
+.cpwb-skills-compact-title h3 { margin: 5px 0 0; color: var(--cpwb-text); font-size: 15px; letter-spacing: -.015em; }
+.cpwb-skills-compact-count { color: var(--cpwb-amber); font: 700 18px/1 var(--cpwb-code); }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skills-path { min-height: 38px; padding: 0 9px; gap: 7px; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skills-path code { font-size: 9px; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skills-copy { min-height: 24px; padding: 0 6px; font-size: 8px; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skills-copy span { display: none; }
+.cpwb-skills-compact .cpwb-skills-toolbar { position: relative; justify-content: flex-start; margin: 11px 0 9px; }
+.cpwb-skills-import-menu { position: relative; }
+.cpwb-skills-import-trigger { min-height: 31px; padding-inline: 9px; font-size: 9px; }
+.cpwb-skills-import-options { position: absolute; z-index: 5; top: calc(100% + 5px); left: 0; display: grid; min-width: 142px; padding: 4px; border: 1px solid var(--cpwb-border-strong); background: var(--cpwb-surface-raised); box-shadow: var(--cpwb-shadow-1); }
+.cpwb-skills-import-options button { display: flex; align-items: center; gap: 7px; min-height: 31px; padding: 0 8px; color: var(--cpwb-text-secondary); border: 0; background: transparent; cursor: pointer; text-align: left; font-size: 10px; }
+.cpwb-skills-import-options button:hover, .cpwb-skills-import-options button:focus-visible { color: #071014; outline: none; background: var(--cpwb-cyan); }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skills-list { border-top-color: rgba(139,159,181,.2); }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skill-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 7px; min-height: 0; padding: 11px 0; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skill-identity { gap: 5px; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skill-identity strong { font-size: 11px; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skill-summary { grid-column: 1 / -1; grid-row: 2; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skill-summary p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; margin: 5px 0 4px; overflow: hidden; font-size: 10px; line-height: 1.4; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skill-summary small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 8px; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skill-actions { grid-column: 2; grid-row: 1; gap: 4px; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-icon-button { width: 25px; height: 25px; flex-basis: 25px; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skills-state,
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skills-empty,
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skills-diagnostics { margin-top: 12px; padding: 15px 12px; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skills-empty strong { font-size: 11px; }
+.cpwb-project-rail .cpwb-skills-compact .cpwb-skills-empty p { font-size: 9px; }
 @media (prefers-reduced-motion: reduce) {
   .cpwb-skills-skeleton { animation: none !important; }
 }

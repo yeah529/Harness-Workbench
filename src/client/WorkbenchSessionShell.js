@@ -1,5 +1,5 @@
 import React from "react";
-import { ArrowClockwise, Books, CalendarCheck, Check, ClockCountdown, Copy, File, FolderOpen, House, MagnifyingGlass, Note, Paperclip, Plus, Robot, TreeStructure, WarningCircle } from "@phosphor-icons/react";
+import { ArrowClockwise, Books, CalendarCheck, Check, ClockCountdown, Copy, File, FolderOpen, House, MagnifyingGlass, Note, Paperclip, Plus, Robot, Sparkle, TreeStructure, WarningCircle } from "@phosphor-icons/react";
 import { CyberSelect } from "./CyberSelect.js";
 import { getWorkbenchSession } from "./workbenchSessions.js";
 import { useHomeOpen } from "./ProjectHome.js";
@@ -19,9 +19,11 @@ import {
 import { DrawerDialog, useWorkbenchLayoutMode } from "./responsive.js";
 import { SubagentDrawer } from "./SubagentDrawer.js";
 import { DEFAULT_TIME_ZONE, localDateTimeParts } from "./timezone.js";
+import { ProjectSkillsPanel } from "./SkillsManager.js";
 
 export { parseNativeModelSelectionLabel } from "./ModelIndicator.js";
 export { KnowledgeSourcesTail } from "./KnowledgeSourcesTail.js";
+export { ProjectSkillsPanel } from "./SkillsManager.js";
 
 export function compactSessionId(sessionId) {
   const value = String(sessionId || "");
@@ -67,6 +69,7 @@ export const PROJECT_TOOL_TABS = Object.freeze([
   ["schedule", "定时任务", ClockCountdown],
   ["knowledge", "关联知识库", Books],
   ["summary", "每日总结", Note],
+  ["skills", "Skills", Sparkle],
 ]);
 
 export const KNOWLEDGE_TOOL_TABS = Object.freeze([
@@ -361,6 +364,7 @@ export function WorkbenchSessionShell(props) {
     else if (activeTool === "schedule") body = React.createElement(Automation, { store: props.store, projectId, view: "schedule" });
     else if (activeTool === "knowledge") body = React.createElement(KnowledgeBase, { store: props.store, projectId, view: "linked" });
     else if (activeTool === "summary") body = React.createElement(Automation, { store: props.store, projectId, view: "summary" });
+    else if (activeTool === "skills") body = React.createElement(ProjectSkillsPanel, { store: props.store, projectId });
   } else if (knowledgeBaseId != null) {
     if (activeTool === "documents") body = React.createElement(KnowledgeBase, { store: props.store, knowledgeBaseId, view: "documents" });
     else if (activeTool === "index") body = React.createElement(KnowledgeIndexPanel, { knowledgeBaseId, state, store: props.store });
@@ -384,15 +388,18 @@ export function WorkbenchSessionShell(props) {
         React.createElement("span", null, railKind),
         React.createElement("h2", null, railName),
         React.createElement("small", null, railMeta)),
-      React.createElement("nav", { className: "cpwb-project-tool-tabs", "aria-label": "上下文工具" }, toolTabs.map(([id, label, IconComponent]) => React.createElement("button", {
+      React.createElement("nav", { className: "cpwb-project-tool-tabs", role: "tablist", "aria-label": "上下文工具", "data-tool-count": String(toolTabs.length) }, toolTabs.map(([id, label, IconComponent]) => React.createElement("button", {
         type: "button",
+        role: "tab",
         key: id,
         className: activeTool === id ? "cpwb-active" : "",
         onClick: () => setActiveTool(id),
+        "aria-selected": activeTool === id,
+        "aria-controls": "cpwb-project-tool-panel",
         "aria-current": activeTool === id ? "page" : undefined,
         title: label,
       }, React.createElement(IconComponent, { size: 18, weight: "regular", "aria-hidden": true }), React.createElement("span", null, label)))),
-      React.createElement("div", { className: "cpwb-project-tool-body" }, body));
+      React.createElement("div", { id: "cpwb-project-tool-panel", className: "cpwb-project-tool-body", role: "tabpanel", "aria-label": activeTool }, body));
   };
 
   const transitioning = opening || Boolean(openError);
