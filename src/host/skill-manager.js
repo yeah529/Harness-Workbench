@@ -24,7 +24,7 @@ import {
 } from "./skill-package.js";
 
 const PERMISSION_CODES = new Set(["EACCES", "EPERM", "EROFS"]);
-const INTERNAL_NAMES = new Set([".staging", ".transactions"]);
+const INTERNAL_NAMES = new Set([".disabled", ".staging", ".transactions"]);
 
 const defaultFileOps = Object.freeze({
   mkdir: fsMkdir,

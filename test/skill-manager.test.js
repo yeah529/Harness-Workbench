@@ -98,6 +98,20 @@ test("list returns an empty catalog for a missing root without creating it", asy
   await assert.rejects(() => lstat(join(dshHome, "skills")), { code: "ENOENT" });
 });
 
+test("list ignores the empty disabled storage root", async (t) => {
+  const root = await createTempDir("cpwb-skill-disabled-root-");
+  t.after(() => removeTempDir(root));
+  const skillsRoot = join(root, "dsh", "skills");
+  await makeBundle(skillsRoot, "active-skill", "active-skill");
+  await mkdir(join(skillsRoot, ".disabled"), { recursive: true });
+
+  const catalog = await createSkillManager({ dshHome: join(root, "dsh"), repos: projectRepos(root) })
+    .list({ scope: "global" });
+
+  assert.deepEqual(catalog.items.map(({ name }) => name), ["active-skill"]);
+  assert.deepEqual(catalog.diagnostics, []);
+});
+
 test("project scope requires a known project with an existing absolute directory", async (t) => {
   const root = await createTempDir("cpwb-skill-scope-");
   t.after(() => removeTempDir(root));
