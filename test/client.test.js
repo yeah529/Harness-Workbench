@@ -151,6 +151,26 @@ test("packSkillDirectory maps file read failures without leaking causes", async 
   }
 });
 
+test("packSkillDirectory rejects non-ArrayBuffer file bytes", async () => {
+  const invalidBuffers = [undefined, null, "text", {}, new DataView(new ArrayBuffer(1))];
+  for (const buffer of invalidBuffers) {
+    const file = {
+      size: 0,
+      webkitRelativePath: "skill/SKILL.md",
+      arrayBuffer() { return buffer; },
+    };
+    await assert.rejects(
+      () => packSkillDirectory([file]),
+      (error) => {
+        assert.equal(error.code, "SKILL_PACKAGE_INVALID");
+        assert.deepEqual(error.details, { path: "skill/SKILL.md" });
+        return true;
+      },
+      Object.prototype.toString.call(buffer),
+    );
+  }
+});
+
 test("packSkillDirectory reads files serially and stops after actual file limits", async () => {
   let active = 0;
   let maxActive = 0;

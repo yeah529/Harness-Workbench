@@ -83,6 +83,9 @@ function readFileBytes(file, path) {
     .then(() => file.arrayBuffer())
     .then((buffer) => {
       try {
+        const byteLengthGetter = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
+        if (typeof byteLengthGetter !== "function") throw new TypeError("ArrayBuffer is unavailable");
+        byteLengthGetter.call(buffer);
         return new Uint8Array(buffer);
       } catch {
         throw packageError("Skill file could not be read", { path });
