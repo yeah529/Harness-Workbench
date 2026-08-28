@@ -633,8 +633,11 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
 @media (prefers-reduced-motion: reduce) {
   .cpwb-skills-skeleton { animation: none !important; }
 }
+@media (max-width: 899px) {
+  .cpwb-skills-page { padding: 62px 14px 24px; }
+}
 @media screen and (max-width: 720px) {
-  .cpwb-skills-page { padding: 70px 14px 24px; }
+  .cpwb-skills-page { padding: 62px 14px 24px; }
   .cpwb-skills-header { align-items: flex-start; padding: 15px; }
   .cpwb-skills-count { font-size: 20px; }
   .cpwb-skills-title h1 { font-size: 25px; }

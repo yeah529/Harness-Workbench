@@ -22,8 +22,13 @@ export function actionMatches(action, type, name, targetKey) {
   return action?.key === targetKey && action?.type === type && action?.name === name && action.status === "running";
 }
 
-export function shouldRetainSkillInput(error, currentKey, capturedKey) {
-  return error?.code === "SKILL_CONFLICT" && currentKey === capturedKey;
+function usableConflictDetails(details) {
+  return !!details?.existing && typeof details.existing.name === "string" && details.existing.name.length > 0
+    && !!details?.incoming && typeof details.incoming.name === "string" && details.incoming.name.length > 0;
+}
+
+export function shouldRetainSkillInput(error, currentKey, capturedKey, selectedPayload) {
+  return error?.code === "SKILL_CONFLICT" && currentKey === capturedKey && !!selectedPayload && usableConflictDetails(error.details);
 }
 
 export async function copySkillPath(writeText, path) {
@@ -160,11 +165,11 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   const target = Object.freeze({ scope, ...(scope === "project" ? { projectId } : {}) });
   const isCurrent = (capturedKey, capturedGeneration) => activeKeyRef.current === capturedKey && generationRef.current === capturedGeneration;
   const importArchive = async (archive, sourceName, input) => {
-    if (!archive) return;
+    if (!archive || rootUnavailable) return;
     const capturedKey = key;
     const capturedGeneration = generationRef.current;
     const capturedTarget = target;
-    if (!isCurrent(capturedKey, capturedGeneration)) return;
+    if (!isCurrent(capturedKey, capturedGeneration) || rootUnavailable) return;
     setLocalError(null);
     setConflict(null);
     setSelectedInput(null);
@@ -182,11 +187,13 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
       }
     } catch (error) {
       if (!isCurrent(capturedKey, capturedGeneration)) return;
-      if (shouldRetainSkillInput(error, activeKeyRef.current, capturedKey)) {
+      if (shouldRetainSkillInput(error, activeKeyRef.current, capturedKey, { archive, sourceName })) {
         setConflict({ existing: error.details?.existing, incoming: error.details?.incoming || { name: sourceName }, key: capturedKey, generation: capturedGeneration });
       } else {
         setSelectedInput(null);
-        setLocalError(errorMessage(error) || "Skill 导入失败，请检查文件后重试。");
+        setLocalError(error?.code === "SKILL_CONFLICT"
+          ? "Skill 冲突信息不完整，无法安全替换。请重新导入后重试。"
+          : errorMessage(error) || "Skill 导入失败，请检查文件后重试。");
       }
     } finally {
       input.value = "";
@@ -196,7 +203,7 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     const input = event.currentTarget;
     const capturedKey = key;
     const capturedGeneration = generationRef.current;
-    if (!isCurrent(capturedKey, capturedGeneration)) return;
+    if (!isCurrent(capturedKey, capturedGeneration) || rootUnavailable) return;
     setConflict(null);
     setSelectedInput(null);
     try {
@@ -214,7 +221,7 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     setConflict(null);
     setSelectedInput(null);
     const file = input.files?.[0];
-    if (file) void importArchive(file, file.name, input);
+    if (file && !rootUnavailable && isCurrent(key, generationRef.current)) void importArchive(file, file.name, input);
   };
   const replace = () => {
     const selected = selectedInput;
@@ -237,10 +244,10 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   return h("section", { className: "cpwb-skills-scope-manager" + (compact ? " cpwb-skills-compact" : ""), "aria-label": scopeLabel(scope) },
     h("div", { className: "cpwb-skills-path" }, h(FolderOpen, { size: 16, "aria-hidden": true }), h("code", { title: data?.rootPath || "" }, data?.rootPath || "正在读取安装根路径"), data?.rootPath ? h(CopyPath, { path: data.rootPath, targetKey: key, onError: (message) => { if (activeKeyRef.current === key) setLocalError(message); } }) : null),
     h("div", { className: "cpwb-skills-toolbar" },
-      h("input", { ref: directoryRef, className: "cpwb-visually-hidden", type: "file", webkitdirectory: "", directory: "", multiple: true, onChange: chooseDirectory, tabIndex: -1, "aria-hidden": true }),
-      h("input", { ref: zipRef, className: "cpwb-visually-hidden", type: "file", accept: ".zip,application/zip", onChange: chooseZip, tabIndex: -1, "aria-hidden": true }),
-      h("button", { type: "button", className: "cpwb-btn cpwb-btn-primary cpwb-button-content", onClick: () => directoryRef.current?.click?.() }, h(UploadSimple, { size: 15, "aria-hidden": true }), h("span", null, "导入目录")),
-      h("button", { type: "button", className: "cpwb-btn cpwb-button-content", onClick: () => zipRef.current?.click?.() }, h(Package, { size: 15, "aria-hidden": true }), h("span", null, "导入 ZIP"))),
+      h("input", { ref: directoryRef, className: "cpwb-visually-hidden", type: "file", webkitdirectory: "", directory: "", multiple: true, onChange: chooseDirectory, tabIndex: -1, disabled: rootUnavailable, "aria-hidden": true }),
+      h("input", { ref: zipRef, className: "cpwb-visually-hidden", type: "file", accept: ".zip,application/zip", onChange: chooseZip, tabIndex: -1, disabled: rootUnavailable, "aria-hidden": true }),
+      h("button", { type: "button", className: "cpwb-btn cpwb-btn-primary cpwb-button-content", disabled: rootUnavailable, onClick: () => directoryRef.current?.click?.() }, h(UploadSimple, { size: 15, "aria-hidden": true }), h("span", null, "导入目录")),
+      h("button", { type: "button", className: "cpwb-btn cpwb-button-content", disabled: rootUnavailable, onClick: () => zipRef.current?.click?.() }, h(Package, { size: 15, "aria-hidden": true }), h("span", null, "导入 ZIP"))),
     catalog.status === "loading" ? h("div", { className: "cpwb-skills-state", role: "status" }, h("span", { className: "cpwb-skills-skeleton" }), "正在读取 Skill 目录") : null,
     catalog.status === "error" ? h("div", { className: "cpwb-skills-state cpwb-skills-error", role: "alert" }, h(WarningCircle, { size: 18, "aria-hidden": true }), errorMessage(catalog.error) || "Skill 目录读取失败", h("button", { type: "button", className: "cpwb-btn", onClick: () => store.actions.loadSkills(target) }, "重试")) : null,
     rootUnavailable ? h("div", { className: "cpwb-skills-state cpwb-skills-error", role: "alert" }, scope === "project" ? "当前项目目录不可用，无法管理项目 Skill。" : "全局 Skill 目录不可用，无法继续管理。") : null,

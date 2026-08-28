@@ -15,7 +15,7 @@ import { WorkbenchNodeMark } from "../src/client/SidebarBrand.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
 import { createNavigationStore } from "../src/client/navigation.js";
 import { SkillsPage, SkillConflictDialog } from "../src/client/SkillsPage.js";
-import { actionMatches, copySkillPath, shouldRetainSkillInput, skillScopeKey } from "../src/client/SkillsManager.js";
+import { actionMatches, copySkillPath, shouldRetainSkillInput, skillScopeKey, SkillScopeManager } from "../src/client/SkillsManager.js";
 import {
   WorkbenchSessionShell,
   PROJECT_TOOL_TABS,
@@ -319,9 +319,13 @@ test("skill action matching is bound to the canonical scope key", () => {
 });
 
 test("only same-scope conflicts retain an import payload", () => {
-  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT" }, "global", "global"), true);
-  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT" }, "project:7", "global"), false);
-  assert.equal(shouldRetainSkillInput({ code: "SKILL_PACKAGE_INVALID" }, "global", "global"), false);
+  const details = { existing: { name: "same-skill" }, incoming: { name: "same-skill" } };
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT", details }, "global", "global", { archive: {} }), true);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT", details }, "project:7", "global", { archive: {} }), false);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_PACKAGE_INVALID", details }, "global", "global", { archive: {} }), false);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT", details: { incoming: { name: "same-skill" } } }, "global", "global", { archive: {} }), false);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT", details: { existing: { name: "same-skill" } } }, "global", "global", { archive: {} }), false);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT", details }, "global", "global", null), false);
 });
 
 test("copySkillPath reports missing and rejected clipboard writers instead of false success", async () => {
@@ -330,6 +334,20 @@ test("copySkillPath reports missing and rejected clipboard writers instead of fa
   let copied = "";
   assert.equal(await copySkillPath(async (path) => { copied = path; }, "/dsh/skills"), true);
   assert.equal(copied, "/dsh/skills");
+});
+
+test("skill import controls fail closed only when the selected project is unavailable", () => {
+  const unavailableState = { skillCatalogs: {}, skillAction: null };
+  const unavailableStore = { subscribe: () => () => {}, getSnapshot: () => unavailableState, actions: {} };
+  const unavailable = renderToStaticMarkup(React.createElement(SkillScopeManager, { store: unavailableStore, scope: "project", projectId: null }));
+  assert.match(unavailable, /disabled=""/);
+  assert.match(unavailable, /当前项目目录不可用/);
+
+  const validState = { skillCatalogs: {}, skillAction: null };
+  const validStore = { subscribe: () => () => {}, getSnapshot: () => validState, actions: {} };
+  const valid = renderToStaticMarkup(React.createElement(SkillScopeManager, { store: validStore, scope: "project", projectId: 7 }));
+  assert.doesNotMatch(valid, /当前项目目录不可用/);
+  assert.doesNotMatch(valid, /disabled=""/);
 });
 
 test("only the footer wordmark renders the static cyberpunk fracture layer", () => {
