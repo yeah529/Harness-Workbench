@@ -115,12 +115,23 @@ export async function canonicalPathIdentity(ops, path) {
   const suffix = [];
   let current = absolutePath;
   while (true) {
-    const stat = await optionalInspect(ops, current, "lstat");
+    let stat;
+    try {
+      stat = await optionalInspect(ops, current, "lstat");
+    } catch (error) {
+      if (error?.code === "ENOTDIR") {
+        throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a non-directory path");
+      }
+      throw error;
+    }
     if (stat) {
       let canonical;
       try {
         canonical = await ops.realpath(current);
       } catch (error) {
+        if (error?.code === "ENOTDIR") {
+          throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a non-directory path");
+        }
         if (error?.code === "ENOENT") {
           const parent = dirname(current);
           suffix.unshift(basename(current));
@@ -162,7 +173,7 @@ async function assertRootPathSafe(
       throw error;
     }
   };
-  const anchorStat = requireDirectories ? await inspectPath(current) : await optionalInspect(ops, current, "lstat");
+  const anchorStat = await inspectPath(current);
   if (anchorStat?.isSymbolicLink()) {
     throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a symbolic link");
   }
@@ -172,7 +183,7 @@ async function assertRootPathSafe(
   const components = descendant.split(/[\\/]/).filter(Boolean);
   for (const component of components) {
     current = join(current, component);
-    const stat = requireDirectories ? await inspectPath(current) : await optionalInspect(ops, current, "lstat");
+    const stat = await inspectPath(current);
     if (stat?.isSymbolicLink()) {
       throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a symbolic link");
     }
@@ -187,7 +198,7 @@ async function assertRootPathSafe(
     join(rootPath, ".staging"),
     join(rootPath, ".transactions"),
   ]) {
-    const stat = requireDirectories ? await inspectPath(current) : await optionalInspect(ops, current, "lstat");
+    const stat = await inspectPath(current);
     if (stat?.isSymbolicLink()) {
       throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a symbolic link");
     }

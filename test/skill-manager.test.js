@@ -59,6 +59,25 @@ test("canonical path identity retains a component when an existing ancestor disa
   assert.equal(identity, join(await fsRealpath(root), "missing", "skills"));
 });
 
+test("canonical path identity maps a non-directory ancestor to a stable permission error", async () => {
+  const target = join("/", `.cpwb-skill-identity-file-${randomUUID()}`, "skills");
+  const error = new Error(`not a directory: ${target}`);
+  error.code = "ENOTDIR";
+  await assert.rejects(
+    () => canonicalPathIdentity({ lstat: async () => { throw error; }, realpath: fsRealpath }, target),
+    (candidate) => candidate.code === SKILL_ERROR_CODES.PERMISSION_DENIED
+      && !JSON.stringify(candidate).includes(target),
+  );
+  await assert.rejects(
+    () => canonicalPathIdentity({
+      lstat: async () => ({ isDirectory: () => true }),
+      realpath: async () => { throw error; },
+    }, target),
+    (candidate) => candidate.code === SKILL_ERROR_CODES.PERMISSION_DENIED
+      && !JSON.stringify(candidate).includes(target),
+  );
+});
+
 test("list scans enabled, disabled, invalid, and project shadowing without a database", async (t) => {
   const root = await createTempDir("cpwb-skill-manager-");
   t.after(() => removeTempDir(root));
