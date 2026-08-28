@@ -172,7 +172,7 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   const isCurrent = (capturedKey, capturedGeneration, capturedRequest = null) => activeKeyRef.current === capturedKey
     && generationRef.current === capturedGeneration
     && (capturedRequest === null || importRequestRef.current === capturedRequest);
-  const importArchive = async (archive, sourceName, input, capturedRequest) => {
+  const importArchive = async (archive, sourceName, capturedRequest) => {
     if (!archive || rootUnavailable) return;
     const capturedKey = key;
     const capturedGeneration = generationRef.current;
@@ -183,10 +183,9 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     setSelectedInput(null);
     if (archive.size > SKILL_IMPORT_LIMITS.archiveBytes) {
       setLocalError("ZIP 文件超过 50 MiB，未开始导入。");
-      input.value = "";
       return;
     }
-    setSelectedInput({ archive, sourceName, input, target: capturedTarget, key: capturedKey, generation: capturedGeneration, request: capturedRequest });
+    setSelectedInput({ archive, sourceName, target: capturedTarget, key: capturedKey, generation: capturedGeneration, request: capturedRequest });
     try {
       await store.actions.importSkill({ ...capturedTarget, archive, sourceName });
       if (isCurrent(capturedKey, capturedGeneration, capturedRequest)) {
@@ -203,8 +202,6 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
           ? "Skill 冲突信息不完整，无法安全替换。请重新导入后重试。"
           : errorMessage(error) || "Skill 导入失败，请检查文件后重试。");
       }
-    } finally {
-      if (isCurrent(capturedKey, capturedGeneration, capturedRequest)) input.value = "";
     }
   };
   const chooseDirectory = async (event) => {
@@ -212,30 +209,32 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     const capturedKey = key;
     const capturedGeneration = generationRef.current;
     const capturedRequest = ++importRequestRef.current;
+    const files = Array.from(input.files || []);
+    input.value = "";
     replacePendingRef.current = false;
     setReplacePending(false);
     if (!isCurrent(capturedKey, capturedGeneration, capturedRequest) || rootUnavailable) return;
     setConflict(null);
     setSelectedInput(null);
     try {
-      const packed = await packSkillDirectory(input.files);
-      if (isCurrent(capturedKey, capturedGeneration, capturedRequest)) await importArchive(packed.archive, packed.sourceName, input, capturedRequest);
+      const packed = await packSkillDirectory(files);
+      if (isCurrent(capturedKey, capturedGeneration, capturedRequest)) await importArchive(packed.archive, packed.sourceName, capturedRequest);
     } catch (error) {
       if (!isCurrent(capturedKey, capturedGeneration, capturedRequest)) return;
       setSelectedInput(null);
-      input.value = "";
       setLocalError(errorMessage(error) || "目录打包失败，请检查 Skill 文件。");
     }
   };
   const chooseZip = (event) => {
     const input = event.currentTarget;
     const capturedRequest = ++importRequestRef.current;
+    const file = input.files?.[0];
+    input.value = "";
     replacePendingRef.current = false;
     setReplacePending(false);
     setConflict(null);
     setSelectedInput(null);
-    const file = input.files?.[0];
-    if (file && !rootUnavailable && isCurrent(key, generationRef.current, capturedRequest)) void importArchive(file, file.name, input, capturedRequest);
+    if (file && !rootUnavailable && isCurrent(key, generationRef.current, capturedRequest)) void importArchive(file, file.name, capturedRequest);
   };
   const replace = () => {
     const selected = selectedInput;

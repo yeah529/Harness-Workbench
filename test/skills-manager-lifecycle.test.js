@@ -191,6 +191,50 @@ test("mounted manager retains a failed replacement decision for retry", async ()
   await act(async () => { root.unmount(); });
 });
 
+test("mounted manager resets directory input before stale packing can finish", async () => {
+  const document = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { act } = React;
+  const firstRead = deferred();
+  const secondRead = deferred();
+  const bImport = deferred();
+  const calls = [];
+  const store = storeFor({ global: { status: "ready", data: { rootPath: "/dsh/skills", items: [], diagnostics: [] } } }, (input) => {
+    calls.push(input);
+    return input.sourceName === "b.zip" ? bImport.promise : Promise.resolve();
+  });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () => { root.render(React.createElement(SkillScopeManager, { store, scope: "global" })); });
+  const directoryInput = findNodes(container, (node) => node.tagName === "INPUT" && node.webkitdirectory !== undefined)?.[0];
+  const zipInput = findNodes(container, (node) => node.tagName === "INPUT" && node.accept)?.[0];
+  assert.ok(directoryInput);
+  assert.ok(zipInput);
+  const directoryFile = (read) => ({ name: "SKILL.md", size: 1, webkitRelativePath: "same-skill/SKILL.md", arrayBuffer: () => read.promise });
+
+  directoryInput.value = "A";
+  directoryInput.files = [directoryFile(firstRead)];
+  await act(async () => { void invokeProp(directoryInput, "onChange", { currentTarget: directoryInput }); });
+  assert.equal(directoryInput.value, "");
+
+  zipInput.value = "B";
+  zipInput.files = [{ name: "b.zip", size: 4 }];
+  await act(async () => { void invokeProp(zipInput, "onChange", { currentTarget: zipInput }); });
+  assert.equal(zipInput.value, "");
+
+  directoryInput.value = "A-again";
+  directoryInput.files = [directoryFile(secondRead)];
+  await act(async () => { void invokeProp(directoryInput, "onChange", { currentTarget: directoryInput }); });
+  assert.equal(directoryInput.value, "");
+  await act(async () => { firstRead.resolve(new ArrayBuffer(1)); });
+  assert.equal(calls.filter((call) => call.sourceName === "same-skill").length, 0);
+  assert.equal(directoryInput.value, "");
+  await act(async () => { secondRead.resolve(new ArrayBuffer(1)); });
+  assert.equal(calls.filter((call) => call.sourceName === "same-skill").length, 1);
+  await act(async () => { bImport.resolve(); });
+  await act(async () => { root.unmount(); });
+});
+
 test("mounted manager closes a delete decision before a project switch", async () => {
   const document = installDom();
   const { createRoot } = await import("react-dom/client");
