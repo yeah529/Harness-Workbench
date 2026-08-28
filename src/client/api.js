@@ -128,6 +128,51 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       },
     },
 
+    skills: {
+      list({ scope, projectId, signal } = {}) {
+        return request({ path: "/skills", query: { scope, projectId }, signal });
+      },
+      importBundle({ archive, scope, projectId, sourceName, replace = false }, { signal } = {}) {
+        return request({
+          method: "POST",
+          path: "/skills/import",
+          rawBody: archive,
+          headers: {
+            "content-type": "application/zip",
+            "x-cpwb-skill-scope": scope,
+            "x-cpwb-filename": encodeURIComponent(sourceName),
+            ...(projectId === undefined ? {} : { "x-cpwb-project-id": String(projectId) }),
+            "x-cpwb-replace": String(replace),
+          },
+          signal,
+        });
+      },
+      setEnabled({ name, scope, projectId, enabled }, { signal } = {}) {
+        return request({
+          method: "PATCH",
+          path: "/skills/" + encodeURIComponent(name),
+          body: { scope, projectId, operation: enabled ? "enable" : "disable" },
+          signal,
+        });
+      },
+      remove({ name, scope, projectId }, { signal } = {}) {
+        return request({
+          method: "DELETE",
+          path: "/skills/" + encodeURIComponent(name),
+          query: { scope, projectId },
+          signal,
+        });
+      },
+      reveal({ name, scope, projectId }, { signal } = {}) {
+        return request({
+          method: "POST",
+          path: "/skills/" + encodeURIComponent(name) + "/reveal",
+          body: { scope, projectId },
+          signal,
+        });
+      },
+    },
+
     documents: {
       contentUrl(id, { download = false } = {}) {
         if (!Number.isSafeInteger(id) || id < 1) throw new TypeError("document id must be a positive integer");

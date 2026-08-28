@@ -13,6 +13,7 @@ import { registerModelIndicator } from "./ModelIndicator.js";
 import { registerImageAttachmentButton } from "./ImageAttachmentButton.js";
 import { registerKnowledgeSources } from "./sessionAdapter.js";
 import { KnowledgeSourcesTail } from "./KnowledgeSourcesTail.js";
+export { packSkillDirectory, SkillImportError, SKILL_IMPORT_ERROR_CODES, SKILL_IMPORT_LIMITS } from "./skill-import.js";
 
 function injectCss(tagId, css) {
   if (typeof document === "undefined") return;
