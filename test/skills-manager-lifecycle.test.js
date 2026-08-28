@@ -123,6 +123,35 @@ test("mounted manager ignores a late conflict after switching project scope", as
   await act(async () => { root.unmount(); });
 });
 
+test("mounted manager ignores an older same-scope conflict after a newer import succeeds", async () => {
+  const document = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { act } = React;
+  const first = deferred();
+  const second = deferred();
+  const calls = [];
+  const store = storeFor({ global: { status: "ready", data: { rootPath: "/dsh/skills", items: [], diagnostics: [] } } }, (input) => {
+    calls.push(input);
+    return input.sourceName === "a.zip" ? first.promise : second.promise;
+  });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () => { root.render(React.createElement(SkillScopeManager, { store, scope: "global" })); });
+  const input = findNodes(container, (node) => node.tagName === "INPUT" && node.accept)?.[0];
+  assert.ok(input);
+  input.files = [{ name: "a.zip", size: 4 }];
+  await act(async () => { void invokeProp(input, "onChange", { currentTarget: input }); });
+  input.files = [{ name: "b.zip", size: 4 }];
+  await act(async () => { void invokeProp(input, "onChange", { currentTarget: input }); });
+  assert.equal(calls.length, 2);
+  await act(async () => { second.resolve(); });
+  await act(async () => { first.reject(Object.assign(new Error("conflict"), { code: "SKILL_CONFLICT", details: { existing: { name: "same-skill" }, incoming: { name: "same-skill" } } })); });
+  assert.doesNotMatch(container.textContent, /同名 Skill 已存在/);
+  assert.equal(findNodes(container, (node) => node.tagName === "BUTTON" && node.textContent === "确认替换").length, 0);
+  assert.equal(calls.length, 2);
+  await act(async () => { root.unmount(); });
+});
+
 test("mounted manager closes a delete decision before a project switch", async () => {
   const document = installDom();
   const { createRoot } = await import("react-dom/client");

@@ -145,16 +145,18 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   const [localError, setLocalError] = React.useState(null);
   const activeKeyRef = React.useRef(key);
   const generationRef = React.useRef(0);
+  const importRequestRef = React.useRef(0);
   const directoryRef = React.useRef(null);
   const zipRef = React.useRef(null);
   activeKeyRef.current = key;
   React.useEffect(() => {
+    importRequestRef.current += 1;
     generationRef.current += 1;
     setConflict(null);
     setDeleteTarget(null);
     setSelectedInput(null);
     setLocalError(null);
-    return () => { generationRef.current += 1; };
+    return () => { generationRef.current += 1; importRequestRef.current += 1; };
   }, [key]);
   React.useEffect(() => {
     if (typeof store.actions.loadSkills !== "function" || (scope === "project" && !(Number.isSafeInteger(projectId) && projectId > 0))) return undefined;
@@ -163,13 +165,15 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   }, [store, scope, projectId]);
 
   const target = Object.freeze({ scope, ...(scope === "project" ? { projectId } : {}) });
-  const isCurrent = (capturedKey, capturedGeneration) => activeKeyRef.current === capturedKey && generationRef.current === capturedGeneration;
-  const importArchive = async (archive, sourceName, input) => {
+  const isCurrent = (capturedKey, capturedGeneration, capturedRequest = null) => activeKeyRef.current === capturedKey
+    && generationRef.current === capturedGeneration
+    && (capturedRequest === null || importRequestRef.current === capturedRequest);
+  const importArchive = async (archive, sourceName, input, capturedRequest) => {
     if (!archive || rootUnavailable) return;
     const capturedKey = key;
     const capturedGeneration = generationRef.current;
     const capturedTarget = target;
-    if (!isCurrent(capturedKey, capturedGeneration) || rootUnavailable) return;
+    if (!isCurrent(capturedKey, capturedGeneration, capturedRequest) || rootUnavailable) return;
     setLocalError(null);
     setConflict(null);
     setSelectedInput(null);
@@ -178,17 +182,17 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
       input.value = "";
       return;
     }
-    setSelectedInput({ archive, sourceName, input, target: capturedTarget, key: capturedKey, generation: capturedGeneration });
+    setSelectedInput({ archive, sourceName, input, target: capturedTarget, key: capturedKey, generation: capturedGeneration, request: capturedRequest });
     try {
       await store.actions.importSkill({ ...capturedTarget, archive, sourceName });
-      if (isCurrent(capturedKey, capturedGeneration)) {
+      if (isCurrent(capturedKey, capturedGeneration, capturedRequest)) {
         setSelectedInput(null);
         setConflict(null);
       }
     } catch (error) {
-      if (!isCurrent(capturedKey, capturedGeneration)) return;
+      if (!isCurrent(capturedKey, capturedGeneration, capturedRequest)) return;
       if (shouldRetainSkillInput(error, activeKeyRef.current, capturedKey, { archive, sourceName })) {
-        setConflict({ existing: error.details?.existing, incoming: error.details?.incoming || { name: sourceName }, key: capturedKey, generation: capturedGeneration });
+        setConflict({ existing: error.details?.existing, incoming: error.details?.incoming || { name: sourceName }, key: capturedKey, generation: capturedGeneration, request: capturedRequest });
       } else {
         setSelectedInput(null);
         setLocalError(error?.code === "SKILL_CONFLICT"
@@ -196,21 +200,22 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
           : errorMessage(error) || "Skill 导入失败，请检查文件后重试。");
       }
     } finally {
-      input.value = "";
+      if (isCurrent(capturedKey, capturedGeneration, capturedRequest)) input.value = "";
     }
   };
   const chooseDirectory = async (event) => {
     const input = event.currentTarget;
     const capturedKey = key;
     const capturedGeneration = generationRef.current;
-    if (!isCurrent(capturedKey, capturedGeneration) || rootUnavailable) return;
+    const capturedRequest = ++importRequestRef.current;
+    if (!isCurrent(capturedKey, capturedGeneration, capturedRequest) || rootUnavailable) return;
     setConflict(null);
     setSelectedInput(null);
     try {
       const packed = await packSkillDirectory(input.files);
-      if (isCurrent(capturedKey, capturedGeneration)) await importArchive(packed.archive, packed.sourceName, input);
+      if (isCurrent(capturedKey, capturedGeneration, capturedRequest)) await importArchive(packed.archive, packed.sourceName, input, capturedRequest);
     } catch (error) {
-      if (!isCurrent(capturedKey, capturedGeneration)) return;
+      if (!isCurrent(capturedKey, capturedGeneration, capturedRequest)) return;
       setSelectedInput(null);
       input.value = "";
       setLocalError(errorMessage(error) || "目录打包失败，请检查 Skill 文件。");
@@ -218,21 +223,23 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   };
   const chooseZip = (event) => {
     const input = event.currentTarget;
+    const capturedRequest = ++importRequestRef.current;
     setConflict(null);
     setSelectedInput(null);
     const file = input.files?.[0];
-    if (file && !rootUnavailable && isCurrent(key, generationRef.current)) void importArchive(file, file.name, input);
+    if (file && !rootUnavailable && isCurrent(key, generationRef.current, capturedRequest)) void importArchive(file, file.name, input, capturedRequest);
   };
   const replace = () => {
     const selected = selectedInput;
-    if (!selected || selected.key !== key || !isCurrent(selected.key, selected.generation)) return;
+    if (!selected || selected.key !== key || selected.request !== importRequestRef.current || !isCurrent(selected.key, selected.generation, selected.request)) return;
+    const capturedRequest = ++importRequestRef.current;
     setLocalError(null);
     store.actions.importSkill({ ...selected.target, archive: selected.archive, sourceName: selected.sourceName, replace: true })
       .then(() => {
-        if (isCurrent(selected.key, selected.generation)) { setConflict(null); setSelectedInput(null); }
+        if (isCurrent(selected.key, selected.generation, capturedRequest)) { setConflict(null); setSelectedInput(null); }
       })
       .catch((error) => {
-        if (isCurrent(selected.key, selected.generation)) setLocalError(errorMessage(error) || "Skill 替换失败，请重试。");
+        if (isCurrent(selected.key, selected.generation, capturedRequest)) setLocalError(errorMessage(error) || "Skill 替换失败，请重试。");
       });
   };
   const data = catalog.data;
@@ -257,7 +264,7 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     currentAction && (currentAction.status === "running" || currentAction.status === "done") ? h("div", { className: "cpwb-skills-action-status", role: "status", "aria-live": "polite" }, actionLabel(currentAction)) : null,
     actionError ? h("div", { className: "cpwb-skills-action-error", role: "alert" }, errorMessage(actionError)) : null,
     localError ? h("div", { className: "cpwb-skills-action-error", role: "alert" }, localError) : null,
-    conflict && conflict.key === key ? h(SkillConflictDialog, { existing: conflict.existing, incoming: conflict.incoming, busy: currentAction?.status === "running", onCancel: () => { setConflict(null); setSelectedInput(null); }, onReplace: replace }) : null,
+    conflict && conflict.key === key && conflict.request === importRequestRef.current ? h(SkillConflictDialog, { existing: conflict.existing, incoming: conflict.incoming, busy: currentAction?.status === "running", onCancel: () => { setConflict(null); setSelectedInput(null); }, onReplace: replace }) : null,
     deleteTarget && deleteTarget.key === key ? h(SkillDeleteDialog, { item: deleteTarget.item, scope: deleteTarget.target.scope, busy: currentAction?.status === "running", onCancel: () => setDeleteTarget(null), onConfirm: () => {
       const captured = deleteTarget;
       if (!isCurrent(captured.key, captured.generation)) return;
