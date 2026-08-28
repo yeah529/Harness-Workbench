@@ -13,7 +13,7 @@ import {
 import { spawn as childSpawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
   extractSkillArchive,
@@ -110,7 +110,41 @@ async function callFs(operation, callback, ...args) {
   }
 }
 
-async function assertRootPathSafe(ops, rootPath, anchorPath = dirname(rootPath), { checkInternals = true } = {}) {
+export async function canonicalPathIdentity(ops, path) {
+  const absolutePath = resolve(path);
+  const suffix = [];
+  let current = absolutePath;
+  while (true) {
+    const stat = await optionalInspect(ops, current, "lstat");
+    if (stat) {
+      let canonical;
+      try {
+        canonical = await ops.realpath(current);
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          const parent = dirname(current);
+          suffix.unshift(basename(current));
+          if (parent === current) return absolutePath;
+          current = parent;
+          continue;
+        }
+        throwMapped(error, "realpath");
+      }
+      return resolve(canonical, ...suffix);
+    }
+    const parent = dirname(current);
+    if (parent === current) return absolutePath;
+    suffix.unshift(basename(current));
+    current = parent;
+  }
+}
+
+async function assertRootPathSafe(
+  ops,
+  rootPath,
+  anchorPath = dirname(rootPath),
+  { checkInternals = true, requireDirectories = checkInternals } = {},
+) {
   const absoluteRoot = resolve(rootPath);
   const absoluteAnchor = resolve(anchorPath);
   const descendant = relative(absoluteAnchor, absoluteRoot);
@@ -118,16 +152,32 @@ async function assertRootPathSafe(ops, rootPath, anchorPath = dirname(rootPath),
     throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root is outside its trusted anchor");
   }
   let current = absoluteAnchor;
-  const anchorStat = await optionalInspect(ops, current, "lstat");
+  const inspectPath = async (path) => {
+    try {
+      return await optionalInspect(ops, path, "lstat");
+    } catch (error) {
+      if (error?.code === "ENOTDIR") {
+        throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a non-directory path");
+      }
+      throw error;
+    }
+  };
+  const anchorStat = requireDirectories ? await inspectPath(current) : await optionalInspect(ops, current, "lstat");
   if (anchorStat?.isSymbolicLink()) {
     throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a symbolic link");
+  }
+  if (requireDirectories && anchorStat && !anchorStat.isDirectory()) {
+    throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a non-directory path");
   }
   const components = descendant.split(/[\\/]/).filter(Boolean);
   for (const component of components) {
     current = join(current, component);
-    const stat = await optionalInspect(ops, current, "lstat");
+    const stat = requireDirectories ? await inspectPath(current) : await optionalInspect(ops, current, "lstat");
     if (stat?.isSymbolicLink()) {
       throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a symbolic link");
+    }
+    if (requireDirectories && stat && !stat.isDirectory()) {
+      throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a non-directory path");
     }
     if (!stat) break;
   }
@@ -137,10 +187,22 @@ async function assertRootPathSafe(ops, rootPath, anchorPath = dirname(rootPath),
     join(rootPath, ".staging"),
     join(rootPath, ".transactions"),
   ]) {
-    const stat = await optionalInspect(ops, current, "lstat");
+    const stat = requireDirectories ? await inspectPath(current) : await optionalInspect(ops, current, "lstat");
     if (stat?.isSymbolicLink()) {
       throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a symbolic link");
     }
+    if (requireDirectories && stat && !stat.isDirectory()) {
+      throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a non-directory path");
+    }
+  }
+}
+
+async function optionalRecoveryInspect(ops, path, descriptor) {
+  try {
+    return await optionalInspect(ops, path, "lstat");
+  } catch (error) {
+    if (error?.code === "ENOTDIR") throw recoveryError(descriptor);
+    throw error;
   }
 }
 
@@ -152,17 +214,20 @@ async function assertRecoveryPathsSafe(ops, rootPath, paths, descriptor) {
     join(rootPath, ".staging"),
     join(rootPath, ".transactions"),
   ]) {
-    const stat = await optionalInspect(ops, current, "lstat");
-    if (stat?.isSymbolicLink()) throw recoveryError(descriptor);
+    const stat = await optionalRecoveryInspect(ops, current, descriptor);
+    if (stat?.isSymbolicLink() || (stat && !stat.isDirectory())) throw recoveryError(descriptor);
   }
   for (const path of Object.values(paths)) {
     const pathRelative = relative(rootPath, path);
     if (pathRelative.startsWith("..") || pathRelative.startsWith("/")) throw recoveryError(descriptor);
+    const allowFile = path === paths.descriptor;
     let current = rootPath;
     for (const component of pathRelative.split(/[\\/]/).filter(Boolean)) {
       current = join(current, component);
-      const stat = await optionalInspect(ops, current, "lstat");
-      if (stat?.isSymbolicLink()) throw recoveryError(descriptor);
+      const stat = await optionalRecoveryInspect(ops, current, descriptor);
+      if (stat?.isSymbolicLink() || (stat && !stat.isDirectory() && !(allowFile && current === path))) {
+        throw recoveryError(descriptor);
+      }
     }
   }
 }
@@ -449,7 +514,13 @@ async function resolveTarget({ scope, projectId, dshHome, repos, ops }) {
     if (typeof dshHome !== "string" || dshHome.length === 0) {
       throw new SkillManagerError(SKILL_ERROR_CODES.INVALID_SCOPE, "DSH_HOME is unavailable");
     }
-    return { scope: { kind: "global" }, rootPath: resolve(dshHome, "skills"), anchorPath: resolve(dshHome) };
+    const rootPath = resolve(dshHome, "skills");
+    return {
+      scope: { kind: "global" },
+      rootPath,
+      anchorPath: resolve(dshHome),
+      identity: await canonicalPathIdentity(ops, rootPath),
+    };
   }
   if (!Number.isSafeInteger(projectId) || projectId <= 0) {
     throw new SkillManagerError(SKILL_ERROR_CODES.INVALID_SCOPE, "Project scope requires a positive projectId");
@@ -472,10 +543,12 @@ async function resolveTarget({ scope, projectId, dshHome, repos, ops }) {
   if (projectStat.isSymbolicLink() || !projectStat.isDirectory()) {
     throw new SkillManagerError(SKILL_ERROR_CODES.PROJECT_PATH_UNAVAILABLE, "Project path is not a directory");
   }
+  const rootPath = resolve(projectPath, ".dsh", "skills");
   return {
     scope: { kind: "project", projectId },
-    rootPath: resolve(projectPath, ".dsh", "skills"),
+    rootPath,
     anchorPath: projectPath,
+    identity: await canonicalPathIdentity(ops, rootPath),
   };
 }
 
@@ -487,11 +560,11 @@ function recoveryError(descriptor) {
   );
 }
 
-async function recoverTransactions({ rootPath, ops }) {
-  const rootStat = await optionalInspect(ops, rootPath, "lstat");
+async function recoverTransactions({ rootPath, ops, identity }) {
+  const rootStat = await optionalRecoveryInspect(ops, rootPath, { name: "root" });
   if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) return;
   const transactionsPath = join(rootPath, ".transactions");
-  const transactionsStat = await optionalInspect(ops, transactionsPath, "lstat");
+  const transactionsStat = await optionalRecoveryInspect(ops, transactionsPath, { name: "transactions" });
   if (!transactionsStat) return;
   if (transactionsStat.isSymbolicLink() || !transactionsStat.isDirectory()) throw recoveryError({ name: "transactions" });
 
@@ -510,7 +583,7 @@ async function recoverTransactions({ rootPath, ops }) {
     const paths = transactionPaths(rootPath, descriptor);
     if (!paths || name !== `${descriptor.id}.json`) throw recoveryError(descriptor);
 
-    if (activeTransactions.has(`${rootPath}\0${descriptor.id}`)) continue;
+    if (activeTransactions.has(`${identity}\0${descriptor.id}`)) continue;
     const alternate = descriptor.state === "disabled"
       ? join(rootPath, descriptor.name)
       : join(rootPath, ".disabled", descriptor.name);
@@ -549,13 +622,14 @@ async function recoverTransactions({ rootPath, ops }) {
   }
 }
 
-function recoverTransactionsShared({ rootPath, ops }) {
-  const existing = recoveryLocks.get(rootPath);
+async function recoverTransactionsShared({ rootPath, ops, identity: providedIdentity }) {
+  const identity = providedIdentity ?? await canonicalPathIdentity(ops, rootPath);
+  const existing = recoveryLocks.get(identity);
   if (existing) return existing;
-  const current = recoverTransactions({ rootPath, ops }).finally(() => {
-    if (recoveryLocks.get(rootPath) === current) recoveryLocks.delete(rootPath);
+  const current = recoverTransactions({ rootPath, ops, identity }).finally(() => {
+    if (recoveryLocks.get(identity) === current) recoveryLocks.delete(identity);
   });
-  recoveryLocks.set(rootPath, current);
+  recoveryLocks.set(identity, current);
   return current;
 }
 
@@ -618,10 +692,10 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
       const canonicalTempRoot = await callFs("realpath", ops.realpath, temporaryRoot);
       extractedRoot = join(canonicalTempRoot, "incoming");
       const summary = await extractSkillArchive({ archiveBytes: bytes, destination: extractedRoot });
-      const key = `${target.rootPath}\0${summary.name}`;
+      const key = `${target.identity}\0${summary.name}`;
       return await serialize(key, async () => {
         await assertRootPathSafe(ops, target.rootPath, target.anchorPath);
-        await recoverTransactionsShared({ rootPath: target.rootPath, ops });
+        await recoverTransactionsShared({ rootPath: target.rootPath, ops, identity: target.identity });
         const existing = await readState(target, summary.name);
         const incoming = {
           name: summary.name,
@@ -668,7 +742,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
             previousRelative: `.staging/${transactionId}/previous`,
           };
           await callFs("mkdir", ops.mkdir, transactionsPath, { recursive: true });
-          activeTransactions.add(`${target.rootPath}\0${transactionId}`);
+          activeTransactions.add(`${target.identity}\0${transactionId}`);
           let descriptorPath;
           let movedPrevious = false;
           let movedIncoming = false;
@@ -709,7 +783,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
             }
             throwMapped(error, "mutation");
           } finally {
-            activeTransactions.delete(`${target.rootPath}\0${transactionId}`);
+            activeTransactions.delete(`${target.identity}\0${transactionId}`);
             if (cleanupAllowed || !movedPrevious) {
               await removePath(ops, stagingRoot).catch(() => {});
               if (descriptorPath) await removePath(ops, descriptorPath).catch(() => {});
@@ -739,9 +813,9 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
   async function setEnabled({ scope, projectId, name, enabled } = {}) {
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
     if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
-    return serialize(`${target.rootPath}\0${name}`, async () => {
+    return serialize(`${target.identity}\0${name}`, async () => {
       await assertRootPathSafe(ops, target.rootPath, target.anchorPath);
-      await recoverTransactionsShared({ rootPath: target.rootPath, ops });
+      await recoverTransactionsShared({ rootPath: target.rootPath, ops, identity: target.identity });
       const current = await readState(target, name);
       if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
       const desired = enabled ? "enabled" : "disabled";
@@ -771,9 +845,9 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
   async function remove({ scope, projectId, name } = {}) {
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
     if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
-    return serialize(`${target.rootPath}\0${name}`, async () => {
+    return serialize(`${target.identity}\0${name}`, async () => {
       await assertRootPathSafe(ops, target.rootPath, target.anchorPath);
-      await recoverTransactionsShared({ rootPath: target.rootPath, ops });
+      await recoverTransactionsShared({ rootPath: target.rootPath, ops, identity: target.identity });
       const current = await readState(target, name);
       if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
       await removePath(ops, current.path);
@@ -784,9 +858,9 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
   async function reveal({ scope, projectId, name } = {}) {
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
     if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
-    return serialize(`${target.rootPath}\0${name}`, async () => {
+    return serialize(`${target.identity}\0${name}`, async () => {
       await assertRootPathSafe(ops, target.rootPath, target.anchorPath);
-      await recoverTransactionsShared({ rootPath: target.rootPath, ops });
+      await recoverTransactionsShared({ rootPath: target.rootPath, ops, identity: target.identity });
       const current = await readState(target, name);
       if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
       try {
@@ -803,7 +877,7 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
   async function list({ scope, projectId } = {}) {
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
     await assertRootPathSafe(ops, target.rootPath, target.anchorPath, { checkInternals: false });
-    await recoverTransactionsShared({ rootPath: target.rootPath, ops });
+    await recoverTransactionsShared({ rootPath: target.rootPath, ops, identity: target.identity });
     const catalog = await scanCatalogRoot({ rootPath: target.rootPath, ops });
     if (scope === "project") {
       const globalRoot = resolve(dshHome, "skills");

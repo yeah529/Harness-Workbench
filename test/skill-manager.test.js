@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp as fsMkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, symlink, writeFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join, parse, resolve } from "node:path";
 import { strToU8, zipSync } from "fflate";
 
 import { createTempDir, removeTempDir } from "./helpers.js";
 import { SKILL_ERROR_CODES } from "../src/host/skill-package.js";
-import { createSkillManager } from "../src/host/skill-manager.js";
+import { canonicalPathIdentity, createSkillManager } from "../src/host/skill-manager.js";
 
 const markdown = (name, description = name) => `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
 const archive = (name, description = name) => zipSync({
@@ -29,6 +30,34 @@ async function makeBundle(root, relative, name, description = name, files = {}) 
 function projectRepos(projectPath, id = 7) {
   return { projects: { get: (requested) => requested === id ? { id, path: projectPath } : null } };
 }
+
+test("canonical path identity preserves suffixes when the nearest ancestor is filesystem root", async () => {
+  const missing = join(parse(resolve(process.cwd())).root, `.cpwb-skill-identity-${randomUUID()}`, "skills");
+  assert.equal(
+    await canonicalPathIdentity({ lstat, realpath: fsRealpath }, missing),
+    missing,
+  );
+});
+
+test("canonical path identity retains a component when an existing ancestor disappears during realpath", async (t) => {
+  const root = await createTempDir("cpwb-skill-identity-race-");
+  t.after(() => removeTempDir(root));
+  const missing = join(root, "missing", "skills");
+  let failOnce = true;
+  const identity = await canonicalPathIdentity({
+    lstat,
+    realpath: async (path) => {
+      if (failOnce) {
+        failOnce = false;
+        const error = new Error("ancestor disappeared");
+        error.code = "ENOENT";
+        throw error;
+      }
+      return fsRealpath(path);
+    },
+  }, missing);
+  assert.equal(identity, join(await fsRealpath(root), "missing", "skills"));
+});
 
 test("list scans enabled, disabled, invalid, and project shadowing without a database", async (t) => {
   const root = await createTempDir("cpwb-skill-manager-");
@@ -588,6 +617,23 @@ test("lifecycle mutations refuse symlinked internal skill directories", async (t
   assert.equal(await readFile(join(skillsRoot, "safe-skill", "SKILL.md"), "utf8"), markdown("safe-skill"));
 });
 
+test("lifecycle mutations refuse ordinary-file internal skill paths", async (t) => {
+  const root = await createTempDir("cpwb-skill-internal-file-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  await makeBundle(skillsRoot, "safe-skill", "safe-skill");
+  await writeFile(join(skillsRoot, ".disabled"), "occupied");
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  const error = await assert.rejects(
+    () => manager.setEnabled({ scope: "global", name: "safe-skill", enabled: false }),
+    (candidate) => candidate.code === SKILL_ERROR_CODES.PERMISSION_DENIED
+      && !JSON.stringify(candidate).includes(root),
+  );
+  assert.equal(error, undefined);
+  assert.equal(await readFile(join(skillsRoot, "safe-skill", "SKILL.md"), "utf8"), markdown("safe-skill"));
+});
+
 async function writeTransactionFixture(skillsRoot, id, name, state, previous = true) {
   const previousPath = join(skillsRoot, ".staging", id, "previous");
   if (previous) {
@@ -641,6 +687,46 @@ test("recovery refuses symlinked disabled and staging transaction paths", async 
   await assert.rejects(() => lstat(join(outside, "recover-staging")), { code: "ENOENT" });
 });
 
+test("recovery refuses ordinary-file disabled and staging transaction paths", async (t) => {
+  const root = await createTempDir("cpwb-skill-recovery-files-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  await mkdir(join(skillsRoot, ".staging"), { recursive: true });
+  await writeFile(join(skillsRoot, ".disabled"), "occupied");
+  await writeTransactionFixture(skillsRoot, "disabled-file", "recover-disabled-file", "enabled");
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  const disabledError = await assert.rejects(
+    () => manager.list({ scope: "global" }),
+    (candidate) => candidate.code === SKILL_ERROR_CODES.RECOVERY_REQUIRED
+      && !JSON.stringify(candidate).includes(root),
+  );
+  assert.equal(disabledError, undefined);
+  await lstat(join(skillsRoot, ".transactions", "disabled-file.json"));
+
+  await rm(join(skillsRoot, ".disabled"));
+  await rm(join(skillsRoot, ".transactions", "disabled-file.json"));
+  await rm(join(skillsRoot, ".staging"), { recursive: true, force: true });
+  await writeFile(join(skillsRoot, ".staging"), "occupied");
+  await mkdir(join(skillsRoot, ".transactions"), { recursive: true });
+  await writeFile(join(skillsRoot, ".transactions", "staging-file.json"), JSON.stringify({
+    version: 1,
+    id: "staging-file",
+    name: "recover-staging-file",
+    state: "enabled",
+    finalRelative: "recover-staging-file",
+    stagingRelative: ".staging/staging-file/incoming",
+    previousRelative: ".staging/staging-file/previous",
+  }));
+  const stagingError = await assert.rejects(
+    () => manager.list({ scope: "global" }),
+    (candidate) => candidate.code === SKILL_ERROR_CODES.RECOVERY_REQUIRED
+      && !JSON.stringify(candidate).includes(root),
+  );
+  assert.equal(stagingError, undefined);
+  await lstat(join(skillsRoot, ".transactions", "staging-file.json"));
+});
+
 test("concurrent managers deduplicate recovery for one root", async (t) => {
   const root = await createTempDir("cpwb-skill-recovery-concurrent-");
   t.after(() => removeTempDir(root));
@@ -664,6 +750,33 @@ test("concurrent managers deduplicate recovery for one root", async (t) => {
   assert.equal(results[1].value.items[0].name, "recover-concurrent");
 });
 
+test("parent symlink aliases share recovery identity and both lists succeed", async (t) => {
+  const root = await createTempDir("cpwb-skill-recovery-alias-");
+  t.after(() => removeTempDir(root));
+  const realParent = join(root, "real-parent");
+  const aliasParent = join(root, "alias-parent");
+  const realDshHome = join(realParent, "dsh");
+  const aliasDshHome = join(aliasParent, "dsh");
+  await mkdir(realDshHome, { recursive: true });
+  await symlink(realParent, aliasParent);
+  await writeTransactionFixture(join(realDshHome, "skills"), "alias-recovery", "recover-alias", "enabled");
+  const delayedOps = {
+    rename: async (...args) => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      return fsRename(...args);
+    },
+  };
+  const first = createSkillManager({ dshHome: realDshHome, repos: projectRepos(root), fileOps: delayedOps });
+  const second = createSkillManager({ dshHome: aliasDshHome, repos: projectRepos(root), fileOps: delayedOps });
+  const results = await Promise.allSettled([
+    first.list({ scope: "global" }),
+    second.list({ scope: "global" }),
+  ]);
+  assert.deepEqual(results.map((result) => result.status), ["fulfilled", "fulfilled"]);
+  assert.deepEqual(results.map((result) => result.value.items.map(({ name }) => name)), [["recover-alias"], ["recover-alias"]]);
+  assert.ok(results.every((result) => !result.reason));
+});
+
 test("a second manager does not recover a live transaction from the first manager", async (t) => {
   const root = await createTempDir("cpwb-skill-live-transaction-");
   t.after(() => removeTempDir(root));
@@ -679,7 +792,7 @@ test("a second manager does not recover a live transaction from the first manage
     repos: projectRepos(root),
     fileOps: {
       rename: async (source, destination) => {
-        if (source === finalPath && destination.endsWith("/previous")) {
+        if (source === finalPath && basename(destination) === "previous") {
           startedResolve();
           await paused;
         }
@@ -696,6 +809,91 @@ test("a second manager does not recover a live transaction from the first manage
   assert.equal(transactionFiles.length, 1);
   releaseResolve();
   await replacement;
+});
+
+test("a parent-symlink alias does not recover another manager's live transaction", async (t) => {
+  const root = await createTempDir("cpwb-skill-live-alias-");
+  t.after(() => removeTempDir(root));
+  const realParent = join(root, "real-parent");
+  const aliasParent = join(root, "alias-parent");
+  const realDshHome = join(realParent, "dsh");
+  const aliasDshHome = join(aliasParent, "dsh");
+  const finalPath = join(realDshHome, "skills", "live-alias");
+  await mkdir(realDshHome, { recursive: true });
+  await symlink(realParent, aliasParent);
+  let startedResolve;
+  let releaseResolve;
+  const started = new Promise((resolvePromise) => { startedResolve = resolvePromise; });
+  const paused = new Promise((resolvePromise) => { releaseResolve = resolvePromise; });
+  const managerOne = createSkillManager({
+    dshHome: realDshHome,
+    repos: projectRepos(root),
+    fileOps: {
+      rename: async (source, destination) => {
+        if (source === finalPath && destination.endsWith("/previous")) {
+          startedResolve();
+          await paused;
+        }
+        return fsRename(source, destination);
+      },
+    },
+  });
+  await managerOne.importArchive({ scope: "global", archiveBytes: archive("live-alias", "old"), sourceName: "old.zip" });
+  const replacement = managerOne.importArchive({ scope: "global", archiveBytes: archive("live-alias", "new"), sourceName: "new.zip", replace: true });
+  await started;
+  const managerTwo = createSkillManager({ dshHome: aliasDshHome, repos: projectRepos(root) });
+  await managerTwo.list({ scope: "global" });
+  assert.equal((await readdir(join(realDshHome, "skills", ".transactions"))).length, 1);
+  releaseResolve();
+  await replacement;
+});
+
+test("same-name mutations through parent-symlink aliases are serialized", async (t) => {
+  const root = await createTempDir("cpwb-skill-mutation-alias-");
+  t.after(() => removeTempDir(root));
+  const realParent = join(root, "real-parent");
+  const aliasParent = join(root, "alias-parent");
+  const realDshHome = join(realParent, "dsh");
+  const aliasDshHome = join(aliasParent, "dsh");
+  const aliasSkillsRoot = join(aliasDshHome, "skills");
+  const finalPath = join(realDshHome, "skills", "serialized-alias");
+  const disabledPath = join(realDshHome, "skills", ".disabled", "serialized-alias");
+  await mkdir(realDshHome, { recursive: true });
+  await symlink(realParent, aliasParent);
+  let firstStartedResolve;
+  let releaseResolve;
+  const firstStarted = new Promise((resolvePromise) => { firstStartedResolve = resolvePromise; });
+  const paused = new Promise((resolvePromise) => { releaseResolve = resolvePromise; });
+  let secondResolved = false;
+  let secondEnteredMutation = false;
+  const sharedOps = {
+    mkdir: async (...args) => {
+      if (secondResolved) secondEnteredMutation = true;
+      return mkdir(...args);
+    },
+    realpath: async (path) => {
+      if (path === aliasSkillsRoot) secondResolved = true;
+      return fsRealpath(path);
+    },
+    rename: async (source, destination) => {
+      if (source === finalPath && destination === disabledPath) {
+        firstStartedResolve();
+        await paused;
+      }
+      return fsRename(source, destination);
+    },
+  };
+  const managerOne = createSkillManager({ dshHome: realDshHome, repos: projectRepos(root), fileOps: sharedOps });
+  const managerTwo = createSkillManager({ dshHome: aliasDshHome, repos: projectRepos(root), fileOps: sharedOps });
+  await managerOne.importArchive({ scope: "global", archiveBytes: archive("serialized-alias", "old"), sourceName: "old.zip" });
+  const first = managerOne.setEnabled({ scope: "global", name: "serialized-alias", enabled: false });
+  await firstStarted;
+  const second = managerTwo.setEnabled({ scope: "global", name: "serialized-alias", enabled: false });
+  while (!secondResolved) await new Promise((resolvePromise) => setTimeout(resolvePromise, 1));
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 15));
+  assert.equal(secondEnteredMutation, false);
+  releaseResolve();
+  await Promise.all([first, second]);
 });
 
 test("recovery rejects an alternate enabled or disabled final state", async (t) => {
@@ -730,7 +928,7 @@ test("manager import routes temporary directory lifecycle through fileOps", asyn
   });
   await manager.importArchive({ scope: "global", archiveBytes: archive("temp-seam"), sourceName: "temp.zip" });
   assert.equal(calls.mkdtemp, 1);
-  assert.equal(calls.realpath, 1);
+  assert.equal(calls.realpath, 2);
   assert.equal(calls.rm >= 1, true);
 });
 
