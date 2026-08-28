@@ -1,24 +1,56 @@
 import {
+  mkdir as fsMkdir,
   lstat as fsLstat,
+  mkdtemp as fsMkdtemp,
   readdir as fsReaddir,
   readFile as fsReadFile,
+  realpath as fsRealpath,
+  rename as fsRename,
+  rm as fsRm,
+  open as fsOpen,
+  writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { spawn as childSpawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
+  extractSkillArchive,
   parseSkillMarkdown,
   SkillManagerError,
   SKILL_ERROR_CODES,
+  SKILL_PACKAGE_LIMITS,
 } from "./skill-package.js";
 
 const PERMISSION_CODES = new Set(["EACCES", "EPERM", "EROFS"]);
 const INTERNAL_NAMES = new Set([".staging", ".transactions"]);
 
 const defaultFileOps = Object.freeze({
+  mkdir: fsMkdir,
   lstat: fsLstat,
+  mkdtemp: fsMkdtemp,
   readdir: fsReaddir,
   readFile: fsReadFile,
+  realpath: fsRealpath,
+  rename: fsRename,
+  rm: fsRm,
+  open: fsOpen,
+  writeFile: fsWriteFile,
 });
+
+const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const TRANSACTION_ID_PATTERN = /^[A-Za-z0-9-]+$/;
+const locks = new Map();
+
+function serialize(key, operation) {
+  const previous = locks.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  locks.set(key, current);
+  return current.finally(() => {
+    if (locks.get(key) === current) locks.delete(key);
+  });
+}
 
 function permissionDenied(error, operation) {
   const mapped = new SkillManagerError(
@@ -60,6 +92,37 @@ async function readText(ops, path) {
   }
 }
 
+async function readBytes(ops, path) {
+  try {
+    return await ops.readFile(path);
+  } catch (error) {
+    throwMapped(error, "readFile");
+  }
+}
+
+async function callFs(operation, callback, ...args) {
+  try {
+    return await callback(...args);
+  } catch (error) {
+    throwMapped(error, operation);
+  }
+}
+
+async function assertRootPathSafe(ops, rootPath) {
+  for (const current of [
+    dirname(rootPath),
+    rootPath,
+    join(rootPath, ".disabled"),
+    join(rootPath, ".staging"),
+    join(rootPath, ".transactions"),
+  ]) {
+    const stat = await optionalInspect(ops, current, "lstat");
+    if (stat?.isSymbolicLink()) {
+      throw mutationError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill root contains a symbolic link");
+    }
+  }
+}
+
 function diagnostic(path, kind, message) {
   return { kind, path, message };
 }
@@ -74,6 +137,98 @@ function entryName(entry) {
 
 function pathFor(rootPath, value) {
   return relative(rootPath, value).split("\\").join("/");
+}
+
+function safeName(name) {
+  return typeof name === "string" && SKILL_NAME_PATTERN.test(name);
+}
+
+function safeTransactionId(id) {
+  return typeof id === "string" && TRANSACTION_ID_PATTERN.test(id);
+}
+
+function mutationError(code, message, details) {
+  return new SkillManagerError(code, message, details);
+}
+
+async function optionalInspect(ops, path, operation) {
+  try {
+    return await inspect(ops, path, operation);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function copyTree(ops, source, destination) {
+  const sourceStat = await inspect(ops, source, "lstat");
+  if (sourceStat.isSymbolicLink() || !sourceStat.isDirectory()) {
+    throw new SkillManagerError(SKILL_ERROR_CODES.ARCHIVE_UNSAFE, "Skill staging path is not a directory");
+  }
+  await callFs("mkdir", ops.mkdir, destination, { recursive: true });
+  for (const rawEntry of await readDirectory(ops, source)) {
+    const name = entryName(rawEntry);
+    if (typeof name !== "string" || name === "") continue;
+    const from = join(source, name);
+    const to = join(destination, name);
+    const stat = await inspect(ops, from, "lstat");
+    if (stat.isSymbolicLink()) {
+      throw new SkillManagerError(SKILL_ERROR_CODES.ARCHIVE_UNSAFE, "Skill staging path contains a symbolic link");
+    }
+    if (stat.isDirectory()) {
+      await copyTree(ops, from, to);
+    } else if (stat.isFile()) {
+      await callFs("writeFile", ops.writeFile, to, await readBytes(ops, from), { flag: "wx" });
+    } else {
+      throw new SkillManagerError(SKILL_ERROR_CODES.ARCHIVE_UNSAFE, "Skill staging path contains an unsupported entry");
+    }
+  }
+}
+
+async function syncFile(ops, path) {
+  if (typeof ops.open !== "function") return;
+  let handle;
+  try {
+    handle = await ops.open(path, "r");
+    await handle.sync();
+  } catch (error) {
+    if (!(["EINVAL", "EISDIR", "ENOTSUP"].includes(error?.code))) throwMapped(error, "fsync");
+  } finally {
+    await handle?.close?.().catch?.(() => {});
+  }
+}
+
+async function writeTransaction(ops, transactionsPath, descriptor) {
+  const descriptorPath = join(transactionsPath, `${descriptor.id}.json`);
+  const temporaryPath = join(transactionsPath, `.${descriptor.id}.json.tmp`);
+  await callFs("writeFile", ops.writeFile, temporaryPath, `${JSON.stringify(descriptor)}\n`, { flag: "wx" });
+  await syncFile(ops, temporaryPath);
+  await callFs("rename", ops.rename, temporaryPath, descriptorPath);
+  await syncFile(ops, transactionsPath);
+  return descriptorPath;
+}
+
+async function removePath(ops, path, operation = "rm") {
+  try {
+    await ops.rm(path, { recursive: true, force: true });
+  } catch (error) {
+    throwMapped(error, operation);
+  }
+}
+
+function transactionPaths(rootPath, descriptor) {
+  const name = descriptor.name;
+  const id = descriptor.id;
+  if (!safeName(name) || !safeTransactionId(id)) return null;
+  const state = descriptor.state === "disabled" ? "disabled" : descriptor.state === "enabled" ? "enabled" : null;
+  if (!state || descriptor.version !== 1) return null;
+  const finalRelative = state === "disabled" ? join(".disabled", name) : name;
+  return {
+    final: join(rootPath, finalRelative),
+    incoming: join(rootPath, ".staging", id, "incoming"),
+    previous: join(rootPath, ".staging", id, "previous"),
+    staging: join(rootPath, ".staging", id),
+  };
 }
 
 async function scanBundle({ rootPath, bundlePath, state, ops }) {
@@ -275,18 +430,295 @@ async function resolveTarget({ scope, projectId, dshHome, repos, ops }) {
   };
 }
 
-export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps } = {}) {
+function recoveryError(descriptor) {
+  return new SkillManagerError(
+    SKILL_ERROR_CODES.RECOVERY_REQUIRED,
+    "Skill transaction recovery requires manual intervention",
+    { id: descriptor?.id, name: descriptor?.name },
+  );
+}
+
+async function recoverTransactions({ rootPath, ops, activeTransactions }) {
+  const rootStat = await optionalInspect(ops, rootPath, "lstat");
+  if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) return;
+  const transactionsPath = join(rootPath, ".transactions");
+  const transactionsStat = await optionalInspect(ops, transactionsPath, "lstat");
+  if (!transactionsStat) return;
+  if (transactionsStat.isSymbolicLink() || !transactionsStat.isDirectory()) throw recoveryError({ name: "transactions" });
+
+  for (const rawEntry of await readDirectory(ops, transactionsPath)) {
+    const name = entryName(rawEntry);
+    if (typeof name !== "string" || !name.endsWith(".json")) continue;
+    const descriptorPath = join(transactionsPath, name);
+    const descriptorStat = await inspect(ops, descriptorPath, "lstat");
+    if (descriptorStat.isSymbolicLink() || !descriptorStat.isFile()) throw recoveryError({ name });
+    let descriptor;
+    try {
+      descriptor = JSON.parse(await readText(ops, descriptorPath));
+    } catch {
+      throw recoveryError({ name });
+    }
+    if (activeTransactions.has(descriptor?.id)) continue;
+    const paths = transactionPaths(rootPath, descriptor);
+    if (!paths || name !== `${descriptor.id}.json`) throw recoveryError(descriptor);
+
+    const finalStat = await optionalInspect(ops, paths.final, "lstat");
+    const previousStat = await optionalInspect(ops, paths.previous, "lstat");
+    const incomingStat = await optionalInspect(ops, paths.incoming, "lstat");
+    if ([finalStat, previousStat, incomingStat].some((stat) => stat && (stat.isSymbolicLink() || (!stat.isDirectory() && stat !== incomingStat)))) {
+      throw recoveryError(descriptor);
+    }
+
+    if (!finalStat && previousStat) {
+      await callFs("mkdir", ops.mkdir, dirname(paths.final), { recursive: true });
+      try {
+        await ops.rename(paths.previous, paths.final);
+      } catch (error) {
+        throwMapped(error, "rename");
+      }
+    } else if (finalStat && previousStat) {
+      await removePath(ops, paths.previous);
+    } else if (!finalStat && !previousStat) {
+      throw recoveryError(descriptor);
+    }
+    await removePath(ops, paths.staging);
+    await removePath(ops, descriptorPath);
+  }
+}
+
+async function defaultRevealPath(path) {
+  const platform = process.platform;
+  const command = platform === "darwin" ? "open" : platform === "win32" ? "explorer.exe" : "xdg-open";
+  await new Promise((resolvePromise, reject) => {
+    let child;
+    try {
+      child = childSpawn(command, [path], { shell: false, detached: true, stdio: "ignore" });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    child.once("error", reject);
+    child.once("spawn", resolvePromise);
+    child.unref?.();
+  });
+}
+
+export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, revealPath: injectedRevealPath } = {}) {
   const ops = { ...defaultFileOps, ...(fileOps ?? {}) };
+  const revealPath = injectedRevealPath ?? fileOps?.revealPath ?? defaultRevealPath;
+
+  async function readState(target, name) {
+    const enabledPath = join(target.rootPath, name);
+    const disabledPath = join(target.rootPath, ".disabled", name);
+    const enabledStat = await optionalInspect(ops, enabledPath, "lstat");
+    const disabledStat = await optionalInspect(ops, disabledPath, "lstat");
+    if (enabledStat && disabledStat) {
+      throw mutationError(SKILL_ERROR_CODES.STATE_CONFLICT, "Skill exists in enabled and disabled locations", { name });
+    }
+    const state = enabledStat ? "enabled" : disabledStat ? "disabled" : null;
+    if (!state) return null;
+    const path = state === "enabled" ? enabledPath : disabledPath;
+    const stat = state === "enabled" ? enabledStat : disabledStat;
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
+    }
+    const result = await scanBundle({ rootPath: target.rootPath, bundlePath: path, state, ops });
+    if (!result.item || result.diagnostics.length > 0) {
+      throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
+    }
+    return result.item;
+  }
+
+  async function importArchive({ scope, projectId, archiveBytes, sourceName, replace = false } = {}) {
+    const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
+    const bytes = archiveBytes instanceof Uint8Array ? archiveBytes : new Uint8Array(archiveBytes ?? 0);
+    if (bytes.byteLength > SKILL_PACKAGE_LIMITS.archiveBytes) {
+      throw new SkillManagerError(SKILL_ERROR_CODES.ARCHIVE_TOO_LARGE, "ZIP archive exceeds the byte limit", {
+        bytes: bytes.byteLength,
+        limit: SKILL_PACKAGE_LIMITS.archiveBytes,
+      });
+    }
+
+    const temporaryRoot = await fsMkdtemp(join(tmpdir(), ".cpwb-skill-import-"));
+    let extractedRoot;
+    try {
+      const canonicalTempRoot = await fsRealpath(temporaryRoot);
+      extractedRoot = join(canonicalTempRoot, "incoming");
+      const summary = await extractSkillArchive({ archiveBytes: bytes, destination: extractedRoot });
+      const key = `${target.rootPath}\0${summary.name}`;
+      return await serialize(key, async () => {
+        await assertRootPathSafe(ops, target.rootPath);
+        await recoverTransactions({ rootPath: target.rootPath, ops, activeTransactions });
+        const existing = await readState(target, summary.name);
+        const incoming = {
+          name: summary.name,
+          description: summary.description,
+          sourceName: typeof sourceName === "string" ? sourceName : "",
+          files: summary.files,
+          fileCount: summary.fileCount,
+          state: existing?.state ?? "enabled",
+        };
+        if (existing && !replace) {
+          throw mutationError(SKILL_ERROR_CODES.CONFLICT, "A Skill with this name already exists", { existing, incoming });
+        }
+
+        await callFs("mkdir", ops.mkdir, target.rootPath, { recursive: true });
+        const transactionId = randomUUID();
+        const stagingRoot = join(target.rootPath, ".staging", transactionId);
+        const stagingIncoming = join(stagingRoot, "incoming");
+        await callFs("mkdir", ops.mkdir, stagingRoot, { recursive: true });
+        await copyTree(ops, extractedRoot, stagingIncoming);
+        const finalPath = existing?.state === "disabled"
+          ? join(target.rootPath, ".disabled", summary.name)
+          : join(target.rootPath, summary.name);
+        const transactionsPath = join(target.rootPath, ".transactions");
+        if (!existing) {
+          try {
+            await ops.rename(stagingIncoming, finalPath);
+          } catch (error) {
+            throwMapped(error, "rename");
+          } finally {
+            await removePath(ops, stagingRoot).catch(() => {});
+          }
+        } else {
+          const previous = join(stagingRoot, "previous");
+          const descriptor = {
+            version: 1,
+            id: transactionId,
+            name: summary.name,
+            state: existing.state,
+            finalRelative: existing.state === "disabled" ? `.disabled/${summary.name}` : summary.name,
+            stagingRelative: `.staging/${transactionId}/incoming`,
+            previousRelative: `.staging/${transactionId}/previous`,
+          };
+          await callFs("mkdir", ops.mkdir, transactionsPath, { recursive: true });
+          activeTransactions.add(transactionId);
+          let descriptorPath;
+          let movedPrevious = false;
+          let movedIncoming = false;
+          let committed = false;
+          let cleanupAllowed = false;
+          try {
+            descriptorPath = await writeTransaction(ops, transactionsPath, descriptor);
+            await ops.rename(existing.path, previous);
+            movedPrevious = true;
+            await ops.rename(stagingIncoming, finalPath);
+            movedIncoming = true;
+            const installed = await scanBundle({ rootPath: target.rootPath, bundlePath: finalPath, state: existing.state, ops });
+            if (!installed.item || installed.diagnostics.length > 0) {
+              throw mutationError(SKILL_ERROR_CODES.PACKAGE_INVALID, "Installed Skill could not be scanned");
+            }
+            committed = true;
+            await removePath(ops, previous);
+            await removePath(ops, stagingRoot);
+            await removePath(ops, descriptorPath);
+            cleanupAllowed = true;
+            return installed.item;
+          } catch (error) {
+            if (!committed && movedPrevious) {
+              let restored = false;
+              const finalStat = await optionalInspect(ops, finalPath, "lstat");
+              const previousStat = await optionalInspect(ops, previous, "lstat");
+              try {
+                if (finalStat && previousStat && movedIncoming) await removePath(ops, finalPath);
+                if (!finalStat || (movedIncoming && finalStat)) {
+                  await ops.rename(previous, finalPath);
+                  restored = true;
+                }
+              } catch {
+                restored = false;
+              }
+              if (!restored) throw recoveryError(descriptor);
+              cleanupAllowed = true;
+            }
+            throwMapped(error, "mutation");
+          } finally {
+            activeTransactions.delete(transactionId);
+            if (cleanupAllowed || !movedPrevious) {
+              await removePath(ops, stagingRoot).catch(() => {});
+              if (descriptorPath) await removePath(ops, descriptorPath).catch(() => {});
+            }
+          }
+        }
+        const installed = await scanBundle({ rootPath: target.rootPath, bundlePath: finalPath, state: "enabled", ops });
+        if (!installed.item || installed.diagnostics.length > 0) {
+          throw mutationError(SKILL_ERROR_CODES.PACKAGE_INVALID, "Installed Skill could not be scanned");
+        }
+        return installed.item;
+      });
+    } finally {
+      await fsRm(temporaryRoot, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  async function setEnabled({ scope, projectId, name, enabled } = {}) {
+    const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
+    if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
+    return serialize(`${target.rootPath}\0${name}`, async () => {
+      await assertRootPathSafe(ops, target.rootPath);
+      await recoverTransactions({ rootPath: target.rootPath, ops, activeTransactions });
+      const current = await readState(target, name);
+      if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
+      const desired = enabled ? "enabled" : "disabled";
+      if (current.state === desired) return current;
+      const destination = desired === "disabled" ? join(target.rootPath, ".disabled", name) : join(target.rootPath, name);
+      if (desired === "disabled") await callFs("mkdir", ops.mkdir, dirname(destination), { recursive: true });
+      try {
+        await ops.rename(current.path, destination);
+      } catch (error) {
+        throwMapped(error, "rename");
+      }
+      const result = await scanBundle({ rootPath: target.rootPath, bundlePath: destination, state: desired, ops });
+      if (!result.item || result.diagnostics.length > 0) throw mutationError(SKILL_ERROR_CODES.PACKAGE_INVALID, "Skill could not be scanned after state change");
+      return result.item;
+    });
+  }
+
+  async function remove({ scope, projectId, name } = {}) {
+    const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
+    if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
+    return serialize(`${target.rootPath}\0${name}`, async () => {
+      await assertRootPathSafe(ops, target.rootPath);
+      await recoverTransactions({ rootPath: target.rootPath, ops, activeTransactions });
+      const current = await readState(target, name);
+      if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
+      await removePath(ops, current.path);
+      return { ...current, removed: true };
+    });
+  }
+
+  async function reveal({ scope, projectId, name } = {}) {
+    const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
+    if (!safeName(name)) throw new SkillManagerError(SKILL_ERROR_CODES.NAME_INVALID, "Skill name is not valid", { name });
+    return serialize(`${target.rootPath}\0${name}`, async () => {
+      await assertRootPathSafe(ops, target.rootPath);
+      await recoverTransactions({ rootPath: target.rootPath, ops, activeTransactions });
+      const current = await readState(target, name);
+      if (!current) throw mutationError(SKILL_ERROR_CODES.NOT_FOUND, "Skill was not found", { name });
+      try {
+        await revealPath(current.path);
+      } catch (error) {
+        const mapped = new SkillManagerError(SKILL_ERROR_CODES.FILE_MANAGER_UNAVAILABLE, "File manager could not be opened", { operation: "reveal" });
+        Object.defineProperty(mapped, "cause", { value: error, enumerable: false });
+        throw mapped;
+      }
+      return current;
+    });
+  }
+
+  const activeTransactions = new Set();
   async function list({ scope, projectId } = {}) {
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
+    await recoverTransactions({ rootPath: target.rootPath, ops, activeTransactions });
     const catalog = await scanCatalogRoot({ rootPath: target.rootPath, ops });
     if (scope === "project") {
       const globalRoot = resolve(dshHome, "skills");
+      await recoverTransactions({ rootPath: globalRoot, ops, activeTransactions });
       const globalCatalog = await scanCatalogRoot({ rootPath: globalRoot, ops });
       const globalNames = new Set(globalCatalog.items.map((item) => item.name));
       for (const item of catalog.items) item.shadowsGlobal = globalNames.has(item.name);
     }
     return { scope: target.scope, rootPath: target.rootPath, ...catalog };
   }
-  return { list };
+  return { list, importArchive, setEnabled, remove, reveal };
 }

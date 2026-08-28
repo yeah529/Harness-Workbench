@@ -1,13 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, rename as fsRename, rm, symlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { strToU8, zipSync } from "fflate";
 
 import { createTempDir, removeTempDir } from "./helpers.js";
 import { SKILL_ERROR_CODES } from "../src/host/skill-package.js";
 import { createSkillManager } from "../src/host/skill-manager.js";
 
 const markdown = (name, description = name) => `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
+const archive = (name, description = name) => zipSync({
+  "SKILL.md": strToU8(markdown(name, description)),
+  "references/value.md": strToU8(description),
+});
 
 async function makeBundle(root, relative, name, description = name, files = {}) {
   const directory = join(root, relative);
@@ -160,4 +165,238 @@ test("permission failures under a trusted root map to a safe manager error", asy
       && !JSON.stringify(candidate.details ?? {}).includes("/private/path"),
   );
   assert.equal(error, undefined);
+});
+
+test("same-scope import conflicts, confirmed replacement preserves disabled state", async (t) => {
+  const root = await createTempDir("cpwb-skill-replace-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  await manager.importArchive({ scope: "global", archiveBytes: archive("replace-me", "old"), sourceName: "old.zip", replace: false });
+  await manager.setEnabled({ scope: "global", name: "replace-me", enabled: false });
+  await assert.rejects(
+    () => manager.importArchive({ scope: "global", archiveBytes: archive("replace-me", "new"), sourceName: "new.zip", replace: false }),
+    (error) => error.code === "SKILL_CONFLICT" && error.details.existing.state === "disabled",
+  );
+  const replaced = await manager.importArchive({ scope: "global", archiveBytes: archive("replace-me", "new"), sourceName: "new.zip", replace: true });
+  assert.equal(replaced.state, "disabled");
+  assert.equal(await readFile(join(dshHome, "skills", ".disabled", "replace-me", "references", "value.md"), "utf8"), "new");
+});
+
+test("enable, disable, and delete affect only the exact canonical target", async (t) => {
+  const root = await createTempDir("cpwb-skill-lifecycle-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  await manager.importArchive({ scope: "global", archiveBytes: archive("target-skill", "target"), sourceName: "target.zip" });
+  await manager.importArchive({ scope: "global", archiveBytes: archive("sibling-skill", "sibling"), sourceName: "sibling.zip" });
+  assert.equal((await manager.setEnabled({ scope: "global", name: "target-skill", enabled: false })).state, "disabled");
+  assert.equal((await manager.setEnabled({ scope: "global", name: "target-skill", enabled: true })).state, "enabled");
+  await manager.remove({ scope: "global", name: "target-skill" });
+  assert.equal((await manager.list({ scope: "global" })).items.some((item) => item.name === "target-skill"), false);
+  assert.equal((await manager.list({ scope: "global" })).items.some((item) => item.name === "sibling-skill"), true);
+  assert.equal(await readFile(join(dshHome, "skills", "sibling-skill", "SKILL.md"), "utf8").then(Boolean), true);
+});
+
+test("replacement rolls back the previous directory after an incoming rename failure", async (t) => {
+  const root = await createTempDir("cpwb-skill-rollback-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  const finalPath = join(skillsRoot, "rollback-me");
+  let failIncoming = false;
+  const fileOps = {
+    rename: async (source, destination) => {
+      if (failIncoming && source.endsWith("/incoming") && destination === finalPath) {
+        const error = new Error("injected incoming rename failure");
+        error.code = "EIO";
+        throw error;
+      }
+      return fsRename(source, destination);
+    },
+  };
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root), fileOps });
+  await manager.importArchive({ scope: "global", archiveBytes: archive("rollback-me", "old"), sourceName: "old.zip" });
+  failIncoming = true;
+  await assert.rejects(() => manager.importArchive({ scope: "global", archiveBytes: archive("rollback-me", "new"), sourceName: "new.zip", replace: true }), { code: "EIO" });
+  assert.equal(await readFile(join(finalPath, "SKILL.md"), "utf8"), markdown("rollback-me", "old"));
+  assert.deepEqual(await readdir(join(skillsRoot, ".transactions")), []);
+});
+
+test("replacement rolls back when post-rename verification fails", async (t) => {
+  const root = await createTempDir("cpwb-skill-verify-rollback-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const finalPath = join(dshHome, "skills", "verify-me");
+  let readCount = 0;
+  const fileOps = {
+    readFile: async (path, ...args) => {
+      readCount += 1;
+      if (readCount >= 6 && path === join(finalPath, "SKILL.md")) {
+        const error = new Error("injected verification failure");
+        error.code = "EIO";
+        throw error;
+      }
+      return readFile(path, ...args);
+    },
+  };
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root), fileOps });
+  await manager.importArchive({ scope: "global", archiveBytes: archive("verify-me", "old"), sourceName: "old.zip" });
+  await assert.rejects(() => manager.importArchive({ scope: "global", archiveBytes: archive("verify-me", "new"), sourceName: "new.zip", replace: true }), { code: "EIO" });
+  assert.equal(await readFile(join(finalPath, "SKILL.md"), "utf8"), markdown("verify-me", "old"));
+});
+
+test("list recovers a committed previous directory and removes transaction residue", async (t) => {
+  const root = await createTempDir("cpwb-skill-recovery-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  const transactionId = "recovery-transaction";
+  const previous = join(skillsRoot, ".staging", transactionId, "previous");
+  await mkdir(previous, { recursive: true });
+  await writeFile(join(previous, "SKILL.md"), markdown("recover-me", "old"));
+  await mkdir(join(skillsRoot, ".transactions"), { recursive: true });
+  await writeFile(join(skillsRoot, ".transactions", `${transactionId}.json`), JSON.stringify({
+    version: 1,
+    id: transactionId,
+    name: "recover-me",
+    state: "enabled",
+    finalRelative: "recover-me",
+    stagingRelative: `.staging/${transactionId}/incoming`,
+    previousRelative: `.staging/${transactionId}/previous`,
+  }));
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  const catalog = await manager.list({ scope: "global" });
+  assert.equal(catalog.items[0].name, "recover-me");
+  assert.equal(await readFile(join(skillsRoot, "recover-me", "SKILL.md"), "utf8"), markdown("recover-me", "old"));
+  assert.deepEqual(await readdir(join(skillsRoot, ".transactions")), []);
+  await assert.rejects(() => lstat(join(skillsRoot, ".staging", transactionId)), { code: "ENOENT" });
+});
+
+test("ambiguous enabled and disabled state rejects every lifecycle mutation", async (t) => {
+  const root = await createTempDir("cpwb-skill-ambiguous-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  await makeBundle(skillsRoot, "ambiguous", "ambiguous", "enabled");
+  await makeBundle(join(skillsRoot, ".disabled"), "ambiguous", "ambiguous", "disabled");
+  const revealPath = async () => { throw new Error("reveal must not run"); };
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root), revealPath });
+  const calls = [
+    () => manager.importArchive({ scope: "global", archiveBytes: archive("ambiguous", "incoming"), sourceName: "incoming.zip", replace: true }),
+    () => manager.setEnabled({ scope: "global", name: "ambiguous", enabled: true }),
+    () => manager.setEnabled({ scope: "global", name: "ambiguous", enabled: false }),
+    () => manager.remove({ scope: "global", name: "ambiguous" }),
+    () => manager.reveal({ scope: "global", name: "ambiguous" }),
+  ];
+  for (const call of calls) await assert.rejects(call, (error) => error.code === "SKILL_STATE_CONFLICT");
+  assert.equal(await readFile(join(skillsRoot, "ambiguous", "SKILL.md"), "utf8"), markdown("ambiguous", "enabled"));
+  assert.equal(await readFile(join(skillsRoot, ".disabled", "ambiguous", "SKILL.md"), "utf8"), markdown("ambiguous", "disabled"));
+});
+
+test("same name can be imported into global and project scopes independently", async (t) => {
+  const root = await createTempDir("cpwb-skill-scope-isolation-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const projectPath = join(root, "project");
+  await mkdir(projectPath, { recursive: true });
+  const manager = createSkillManager({ dshHome, repos: projectRepos(projectPath) });
+  const globalItem = await manager.importArchive({ scope: "global", archiveBytes: archive("same-skill", "global"), sourceName: "global.zip" });
+  const projectItem = await manager.importArchive({ scope: "project", projectId: 7, archiveBytes: archive("same-skill", "project"), sourceName: "project.zip" });
+  assert.equal(globalItem.state, "enabled");
+  assert.equal(projectItem.state, "enabled");
+  assert.equal(await readFile(join(dshHome, "skills", "same-skill", "SKILL.md"), "utf8").then(Boolean), true);
+  assert.equal(await readFile(join(projectPath, ".dsh", "skills", "same-skill", "SKILL.md"), "utf8").then(Boolean), true);
+  assert.equal((await manager.list({ scope: "project", projectId: 7 })).items[0].shadowsGlobal, true);
+});
+
+test("reveal opens the exact enabled skill path", async (t) => {
+  const root = await createTempDir("cpwb-skill-reveal-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const revealed = [];
+  const manager = createSkillManager({
+    dshHome,
+    repos: projectRepos(root),
+    revealPath: async (path) => revealed.push(path),
+  });
+  await manager.importArchive({ scope: "global", archiveBytes: archive("reveal-me", "reveal"), sourceName: "reveal.zip" });
+  await manager.reveal({ scope: "global", name: "reveal-me" });
+  assert.deepEqual(revealed, [join(dshHome, "skills", "reveal-me")]);
+});
+
+test("import preserves binary skill resources byte-for-byte", async (t) => {
+  const root = await createTempDir("cpwb-skill-binary-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const bytes = Uint8Array.from([0, 255, 1, 128, 34, 10]);
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  await manager.importArchive({
+    scope: "global",
+    archiveBytes: zipSync({ "SKILL.md": strToU8(markdown("binary-skill")), "assets/data.bin": bytes }),
+    sourceName: "binary.zip",
+  });
+  assert.deepEqual(
+    await readFile(join(dshHome, "skills", "binary-skill", "assets", "data.bin")),
+    Buffer.from(bytes),
+  );
+});
+
+test("mutation write failures map to a safe permission error", async (t) => {
+  const root = await createTempDir("cpwb-skill-mutation-permission-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const manager = createSkillManager({
+    dshHome,
+    repos: projectRepos(root),
+    fileOps: {
+      mkdir: async () => {
+        const error = new Error("secret /private/path");
+        error.code = "EACCES";
+        throw error;
+      },
+    },
+  });
+  const error = await assert.rejects(
+    () => manager.importArchive({ scope: "global", archiveBytes: archive("permission-me"), sourceName: "permission.zip" }),
+    (candidate) => candidate.code === SKILL_ERROR_CODES.PERMISSION_DENIED
+      && !JSON.stringify(candidate.details ?? {}).includes("/private/path"),
+  );
+  assert.equal(error, undefined);
+});
+
+test("import refuses a project skills path with a symlinked ancestor", async (t) => {
+  const root = await createTempDir("cpwb-skill-root-link-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const projectPath = join(root, "project");
+  const outside = join(root, "outside");
+  await mkdir(projectPath, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await symlink(outside, join(projectPath, ".dsh"));
+  const manager = createSkillManager({ dshHome, repos: projectRepos(projectPath) });
+  await assert.rejects(
+    () => manager.importArchive({ scope: "project", projectId: 7, archiveBytes: archive("linked-root"), sourceName: "linked.zip" }),
+    (error) => error.code === SKILL_ERROR_CODES.PERMISSION_DENIED,
+  );
+  await assert.rejects(() => lstat(join(outside, "skills")), { code: "ENOENT" });
+});
+
+test("lifecycle mutations refuse symlinked internal skill directories", async (t) => {
+  const root = await createTempDir("cpwb-skill-internal-link-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  const outside = join(root, "outside");
+  await mkdir(join(skillsRoot, "safe-skill"), { recursive: true });
+  await writeFile(join(skillsRoot, "safe-skill", "SKILL.md"), markdown("safe-skill"));
+  await mkdir(outside, { recursive: true });
+  await symlink(outside, join(skillsRoot, ".disabled"));
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  await assert.rejects(
+    () => manager.setEnabled({ scope: "global", name: "safe-skill", enabled: false }),
+    (error) => error.code === SKILL_ERROR_CODES.PERMISSION_DENIED,
+  );
+  await assert.rejects(() => lstat(join(outside, "safe-skill")), { code: "ENOENT" });
+  assert.equal(await readFile(join(skillsRoot, "safe-skill", "SKILL.md"), "utf8"), markdown("safe-skill"));
 });
