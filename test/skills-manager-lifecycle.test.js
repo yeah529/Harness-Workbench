@@ -152,6 +152,45 @@ test("mounted manager ignores an older same-scope conflict after a newer import 
   await act(async () => { root.unmount(); });
 });
 
+test("mounted manager retains a failed replacement decision for retry", async () => {
+  const document = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { act } = React;
+  const first = deferred();
+  const failedReplace = deferred();
+  const successfulReplace = deferred();
+  const calls = [];
+  const store = storeFor({ global: { status: "ready", data: { rootPath: "/dsh/skills", items: [], diagnostics: [] } } }, (input) => {
+    calls.push(input);
+    if (!input.replace) return first.promise;
+    return calls.filter((call) => call.replace).length === 1 ? failedReplace.promise : successfulReplace.promise;
+  });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () => { root.render(React.createElement(SkillScopeManager, { store, scope: "global" })); });
+  const zip = { name: "same.zip", size: 4 };
+  const input = findNodes(container, (node) => node.tagName === "INPUT" && node.accept)?.[0];
+  assert.ok(input);
+  input.files = [zip];
+  await act(async () => { void invokeProp(input, "onChange", { currentTarget: input }); });
+  await act(async () => { first.reject(Object.assign(new Error("conflict"), { code: "SKILL_CONFLICT", details: { existing: { name: "same-skill", description: "old" }, incoming: { name: "same-skill", description: "new" } } })); });
+  const replaceButton = () => findNodes(container, (node) => node.tagName === "BUTTON" && node.textContent === "确认替换")[0];
+  assert.ok(replaceButton());
+  await act(async () => { void invokeProp(replaceButton(), "onClick", {}); });
+  assert.equal(calls.filter((call) => call.replace).length, 1);
+  await act(async () => { failedReplace.reject(Object.assign(new Error("permission denied"), { code: "SKILL_PERMISSION_DENIED" })); });
+  assert.match(container.textContent, /同名 Skill 已存在/);
+  assert.match(container.textContent, /permission denied/);
+  assert.ok(replaceButton());
+  assert.equal(calls[1].archive, zip);
+  await act(async () => { void invokeProp(replaceButton(), "onClick", {}); });
+  assert.equal(calls.filter((call) => call.replace).length, 2);
+  await act(async () => { successfulReplace.resolve(); });
+  assert.doesNotMatch(container.textContent, /同名 Skill 已存在/);
+  assert.equal(findNodes(container, (node) => node.tagName === "BUTTON" && node.textContent === "确认替换").length, 0);
+  await act(async () => { root.unmount(); });
+});
+
 test("mounted manager closes a delete decision before a project switch", async () => {
   const document = installDom();
   const { createRoot } = await import("react-dom/client");

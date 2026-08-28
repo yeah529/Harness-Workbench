@@ -143,9 +143,11 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   const [deleteTarget, setDeleteTarget] = React.useState(null);
   const [selectedInput, setSelectedInput] = React.useState(null);
   const [localError, setLocalError] = React.useState(null);
+  const [replacePending, setReplacePending] = React.useState(false);
   const activeKeyRef = React.useRef(key);
   const generationRef = React.useRef(0);
   const importRequestRef = React.useRef(0);
+  const replacePendingRef = React.useRef(false);
   const directoryRef = React.useRef(null);
   const zipRef = React.useRef(null);
   activeKeyRef.current = key;
@@ -156,6 +158,8 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     setDeleteTarget(null);
     setSelectedInput(null);
     setLocalError(null);
+    replacePendingRef.current = false;
+    setReplacePending(false);
     return () => { generationRef.current += 1; importRequestRef.current += 1; };
   }, [key]);
   React.useEffect(() => {
@@ -208,6 +212,8 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     const capturedKey = key;
     const capturedGeneration = generationRef.current;
     const capturedRequest = ++importRequestRef.current;
+    replacePendingRef.current = false;
+    setReplacePending(false);
     if (!isCurrent(capturedKey, capturedGeneration, capturedRequest) || rootUnavailable) return;
     setConflict(null);
     setSelectedInput(null);
@@ -224,6 +230,8 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   const chooseZip = (event) => {
     const input = event.currentTarget;
     const capturedRequest = ++importRequestRef.current;
+    replacePendingRef.current = false;
+    setReplacePending(false);
     setConflict(null);
     setSelectedInput(null);
     const file = input.files?.[0];
@@ -232,14 +240,27 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   const replace = () => {
     const selected = selectedInput;
     if (!selected || selected.key !== key || selected.request !== importRequestRef.current || !isCurrent(selected.key, selected.generation, selected.request)) return;
-    const capturedRequest = ++importRequestRef.current;
+    if (replacePendingRef.current) return;
+    const capturedRequest = selected.request;
+    replacePendingRef.current = true;
+    setReplacePending(true);
     setLocalError(null);
-    store.actions.importSkill({ ...selected.target, archive: selected.archive, sourceName: selected.sourceName, replace: true })
+    Promise.resolve().then(() => store.actions.importSkill({ ...selected.target, archive: selected.archive, sourceName: selected.sourceName, replace: true }))
       .then(() => {
-        if (isCurrent(selected.key, selected.generation, capturedRequest)) { setConflict(null); setSelectedInput(null); }
+        if (isCurrent(selected.key, selected.generation, capturedRequest)) {
+          setConflict(null);
+          setSelectedInput(null);
+          setLocalError(null);
+          replacePendingRef.current = false;
+          setReplacePending(false);
+        }
       })
       .catch((error) => {
-        if (isCurrent(selected.key, selected.generation, capturedRequest)) setLocalError(errorMessage(error) || "Skill 替换失败，请重试。");
+        if (isCurrent(selected.key, selected.generation, capturedRequest)) {
+          setLocalError(errorMessage(error) || "Skill 替换失败，请重试。");
+          replacePendingRef.current = false;
+          setReplacePending(false);
+        }
       });
   };
   const data = catalog.data;
@@ -264,7 +285,14 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
     currentAction && (currentAction.status === "running" || currentAction.status === "done") ? h("div", { className: "cpwb-skills-action-status", role: "status", "aria-live": "polite" }, actionLabel(currentAction)) : null,
     actionError ? h("div", { className: "cpwb-skills-action-error", role: "alert" }, errorMessage(actionError)) : null,
     localError ? h("div", { className: "cpwb-skills-action-error", role: "alert" }, localError) : null,
-    conflict && conflict.key === key && conflict.request === importRequestRef.current ? h(SkillConflictDialog, { existing: conflict.existing, incoming: conflict.incoming, busy: currentAction?.status === "running", onCancel: () => { setConflict(null); setSelectedInput(null); }, onReplace: replace }) : null,
+    conflict && conflict.key === key && conflict.request === importRequestRef.current ? h(SkillConflictDialog, { existing: conflict.existing, incoming: conflict.incoming, busy: replacePending || currentAction?.status === "running", onCancel: () => {
+      importRequestRef.current += 1;
+      replacePendingRef.current = false;
+      setReplacePending(false);
+      setConflict(null);
+      setSelectedInput(null);
+      setLocalError(null);
+    }, onReplace: replace }) : null,
     deleteTarget && deleteTarget.key === key ? h(SkillDeleteDialog, { item: deleteTarget.item, scope: deleteTarget.target.scope, busy: currentAction?.status === "running", onCancel: () => setDeleteTarget(null), onConfirm: () => {
       const captured = deleteTarget;
       if (!isCurrent(captured.key, captured.generation)) return;
