@@ -13,7 +13,7 @@
  *   { phase, projects, knowledgeBases, documents, health, error,
  *     activeProjectId, activeKnowledgeBaseId, linkedKnowledgeBases,
  *     todos, schedules, summaries, citations, action,
- *     draft, workbenchSessions, contextBySession }
+ *     draft, workbenchSessions, contextBySession, skillCatalogs, skillAction }
  *
  * refresh() aborts any prior refresh and fetches health / projects /
  * knowledgeBases / documents in parallel. refreshProject(projectId, today)
@@ -35,11 +35,32 @@ export function localDateKey(date = new Date()) {
   return y + "-" + m + "-" + d;
 }
 
-function toError(err) {
+function toError(err, { includeDetails = false } = {}) {
   if (err && typeof err.code === "string") {
-    return { code: err.code, message: err && typeof err.message === "string" ? err.message : String(err) };
+    return {
+      code: err.code,
+      message: err && typeof err.message === "string" ? err.message : String(err),
+      ...(includeDetails && err.details !== undefined ? { details: err.details } : {}),
+    };
   }
-  return { code: "UNKNOWN", message: err && typeof err.message === "string" ? err.message : String(err) };
+  return {
+    code: "UNKNOWN",
+    message: err && typeof err.message === "string" ? err.message : String(err),
+    ...(includeDetails && err?.details !== undefined ? { details: err.details } : {}),
+  };
+}
+
+function normalizeSkillTarget(input = {}) {
+  if (input.scope === "global") return { scope: "global", key: "global", request: { scope: "global" } };
+  if (input.scope === "project" && Number.isSafeInteger(input.projectId) && input.projectId > 0) {
+    return {
+      scope: "project",
+      projectId: input.projectId,
+      key: "project:" + input.projectId,
+      request: { scope: "project", projectId: input.projectId },
+    };
+  }
+  throw new TypeError("skill scope must be global or project with a positive projectId");
 }
 
 function isAborted(err, ac) {
@@ -126,6 +147,8 @@ export function createWorkbenchStore(api) {
     globalSchedules: [],
     linkedProjects: [],
     maintenanceJob: null,
+    skillCatalogs: {},
+    skillAction: null,
   };
 
   const listeners = new Set();
@@ -139,6 +162,9 @@ export function createWorkbenchStore(api) {
   let refreshAbort = null;
   let projectSeq = 0;
   let projectAbort = null;
+  const skillLoadSeq = new Map();
+  const skillLoads = new Map();
+  let skillActionSeq = 0;
 
   function setState(patch) {
     state = { ...state, ...patch };
@@ -346,6 +372,68 @@ export function createWorkbenchStore(api) {
     return next;
   }
 
+  function updateSkillCatalog(key, patch) {
+    const previous = state.skillCatalogs[key] || { status: "loading", data: null, error: null };
+    setState({
+      skillCatalogs: {
+        ...state.skillCatalogs,
+        [key]: { ...previous, ...patch },
+      },
+    });
+  }
+
+  async function loadSkills(input = {}, { throwOnError = false } = {}) {
+    if (disposed) return undefined;
+    const target = normalizeSkillTarget(input);
+    const key = target.key;
+    const previous = state.skillCatalogs[key] || { status: "loading", data: null, error: null };
+    const seq = (skillLoadSeq.get(key) || 0) + 1;
+    skillLoadSeq.set(key, seq);
+    const prior = skillLoads.get(key);
+    if (prior) prior.abort();
+    const ac = track(new AbortController());
+    skillLoads.set(key, ac);
+    updateSkillCatalog(key, { status: "loading", data: previous.data ?? null, error: null });
+    try {
+      const data = await api.skills.list({ ...target.request, signal: ac.signal });
+      if (disposed || skillLoadSeq.get(key) !== seq) return data;
+      updateSkillCatalog(key, { status: "ready", data, error: null });
+      return data;
+    } catch (err) {
+      if (disposed || skillLoadSeq.get(key) !== seq || isAborted(err, ac)) return undefined;
+      updateSkillCatalog(key, { status: "error", data: previous.data ?? null, error: toError(err, { includeDetails: true }) });
+      if (throwOnError) throw err;
+      return undefined;
+    } finally {
+      untrack(ac);
+      if (skillLoads.get(key) === ac) skillLoads.delete(key);
+    }
+  }
+
+  function updateSkillAction(mySeq, action) {
+    if (!disposed && mySeq === skillActionSeq) setState({ skillAction: action });
+  }
+
+  async function runSkillMutation(type, input, invoke, { reload = true } = {}) {
+    const target = normalizeSkillTarget(input);
+    const key = target.key;
+    const name = input.name;
+    const mySeq = ++skillActionSeq;
+    updateSkillAction(mySeq, { type, key, name, status: "running", error: null });
+    const ac = track(new AbortController());
+    try {
+      const result = await invoke({ ...target.request, signal: ac.signal });
+      if (!disposed && reload) await loadSkills(target.request, { throwOnError: true });
+      updateSkillAction(mySeq, { type, key, name, status: "done", error: null, result });
+      return result;
+    } catch (err) {
+      updateSkillAction(mySeq, { type, key, name, status: "error", error: toError(err, { includeDetails: true }) });
+      throw err;
+    } finally {
+      untrack(ac);
+    }
+  }
+
   function projectIdFor(collection, id) {
     const arr = state[collection];
     if (Array.isArray(arr)) {
@@ -378,6 +466,59 @@ export function createWorkbenchStore(api) {
     refreshProject,
     refreshDocuments,
     loadSettings,
+    loadSkills,
+
+    importSkill: async function importSkill(input = {}) {
+      return runSkillMutation(
+        "importSkill",
+        input,
+        ({ scope, projectId, signal }) => api.skills.importBundle({
+          archive: input.archive,
+          scope,
+          ...(projectId === undefined ? {} : { projectId }),
+          sourceName: input.sourceName,
+          replace: input.replace === true,
+        }, { signal }),
+      );
+    },
+
+    setSkillEnabled: async function setSkillEnabled(input = {}) {
+      return runSkillMutation(
+        "setSkillEnabled",
+        input,
+        ({ scope, projectId, signal }) => api.skills.setEnabled({
+          name: input.name,
+          scope,
+          ...(projectId === undefined ? {} : { projectId }),
+          enabled: input.enabled === true,
+        }, { signal }),
+      );
+    },
+
+    deleteSkill: async function deleteSkill(input = {}) {
+      return runSkillMutation(
+        "deleteSkill",
+        input,
+        ({ scope, projectId, signal }) => api.skills.remove({
+          name: input.name,
+          scope,
+          ...(projectId === undefined ? {} : { projectId }),
+        }, { signal }),
+      );
+    },
+
+    revealSkill: async function revealSkill(input = {}) {
+      return runSkillMutation(
+        "revealSkill",
+        input,
+        ({ scope, projectId, signal }) => api.skills.reveal({
+          name: input.name,
+          scope,
+          ...(projectId === undefined ? {} : { projectId }),
+        }, { signal }),
+        { reload: false },
+      );
+    },
 
     startContainerPurge: async function startContainerPurge(input) {
       if (typeof api.maintenance?.createPurgeJob !== "function") {
@@ -1020,6 +1161,7 @@ export function createWorkbenchStore(api) {
 
   function dispose() {
     disposed = true;
+    for (const ac of skillLoads.values()) ac.abort();
     for (const ac of controllers) ac.abort();
     controllers.clear();
     listeners.clear();

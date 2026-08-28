@@ -797,6 +797,154 @@ test("api: cpwbApi is a ready singleton", () => {
 
 // ---------------------------------------------------------------- store
 
+function skillCatalog(scope, projectId, suffix = "") {
+  return {
+    scope: scope === "global" ? { kind: "global" } : { kind: "project", projectId },
+    rootPath: scope === "global" ? "/dsh/skills" : "/project/.dsh/skills",
+    items: [{ name: "demo" + suffix, state: "enabled" }],
+    diagnostics: [],
+  };
+}
+
+test("store keeps independent global and project skill catalogs", async () => {
+  const calls = [];
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: {
+      async list(input) {
+        const { signal, ...request } = input;
+        calls.push(["list", request]);
+        return skillCatalog(input.scope, input.projectId);
+      },
+      async setEnabled(input) { calls.push(["setEnabled", input]); return { name: input.name, state: input.enabled ? "enabled" : "disabled" }; },
+      async remove(input) { calls.push(["remove", input]); return { removed: true }; },
+      async reveal(input) { calls.push(["reveal", input]); return { revealed: true }; },
+    },
+  };
+  const store = createWorkbenchStore(api);
+  await store.actions.loadSkills({ scope: "global" });
+  await store.actions.loadSkills({ scope: "project", projectId: 7 });
+  assert.equal(store.getSnapshot().skillCatalogs.global.status, "ready");
+  assert.equal(store.getSnapshot().skillCatalogs.global.data.rootPath, "/dsh/skills");
+  assert.equal(store.getSnapshot().skillCatalogs["project:7"].data.rootPath, "/project/.dsh/skills");
+  await store.actions.setSkillEnabled({ scope: "project", projectId: 7, name: "x", enabled: false });
+  assert.deepEqual(calls.at(-1), ["list", { scope: "project", projectId: 7 }]);
+  assert.equal(store.getSnapshot().action, null);
+});
+
+test("store makes same-key skill loads last-response-wins and keeps different keys independent", async () => {
+  const pending = [];
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: { list(input) {
+      return new Promise((resolve, reject) => { pending.push({ input, signal: input.signal, resolve, reject }); });
+    } },
+  };
+  const store = createWorkbenchStore(api);
+  const first = store.actions.loadSkills({ scope: "global" });
+  const second = store.actions.loadSkills({ scope: "global" });
+  const project = store.actions.loadSkills({ scope: "project", projectId: 3 });
+  assert.equal(pending.length, 3);
+  assert.equal(pending[0].signal.aborted, true);
+  pending[0].resolve(skillCatalog("global", null, "-old"));
+  pending[1].resolve(skillCatalog("global", null, "-new"));
+  pending[2].resolve(skillCatalog("project", 3, "-project"));
+  await Promise.all([first, second, project]);
+  assert.equal(store.getSnapshot().skillCatalogs.global.data.items[0].name, "demo-new");
+  assert.equal(store.getSnapshot().skillCatalogs["project:3"].data.items[0].name, "demo-project");
+  assert.equal(store.getSnapshot().skillCatalogs.global.data.items[0].name, "demo-new");
+});
+
+test("store retains last successful skill data on load error without touching general error", async () => {
+  let fail = false;
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: { list: async () => {
+      if (fail) throw Object.assign(new Error("读取失败"), { code: "SKILL_PERMISSION_DENIED", details: { scope: "global" } });
+      return skillCatalog("global");
+    } },
+  };
+  const store = createWorkbenchStore(api);
+  await store.actions.loadSkills({ scope: "global" });
+  const previous = store.getSnapshot().skillCatalogs.global.data;
+  fail = true;
+  await store.actions.loadSkills({ scope: "global" });
+  const slot = store.getSnapshot().skillCatalogs.global;
+  assert.equal(slot.status, "error");
+  assert.strictEqual(slot.data, previous);
+  assert.equal(slot.error.code, "SKILL_PERMISSION_DENIED");
+  assert.equal(store.getSnapshot().error, null);
+});
+
+test("store skill mutations reload exactly the affected key and preserve conflict details", async () => {
+  const calls = [];
+  const conflict = Object.assign(new Error("同名"), {
+    code: "SKILL_CONFLICT",
+    details: { existing: { name: "x" }, incoming: { name: "x" } },
+  });
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: {
+      list: async (input) => { calls.push(["list", input]); return skillCatalog(input.scope, input.projectId); },
+      importBundle: async (input) => { calls.push(["importBundle", input]); throw conflict; },
+      setEnabled: async (input) => { calls.push(["setEnabled", input]); return { ok: true }; },
+      remove: async (input) => { calls.push(["remove", input]); return { removed: true }; },
+      reveal: async (input) => { calls.push(["reveal", input]); return { revealed: true }; },
+    },
+  };
+  const store = createWorkbenchStore(api);
+  await assert.rejects(() => store.actions.importSkill({ scope: "global", archive: new Blob(), sourceName: "x.zip" }), /同名/);
+  assert.equal(store.getSnapshot().skillAction.type, "importSkill");
+  assert.equal(store.getSnapshot().skillAction.status, "error");
+  assert.deepEqual(store.getSnapshot().skillAction.error.details, conflict.details);
+  assert.notEqual(store.getSnapshot().action?.type, "importSkill");
+
+  calls.length = 0;
+  await store.actions.setSkillEnabled({ scope: "project", projectId: 7, name: "x", enabled: false });
+  assert.deepEqual(calls.map(([type, input]) => [type, input.scope, input.projectId]), [
+    ["setEnabled", "project", 7], ["list", "project", 7],
+  ]);
+  calls.length = 0;
+  await store.actions.deleteSkill({ scope: "global", name: "x" });
+  assert.deepEqual(calls.map(([type, input]) => [type, input.scope, input.projectId]), [
+    ["remove", "global", undefined], ["list", "global", undefined],
+  ]);
+  calls.length = 0;
+  await store.actions.revealSkill({ scope: "project", projectId: 7, name: "x" });
+  assert.deepEqual(calls.map(([type]) => type), ["reveal"]);
+});
+
+test("store skill actions validate scope and dispose aborts in-flight skill load", async () => {
+  let request;
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: { list: async (input) => new Promise((resolve) => { request = { resolve, signal: input.signal }; }) },
+  };
+  const store = createWorkbenchStore(api);
+  await assert.rejects(() => store.actions.loadSkills({ scope: "project", projectId: 0 }), /project/i);
+  const loading = store.actions.loadSkills({ scope: "global" });
+  store.dispose();
+  assert.equal(request.signal.aborted, true);
+  request.resolve(skillCatalog("global"));
+  await loading;
+  assert.equal(store.getSnapshot().skillCatalogs.global.status, "loading");
+});
+
+test("store reports an authoritative reload failure after a successful skill mutation", async () => {
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: {
+      setEnabled: async () => ({ ok: true }),
+      list: async () => { throw Object.assign(new Error("刷新失败"), { code: "SKILL_PERMISSION_DENIED" }); },
+    },
+  };
+  const store = createWorkbenchStore(api);
+  await assert.rejects(() => store.actions.setSkillEnabled({ scope: "global", name: "demo", enabled: false }), /刷新失败/);
+  assert.equal(store.getSnapshot().skillAction.status, "error");
+  assert.equal(store.getSnapshot().skillAction.error.code, "SKILL_PERMISSION_DENIED");
+  assert.equal(store.getSnapshot().skillCatalogs.global.status, "error");
+});
+
 /** Build a mock fetch that serves a full refresh + project refresh. */
 function scenarioFetch(overrides = {}) {
   let failLeft = overrides.failOnce ? 1 : 0;
