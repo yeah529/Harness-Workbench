@@ -12,6 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
+import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -393,6 +394,39 @@ test("real HTTP Skill upload keeps a 413 response when streamed body overflows",
   }, body);
   assert.equal(response.statusCode, 413);
   assert.equal(JSON.parse(response.body).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+});
+
+test("oversized declared uploads absorb a disconnect while draining", async (t) => {
+  const { api } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
+  class DisconnectingRequest extends EventEmitter {
+    method = "POST";
+    url = "/api/cpwb/skills/import";
+    headers = {
+      "content-type": "application/zip",
+      "content-length": String(50 * 1024 * 1024 + 1),
+      "x-cpwb-skill-scope": "global",
+      "x-cpwb-filename": "large.zip",
+    };
+    resume() {
+      this.emit("error", new Error("client disconnected while draining"));
+    }
+  }
+  const request = new DisconnectingRequest();
+  let status;
+  let body;
+  const response = {
+    headersSent: false,
+    writeHead(nextStatus) { status = nextStatus; this.headersSent = true; },
+    end(value = "") { body = Buffer.from(String(value)); },
+    destroy() { throw new Error("response must not be destroyed"); },
+  };
+  await api.handler(request, response);
+  assert.equal(status, 413);
+  assert.equal(JSON.parse(body).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+  assert.equal(request.listenerCount("error"), 0);
+  assert.equal(request.listenerCount("end"), 0);
+  assert.equal(request.listenerCount("aborted"), 0);
+  t.after(() => request.removeAllListeners());
 });
 
 test("skill manager errors map to stable responses without filesystem path leakage", async (t) => {

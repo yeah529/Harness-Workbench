@@ -380,26 +380,45 @@ async function readJsonBody(req) {
   }
 }
 
+function discardRequestBody(req) {
+  if (req.readableEnded || req.destroyed) return;
+  let active = true;
+  const cleanup = () => {
+    if (!active) return;
+    active = false;
+    req.off?.("error", onError);
+    req.off?.("end", cleanup);
+    req.off?.("aborted", cleanup);
+  };
+  const onError = () => cleanup();
+  req.once?.("error", onError);
+  req.once?.("end", cleanup);
+  req.once?.("aborted", cleanup);
+  try {
+    req.resume?.();
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
 /** Read a raw ZIP request body without buffering beyond the compressed limit. */
 async function readRawBody(req, limit = SKILL_PACKAGE_LIMITS.archiveBytes) {
   const declared = req.headers["content-length"];
   if (declared != null && /^\d+$/.test(String(declared)) && Number(declared) > limit) {
-    req.resume?.();
+    discardRequestBody(req);
     throw new ApiError(413, SKILL_ERROR_CODES.ARCHIVE_TOO_LARGE, "Skill ZIP exceeds the byte limit");
   }
   return new Promise((resolvePromise, rejectPromise) => {
     const chunks = [];
     let total = 0;
     let settled = false;
-    const noop = () => {};
     const discard = () => {
       // Keep the socket alive for the response while discarding the rest of
-      // an oversized request. The one-shot error listener prevents a late
-      // client abort from becoming an uncaught stream error.
-      req.once?.("error", noop);
-      // Do not change stream mode from inside a data callback: Node can
-      // re-enter the stream machinery while the callback is still unwinding.
-      setImmediate(() => req.resume?.());
+      // an oversized request. Defer the mode switch until data unwinds.
+      setImmediate(() => {
+        try { discardRequestBody(req); } catch { /* the request is already ending */ }
+      });
     };
     const cleanup = () => {
       req.off?.("data", onData);
