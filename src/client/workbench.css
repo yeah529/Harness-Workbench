@@ -578,6 +578,7 @@ body:has(.cpwb-workbench-overlay) [data-slot="sidebar"] > *:not([data-slot="side
 .cpwb-skills-title > svg { flex: 0 0 auto; margin-top: 3px; color: var(--cpwb-cyan); }
 .cpwb-skills-title span, .cpwb-skills-project-select > span, .cpwb-skills-conflict-grid > div > span { color: var(--cpwb-cyan); font: 650 8px/1.25 var(--cpwb-code); letter-spacing: .18em; text-transform: uppercase; }
 .cpwb-skills-title h1 { margin: 7px 0 4px; font-size: clamp(24px, 3vw, 38px); letter-spacing: -.02em; }
+.cpwb-skills-title h1 .cpwb-skills-title-alias { display: inline-block; margin-left: .35em; padding-left: .55em; color: var(--cpwb-cyan); border-left: 1px solid rgba(77,232,244,.35); font: inherit; font-size: .48em; font-weight: 650; letter-spacing: .08em; text-transform: none; vertical-align: .16em; }
 .cpwb-skills-title p { margin: 0; color: var(--cpwb-muted); font-size: 11px; }
 .cpwb-skills-count { color: var(--cpwb-amber); font: 700 27px/1 var(--cpwb-code); }
 .cpwb-skills-tabs { display: flex; min-height: 42px; margin-top: 24px; border-bottom: 1px solid var(--cpwb-border); }

@@ -282,7 +282,7 @@ test("skills navigation is mutually exclusive and sidebar entry sits above setti
   assert.ok(html.indexOf(">Skills<") < html.indexOf(">设置<"));
 });
 
-test("SkillsPage defaults to global scope and exposes directory plus ZIP import", () => {
+test("SkillsPage presents Skills with the 技能矩阵 alias and defaults to global scope", () => {
   const state = {
     projects: [{ id: 7, name: "Research" }],
     skillCatalogs: { global: { status: "ready", data: { scope: { kind: "global" }, rootPath: "/dsh/skills", items: [], diagnostics: [] }, error: null } },
@@ -290,7 +290,9 @@ test("SkillsPage defaults to global scope and exposes directory plus ZIP import"
   };
   const store = { subscribe: () => () => {}, getSnapshot: () => state, actions: { loadSkills: async () => {} } };
   const html = renderToStaticMarkup(React.createElement(SkillsPage, { store }));
-  assert.match(html, /SKILL MANAGEMENT/);
+  assert.match(html, /SKILL MATRIX/);
+  assert.match(html, /<h1>Skills <span class="cpwb-skills-title-alias">技能矩阵<\/span><\/h1>/);
+  assert.match(html, /为 Workbench 装载可复用能力，在全局或当前项目生效。/);
   assert.match(html, /role="tab" aria-selected="true"[^>]*>全局/);
   assert.match(html, /\/dsh\/skills/);
   assert.match(html, /导入目录/);

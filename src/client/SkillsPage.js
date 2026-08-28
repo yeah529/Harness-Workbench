@@ -15,7 +15,7 @@ export function SkillsPage({ store }) {
   }, [scope, projectId, projects]);
   return h("main", { className: "cpwb-skills-page" },
     h("div", { className: "cpwb-skills-layout" },
-      h("header", { className: "cpwb-skills-header" }, h("div", { className: "cpwb-skills-title" }, h(Sparkle, { size: 19, "aria-hidden": true }), h("div", null, h("span", null, "SKILL MANAGEMENT"), h("h1", null, "管理 Workbench Skill"), h("p", null, "从本机目录维护全局与项目级 Skill。"))), h("span", { className: "cpwb-skills-count" }, String(skillCatalogCount(state, scope, projectId)).padStart(2, "0"))),
+      h("header", { className: "cpwb-skills-header" }, h("div", { className: "cpwb-skills-title" }, h(Sparkle, { size: 19, "aria-hidden": true }), h("div", null, h("span", null, "SKILL MATRIX"), h("h1", null, "Skills ", h("span", { className: "cpwb-skills-title-alias" }, "技能矩阵")), h("p", null, "为 Workbench 装载可复用能力，在全局或当前项目生效。"))), h("span", { className: "cpwb-skills-count" }, String(skillCatalogCount(state, scope, projectId)).padStart(2, "0"))),
       h("div", { className: "cpwb-skills-tabs", role: "tablist", "aria-label": "Skill 作用域" },
         h("button", { type: "button", role: "tab", "aria-selected": scope === "global", className: scope === "global" ? "cpwb-active" : "", onClick: () => setScope("global") }, "全局"),
         h("button", { type: "button", role: "tab", "aria-selected": scope === "project", className: scope === "project" ? "cpwb-active" : "", onClick: () => setScope("project") }, "项目")),
