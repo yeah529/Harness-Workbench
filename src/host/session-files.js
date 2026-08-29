@@ -72,8 +72,10 @@ export function createSessionFileVault({ dataDir, repos }) {
   }
   const vaultDataDir = join(dataDir, "session-vault");
   const objectPath = (sha256) => join(vaultDataDir, "files", sha256);
+  // ponytail: serialize uploads; add staged hash reservations only if measured throughput requires it.
+  let uploadTail = Promise.resolve();
 
-  async function upload({ sessionId, stream, originalName }) {
+  async function uploadOne({ sessionId, stream, originalName }) {
     if (!repos.workbenchSessions.get(sessionId)) {
       throw new SessionFileError(
         SESSION_FILE_ERROR_CODES.SESSION_NOT_FOUND,
@@ -107,17 +109,36 @@ export function createSessionFileVault({ dataDir, repos }) {
       parseError = error instanceof Error ? error.message : String(error);
     }
 
-    return repos.sessionFiles.create({
-      sessionId,
-      sha256: saved.sha256,
-      originalName: saved.originalName,
-      mimeType: saved.mimeType,
-      size: saved.size,
-      parseStatus,
-      parseError,
-      contextText,
-      contextCodePoints,
-    });
+    try {
+      return repos.sessionFiles.create({
+        sessionId,
+        sha256: saved.sha256,
+        originalName: saved.originalName,
+        mimeType: saved.mimeType,
+        size: saved.size,
+        parseStatus,
+        parseError,
+        contextText,
+        contextCodePoints,
+      });
+    } catch (error) {
+      if (repos.sessionFiles.countBySha256(saved.sha256) === 0) {
+        await rm(objectPath(saved.sha256), { force: true });
+      }
+      if (repos.sessionFiles.getBySessionAndName(sessionId, saved.originalName)) {
+        throw new SessionFileError(
+          SESSION_FILE_ERROR_CODES.DUPLICATE_NAME,
+          "a session file with this name already exists: " + saved.originalName,
+        );
+      }
+      throw error;
+    }
+  }
+
+  function upload(input) {
+    const result = uploadTail.then(() => uploadOne(input));
+    uploadTail = result.catch(() => {});
+    return result;
   }
 
   function list(sessionId) {

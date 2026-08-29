@@ -278,6 +278,21 @@ function upsertIndexMetadataCore(db, {
  * @param {import("node:sqlite").DatabaseSync} db
  */
 export function createRepositories(db) {
+  function orphanSessionFilesForSessions(sessionIds) {
+    const targets = new Set(sessionIds);
+    if (targets.size === 0) return [];
+    const ownership = new Map();
+    for (const row of db.prepare("SELECT session_id, sha256 FROM session_files ORDER BY sha256").all()) {
+      const state = ownership.get(row.sha256) ?? { hasTarget: false, hasOutside: false };
+      if (targets.has(row.session_id)) state.hasTarget = true;
+      else state.hasOutside = true;
+      ownership.set(row.sha256, state);
+    }
+    return [...ownership]
+      .filter(([, state]) => state.hasTarget && !state.hasOutside)
+      .map(([sha256]) => ({ sha256 }));
+  }
+
   const projects = {
     create({ name, path = null, workspaceId = null, now = new Date() }) {
       const iso = nowIso(now);
@@ -322,10 +337,11 @@ export function createRepositories(db) {
       const sessionIds = db.prepare(
         "SELECT session_id FROM workbench_sessions WHERE scope_kind = 'project' AND scope_id = ? ORDER BY session_id",
       ).all(id).map((row) => row.session_id);
+      const orphanSessionFiles = orphanSessionFilesForSessions(sessionIds);
       const relationshipCount = Number(db.prepare(
         "SELECT COUNT(*) AS n FROM project_knowledge_bases WHERE project_id = ?",
       ).get(id).n);
-      return { project, linkedDocuments, orphanDocuments, sessionIds, relationshipCount };
+      return { project, linkedDocuments, orphanDocuments, orphanSessionFiles, sessionIds, relationshipCount };
     },
 
     removeContainer(id) {
@@ -577,10 +593,11 @@ export function createRepositories(db) {
       const sessionIds = db.prepare(
         "SELECT session_id FROM workbench_sessions WHERE scope_kind = 'knowledge_base' AND scope_id = ? ORDER BY session_id",
       ).all(id).map((row) => row.session_id);
+      const orphanSessionFiles = orphanSessionFilesForSessions(sessionIds);
       const relationshipCount = Number(db.prepare(
         "SELECT COUNT(*) AS n FROM project_knowledge_bases WHERE knowledge_base_id = ?",
       ).get(id).n);
-      return { knowledgeBase, linkedDocuments, orphanDocuments, sessionIds, relationshipCount };
+      return { knowledgeBase, linkedDocuments, orphanDocuments, orphanSessionFiles, sessionIds, relationshipCount };
     },
 
     removeContainer(id) {
@@ -1283,6 +1300,7 @@ export function createRepositories(db) {
       id,
       expectedSessionIds,
       expectedOrphanDocumentIds,
+      expectedSessionFileHashes,
     }) {
       if (kind !== "project" && kind !== "knowledge_base") {
         throw new TypeError("maintenance purge requires a project or knowledge base");
@@ -1304,6 +1322,10 @@ export function createRepositories(db) {
         expectedOrphanDocumentIds,
         "expectedOrphanDocumentIds",
       );
+      const expectedFiles = normalizeIds(
+        expectedSessionFileHashes,
+        "expectedSessionFileHashes",
+      );
 
       return transaction(db, () => {
         const repository = kind === "project" ? projects : knowledgeBases;
@@ -1314,9 +1336,14 @@ export function createRepositories(db) {
           plan.orphanDocuments.map((document) => document.id),
           "current orphan document ids",
         );
+        const currentFiles = normalizeIds(
+          plan.orphanSessionFiles.map((file) => file.sha256),
+          "current session file hashes",
+        );
         if (
           JSON.stringify(currentSessions) !== JSON.stringify(expectedSessions) ||
-          JSON.stringify(currentDocuments) !== JSON.stringify(expectedDocuments)
+          JSON.stringify(currentDocuments) !== JSON.stringify(expectedDocuments) ||
+          JSON.stringify(currentFiles) !== JSON.stringify(expectedFiles)
         ) {
           throw new Error("stale purge plan: container graph changed after confirmation");
         }

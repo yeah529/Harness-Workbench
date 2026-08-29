@@ -47,6 +47,7 @@ async function makeRc2Fixture(t, options = {}) {
   await mkdir(join(dshHome, "storages"), { recursive: true });
   await mkdir(join(dshHome, "sessions"), { recursive: true });
   await mkdir(join(dataDir, "files"), { recursive: true });
+  await mkdir(join(dataDir, "session-vault", "files"), { recursive: true });
   await mkdir(join(dataDir, "vectors", "chunks.lance"), { recursive: true });
 
   const workspace = {
@@ -100,6 +101,7 @@ async function makeRc2Fixture(t, options = {}) {
   await writeFile(join(dataDir, "workbench.sqlite-wal"), "wal-before");
   await writeFile(join(dataDir, "vectors", "chunks.lance", "rows.lance"), "vectors-before");
   await writeFile(join(dataDir, "files", "a".repeat(64)), "orphan-before");
+  await writeFile(join(dataDir, "session-vault", "files", "b".repeat(64)), "vault-before");
 
   return {
     root,
@@ -120,6 +122,7 @@ async function createStorageJob(root, jobs, overrides = {}) {
     sessionIds: overrides.sessionIds ?? ["session-parent"],
     descendantSessionIds: overrides.descendantSessionIds ?? ["session-child"],
     orphanDocuments: overrides.orphanDocuments ?? [{ id: 9, sha256: "a".repeat(64) }],
+    orphanSessionFiles: overrides.orphanSessionFiles ?? [{ sha256: "b".repeat(64) }],
     createdAt: "2026-08-25T11:00:00.000Z",
   });
 }
@@ -160,6 +163,7 @@ test("prepare removes only frozen RC.2 sessions and restore reconstructs every l
   assert.deepEqual(workspace.global.archivedSessionIds, ["session-keep"]);
   assert.deepEqual(sessionIds(cache), ["session-keep"]);
   assert.equal(manifest.sessions.length, 2);
+  assert.equal(await pathExists(join(root.dataDir, "session-vault", "files", "b".repeat(64))), false);
 
   await writeFile(join(root.dataDir, "workbench.sqlite"), "sqlite-mutated");
   await writeFile(join(root.dataDir, "vectors", "chunks.lance", "rows.lance"), "vectors-mutated");
@@ -175,6 +179,10 @@ test("prepare removes only frozen RC.2 sessions and restore reconstructs every l
     "vectors-before",
   );
   assert.equal(await readFile(join(root.dataDir, "files", "a".repeat(64)), "utf8"), "orphan-before");
+  assert.equal(
+    await readFile(join(root.dataDir, "session-vault", "files", "b".repeat(64)), "utf8"),
+    "vault-before",
+  );
 });
 
 test("prepare rejects unsafe or ambiguous Session paths before mutation", async (t) => {
@@ -217,6 +225,22 @@ test("prepare rejects symbolic-link Session directories", async (t) => {
   assert.equal(await pathExists(outside), true);
 });
 
+test("prepare rejects a symlinked File Vault object root before moving anything", async (t) => {
+  const root = await makeRc2Fixture(t);
+  const vaultFiles = join(root.dataDir, "session-vault", "files");
+  const outside = join(root.root, "outside-vault");
+  await rm(vaultFiles, { recursive: true, force: true });
+  await mkdir(outside);
+  await writeFile(join(outside, "b".repeat(64)), "outside-vault");
+  await symlink(outside, vaultFiles);
+  const jobs = createPurgeJobStore({ dshHome: root.dshHome });
+  const job = await createStorageJob(root, jobs, { jobId: "purge-vault-symlink" });
+
+  await assert.rejects(prepareRc2Purge({ ...root, job, jobs }), /unsafe/i);
+  assert.equal(await pathExists(root.sessionPath("session-parent")), true);
+  assert.equal(await readFile(join(outside, "b".repeat(64)), "utf8"), "outside-vault");
+});
+
 test("malformed metadata and injected move failures leave live data unchanged", async (t) => {
   const malformed = await makeRc2Fixture(t);
   const malformedJobs = createPurgeJobStore({ dshHome: malformed.dshHome });
@@ -237,7 +261,7 @@ test("malformed metadata and injected move failures leave live data unchanged", 
       job: injectedJob,
       jobs: injectedJobs,
       faultInjector(event) {
-        if (event === "session-moved:1") throw new Error("injected move failure");
+        if (event.startsWith("session-file-moved:")) throw new Error("injected move failure");
       },
     }),
     /injected move failure/,
@@ -245,6 +269,7 @@ test("malformed metadata and injected move failures leave live data unchanged", 
   assert.equal(await pathExists(injected.sessionPath("session-parent")), true);
   assert.equal(await pathExists(injected.sessionPath("session-child")), true);
   assert.equal(await pathExists(join(injected.dataDir, "files", "a".repeat(64))), true);
+  assert.equal(await pathExists(join(injected.dataDir, "session-vault", "files", "b".repeat(64))), true);
 });
 
 test("commit verifies absence before removing backup and quarantine", async (t) => {

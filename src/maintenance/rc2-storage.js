@@ -64,6 +64,15 @@ async function pathExists(path) {
   }
 }
 
+async function assertRealDirectoryIfPresent(path, label) {
+  if (!(await pathExists(path))) return false;
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw purgeError("PURGE_STORAGE_UNSAFE_PATH", `${label} is unsafe`);
+  }
+  return true;
+}
+
 function hash(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -343,7 +352,11 @@ async function restoreFromManifest(manifest, { restoreWorkbench = true } = {}) {
   await restoreFileAtomic(manifest.native.workspace.backupPath, manifest.native.workspace.sourcePath);
   await restoreFileAtomic(manifest.native.projection.backupPath, manifest.native.projection.sourcePath);
   if (restoreWorkbench) await restoreWorkbenchSnapshot(manifest.workbench);
-  for (const entry of [...manifest.orphanFiles, ...manifest.sessions].reverse()) {
+  for (const entry of [
+    ...manifest.orphanFiles,
+    ...(manifest.orphanSessionFiles ?? []),
+    ...manifest.sessions,
+  ].reverse()) {
     await restoreMovedEntry(entry);
   }
 }
@@ -367,6 +380,9 @@ export async function prepareRc2Purge({
     id: document.id,
     sha256: assertSha256(document.sha256),
   }));
+  const orphanSessionFiles = (job?.orphanSessionFiles ?? []).map((file) => ({
+    sha256: assertSha256(file.sha256),
+  }));
   const documents = await readRc2Documents(normalizedHome);
   const sessionDirectories = await locateSessionDirectories(normalizedHome, targetIds);
   const jobRoot = join(jobs.root, job.jobId);
@@ -375,6 +391,7 @@ export async function prepareRc2Purge({
   await mkdir(join(backupRoot, "native"), { recursive: true, mode: 0o700 });
   await mkdir(join(quarantineRoot, "sessions"), { recursive: true, mode: 0o700 });
   await mkdir(join(quarantineRoot, "files"), { recursive: true, mode: 0o700 });
+  await mkdir(join(quarantineRoot, "session-files"), { recursive: true, mode: 0o700 });
 
   const native = {
     workspace: {
@@ -395,6 +412,16 @@ export async function prepareRc2Purge({
     ...entry,
     quarantinePath: join(quarantineRoot, "sessions", entry.cwdKey, entry.sessionId),
   }));
+  if (orphanDocuments.length > 0) {
+    await assertRealDirectoryIfPresent(join(normalizedData, "files"), "document object root");
+  }
+  if (orphanSessionFiles.length > 0) {
+    await assertRealDirectoryIfPresent(join(normalizedData, "session-vault"), "File Vault root");
+    await assertRealDirectoryIfPresent(
+      join(normalizedData, "session-vault", "files"),
+      "File Vault object root",
+    );
+  }
   const orphanFiles = [];
   for (const document of orphanDocuments) {
     const sourcePath = join(normalizedData, "files", document.sha256);
@@ -407,6 +434,20 @@ export async function prepareRc2Purge({
       ...document,
       sourcePath,
       quarantinePath: join(quarantineRoot, "files", document.sha256),
+    });
+  }
+  const orphanVaultFiles = [];
+  for (const file of orphanSessionFiles) {
+    const sourcePath = join(normalizedData, "session-vault", "files", file.sha256);
+    if (!(await pathExists(sourcePath))) continue;
+    const info = await lstat(sourcePath);
+    if (info.isSymbolicLink() || !info.isFile()) {
+      throw purgeError("PURGE_STORAGE_UNSAFE_PATH", `orphan session file path is unsafe: ${file.sha256}`);
+    }
+    orphanVaultFiles.push({
+      ...file,
+      sourcePath,
+      quarantinePath: join(quarantineRoot, "session-files", file.sha256),
     });
   }
   const edited = removeNativeReferences(
@@ -424,6 +465,7 @@ export async function prepareRc2Purge({
     workbench,
     sessions,
     orphanFiles,
+    orphanSessionFiles: orphanVaultFiles,
     fingerprints: {
       workspaceAfter: semanticFingerprint(edited.workspace),
       projectionAfter: semanticFingerprint(edited.projection),
@@ -442,6 +484,11 @@ export async function prepareRc2Purge({
       await movePath(entry.sourcePath, entry.quarantinePath);
       moved.push(entry);
       faultInjector(`orphan-moved:${moved.length}`, entry);
+    }
+    for (const entry of orphanVaultFiles) {
+      await movePath(entry.sourcePath, entry.quarantinePath);
+      moved.push(entry);
+      faultInjector(`session-file-moved:${moved.length}`, entry);
     }
     await writeJsonAtomic(documents.workspaceFile, edited.workspace);
     faultInjector("workspace-written");
@@ -505,6 +552,11 @@ export async function commitRc2Purge({ dshHome, dataDir, jobId, jobs }) {
   for (const entry of manifest.orphanFiles) {
     if (await pathExists(entry.sourcePath)) {
       throw purgeError("PURGE_VERIFY_TARGET_PRESENT", `orphan file still exists: ${entry.sourcePath}`);
+    }
+  }
+  for (const entry of manifest.orphanSessionFiles ?? []) {
+    if (await pathExists(entry.sourcePath)) {
+      throw purgeError("PURGE_VERIFY_TARGET_PRESENT", `orphan session file still exists: ${entry.sourcePath}`);
     }
   }
   await rm(manifest.backupRoot, { recursive: true, force: true });

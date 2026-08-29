@@ -49,6 +49,15 @@ test("supervised host freezes a server-derived purge plan", async (t) => {
     sessionId: "session-parent",
     scope: { kind: "project", id: project.id },
   });
+  fixture.repos.sessionFiles.create({
+    sessionId: "session-parent",
+    sha256: "d".repeat(64),
+    originalName: "brief.md",
+    size: 5,
+    parseStatus: "ready",
+    contextText: "brief",
+    contextCodePoints: 5,
+  });
   const jobs = createPurgeJobStore({ dshHome: fixture.dshHome });
   const service = createMaintenanceService({
     ...fixture,
@@ -66,6 +75,7 @@ test("supervised host freezes a server-derived purge plan", async (t) => {
   const plan = await service.containerPlan("project", project.id);
   assert.deepEqual(plan.sessionIds, ["session-parent"]);
   assert.deepEqual(plan.descendantSessionIds, ["session-child"]);
+  assert.deepEqual(plan.orphanSessionFiles, [{ sha256: "d".repeat(64) }]);
   await assert.rejects(
     () => service.createPurgeJob({
       kind: "project",
@@ -85,6 +95,7 @@ test("supervised host freezes a server-derived purge plan", async (t) => {
   });
   assert.deepEqual(job.sessionIds, ["session-parent"]);
   assert.deepEqual(job.descendantSessionIds, ["session-child"]);
+  assert.deepEqual(job.orphanSessionFiles, [{ sha256: "d".repeat(64) }]);
   assert.equal(job.armed, false);
   assert.equal((await service.armPurgeJob(job.jobId)).armed, true);
 });
@@ -108,6 +119,7 @@ test("supervised startup finalizes exact vectors and Workbench rows before readi
     sessionIds: ["session-parent"],
     descendantSessionIds: ["session-child"],
     orphanDocuments: [{ id: document.id, sha256: document.sha256 }],
+    orphanSessionFiles: [],
     createdAt: "2026-08-25T10:00:00.000Z",
   });
   for (const [from, to] of [
