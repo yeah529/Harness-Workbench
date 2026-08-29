@@ -60,6 +60,54 @@ test("one document links to many projects and knowledge bases", async (t) => {
   assert.deepEqual(repos.documents.listByKnowledgeBase(k1.id).map((d) => d.id), [doc.id]);
 });
 
+test("session files are durable non-vector rows scoped by session and unique by name", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => {
+    closeDatabase(db);
+    await removeTempDir(dataDir);
+  });
+
+  const sessionId = "session-cpwb-file-vault";
+  repos.workbenchSessions.create({
+    sessionId,
+    scope: { kind: "independent", id: null },
+  });
+  const file = repos.sessionFiles.create({
+    sessionId,
+    sha256: "f".repeat(64),
+    originalName: "brief.md",
+    mimeType: "text/markdown",
+    size: 7,
+    parseStatus: "ready",
+    contextText: "# Brief",
+    contextCodePoints: 7,
+    now: "2026-08-29T01:00:00.000Z",
+  });
+
+  assert.equal(file.sessionId, sessionId);
+  assert.equal(file.parseStatus, "ready");
+  assert.equal(file.contextText, "# Brief");
+  assert.equal(repos.sessionFiles.get(file.id).originalName, "brief.md");
+  assert.equal(repos.sessionFiles.getBySessionAndName(sessionId, "brief.md").id, file.id);
+  assert.deepEqual(repos.sessionFiles.listBySession(sessionId).map((item) => item.id), [file.id]);
+  assert.equal(repos.sessionFiles.countBySha256("f".repeat(64)), 1);
+  assert.throws(() => repos.sessionFiles.create({
+    sessionId,
+    sha256: "e".repeat(64),
+    originalName: "brief.md",
+    size: 8,
+    parseStatus: "ready",
+    contextText: "changed",
+    contextCodePoints: 7,
+  }), /unique/i);
+
+  const removed = repos.sessionFiles.remove(file.id);
+  assert.equal(removed.id, file.id);
+  assert.equal(repos.sessionFiles.get(file.id), null);
+});
+
 test("projects detach owned sessions before deleting only Workbench-owned project data", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
@@ -122,6 +170,37 @@ test("maintenance purge removes one frozen project graph in one transaction", as
     sessionId: "session-a",
     scope: { kind: "project", id: project.id },
   });
+  repos.workbenchSessions.create({
+    sessionId: "session-keep",
+    scope: { kind: "independent", id: null },
+  });
+  repos.sessionFiles.create({
+    sessionId: "session-a",
+    sha256: "a".repeat(64),
+    originalName: "private.md",
+    size: 7,
+    parseStatus: "ready",
+    contextText: "private",
+    contextCodePoints: 7,
+  });
+  repos.sessionFiles.create({
+    sessionId: "session-a",
+    sha256: "b".repeat(64),
+    originalName: "shared.md",
+    size: 6,
+    parseStatus: "ready",
+    contextText: "shared",
+    contextCodePoints: 6,
+  });
+  repos.sessionFiles.create({
+    sessionId: "session-keep",
+    sha256: "b".repeat(64),
+    originalName: "shared-copy.md",
+    size: 6,
+    parseStatus: "ready",
+    contextText: "shared",
+    contextCodePoints: 6,
+  });
   repos.todos.create({
     projectId: project.id,
     title: "Ship",
@@ -133,13 +212,54 @@ test("maintenance purge removes one frozen project graph in one transaction", as
     id: project.id,
     expectedSessionIds: ["session-a"],
     expectedOrphanDocumentIds: [document.id],
+    expectedSessionFileHashes: ["a".repeat(64)],
   });
 
   assert.equal(removed.container.name, "Research");
+  assert.deepEqual(removed.orphanSessionFiles, [{ sha256: "a".repeat(64) }]);
   assert.equal(repos.projects.get(project.id), null);
   assert.equal(repos.workbenchSessions.get("session-a"), null);
+  assert.equal(repos.sessionFiles.countBySha256("a".repeat(64)), 0);
+  assert.equal(repos.sessionFiles.countBySha256("b".repeat(64)), 1);
   assert.equal(repos.documents.get(document.id), null);
   assert.deepEqual(repos.todos.list({ projectId: project.id }), []);
+});
+
+test("maintenance purge rejects a stale File Vault graph without deleting any row", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => { closeDatabase(db); await removeTempDir(dataDir); });
+
+  const project = repos.projects.create({ name: "Research" });
+  repos.workbenchSessions.create({
+    sessionId: "session-a",
+    scope: { kind: "project", id: project.id },
+  });
+  const frozen = repos.projects.deletionPlan(project.id);
+  repos.sessionFiles.create({
+    sessionId: "session-a",
+    sha256: "c".repeat(64),
+    originalName: "late.md",
+    size: 4,
+    parseStatus: "ready",
+    contextText: "late",
+    contextCodePoints: 4,
+  });
+
+  assert.throws(
+    () => repos.maintenance.purgeContainer({
+      kind: "project",
+      id: project.id,
+      expectedSessionIds: frozen.sessionIds,
+      expectedOrphanDocumentIds: [],
+      expectedSessionFileHashes: [],
+    }),
+    /stale purge plan/i,
+  );
+  assert.equal(repos.projects.get(project.id).name, "Research");
+  assert.equal(repos.workbenchSessions.get("session-a").sessionId, "session-a");
+  assert.equal(repos.sessionFiles.countBySha256("c".repeat(64)), 1);
 });
 
 test("maintenance purge rejects a stale plan without deleting any row", async (t) => {
@@ -165,6 +285,7 @@ test("maintenance purge rejects a stale plan without deleting any row", async (t
       id: project.id,
       expectedSessionIds: frozen.sessionIds,
       expectedOrphanDocumentIds: [],
+      expectedSessionFileHashes: [],
     }),
     /stale purge plan/i,
   );

@@ -5,6 +5,7 @@ import { WorkbenchSessionShell } from "./WorkbenchSessionShell.js";
 import { WorkbenchSidebar } from "./WorkbenchSidebar.js";
 import { KnowledgeCenterPage } from "./KnowledgeCenterPage.js";
 import { SessionListPage } from "./SessionListPage.js";
+import { SkillsPage } from "./SkillsPage.js";
 import { DraftConversation, NewSessionDialog } from "./NewSessionDialog.js";
 import { MaintenanceScreen, readStoredMaintenanceJob } from "./MaintenanceScreen.js";
 import { DrawerDialog, nextDrawerOwner, useWorkbenchLayoutMode } from "./responsive.js";
@@ -34,6 +35,7 @@ export function WorkbenchShell(props) {
     if (page === "home") navigation.openHome();
     else if (page === "knowledge") navigation.openKnowledge();
     else if (page === "sessions") { setSessionListScope(null); navigation.openSessions(); }
+    else if (page === "skills") navigation.openSkills();
     if (layoutMode === "mobile") setDrawerOwner(null);
   };
   const openDrawer = function (owner) { setDrawerOwner((current) => nextDrawerOwner(current, owner)); };
@@ -103,6 +105,8 @@ export function WorkbenchShell(props) {
     });
   } else if (view.page === "sessions") {
     center = React.createElement(SessionListPage, { store: props.store, onOpenSession: openSession, initialScope: sessionListScope });
+  } else if (view.page === "skills") {
+    center = React.createElement(SkillsPage, { store: props.store });
   } else {
     center = React.createElement(ProjectHome, {
       ...props,

@@ -1,10 +1,11 @@
 import React from "react";
-import { ArrowClockwise, Books, CalendarCheck, Check, ClockCountdown, Copy, File, FolderOpen, House, MagnifyingGlass, Note, Paperclip, Plus, Robot, TreeStructure, WarningCircle } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowSquareOut, Books, CalendarCheck, Check, ClockCountdown, Copy, DownloadSimple, File, FolderOpen, House, LockSimple, MagnifyingGlass, Note, Plus, Robot, Sparkle, Trash, TreeStructure, UploadSimple, WarningCircle } from "@phosphor-icons/react";
 import { CyberSelect } from "./CyberSelect.js";
+import { cpwbApi } from "./api.js";
 import { getWorkbenchSession } from "./workbenchSessions.js";
 import { useHomeOpen } from "./ProjectHome.js";
 import { Todos } from "./Todos.js";
-import { KnowledgeBase } from "./KnowledgeBase.js";
+import { ACCEPT, KnowledgeBase, formatBytes } from "./KnowledgeBase.js";
 import { Automation, filterSchedules, ScheduleDialog } from "./Automation.js";
 import {
   RAIL_STYLE_PROPS,
@@ -19,9 +20,11 @@ import {
 import { DrawerDialog, useWorkbenchLayoutMode } from "./responsive.js";
 import { SubagentDrawer } from "./SubagentDrawer.js";
 import { DEFAULT_TIME_ZONE, localDateTimeParts } from "./timezone.js";
+import { ProjectSkillsPanel } from "./SkillsManager.js";
 
 export { parseNativeModelSelectionLabel } from "./ModelIndicator.js";
 export { KnowledgeSourcesTail } from "./KnowledgeSourcesTail.js";
+export { ProjectSkillsPanel } from "./SkillsManager.js";
 
 export function compactSessionId(sessionId) {
   const value = String(sessionId || "");
@@ -64,21 +67,23 @@ function SessionIdCopy({ sessionId }) {
 
 export const PROJECT_TOOL_TABS = Object.freeze([
   ["todos", "待办", CalendarCheck],
-  ["schedule", "定时任务", ClockCountdown],
-  ["knowledge", "关联知识库", Books],
+  ["files", "会话文件", File],
   ["summary", "每日总结", Note],
+  ["schedule", "定时任务", ClockCountdown],
+  ["knowledge", "知识芯片", Books],
+  ["skills", "Skills", Sparkle],
 ]);
 
 export const KNOWLEDGE_TOOL_TABS = Object.freeze([
-  ["documents", "文档", File],
+  ["files", "会话文件", File],
+  ["documents", "芯片文档", Books],
   ["index", "索引", MagnifyingGlass],
   ["projects", "关联项目", FolderOpen],
   ["global_schedule", "全局定时", ClockCountdown],
 ]);
 
 export const INDEPENDENT_TOOL_TABS = Object.freeze([
-  ["context", "上下文", TreeStructure],
-  ["files", "文件", Paperclip],
+  ["files", "会话文件", File],
   ["subagents", "Subagent", Robot],
   ["global_schedule", "全局定时", ClockCountdown],
 ]);
@@ -248,24 +253,92 @@ export function GlobalSchedulesPanel({ state, store, initialDialog = false }) {
     }) : null);
 }
 
-function SessionContextPanel({ sessionId, scope, state, store }) {
-  React.useEffect(function () { store.actions.loadSessionContext?.(sessionId).catch(function () {}); }, [sessionId, store]);
-  const rows = Array.isArray(state.contextBySession?.[sessionId]) ? state.contextBySession[sessionId] : [];
-  const inherited = scope.kind === "project" ? "项目 Workspace + 全部关联知识库" : scope.kind === "knowledge_base" ? "当前知识库全部可用文档" : "无默认继承来源";
-  return React.createElement("div", { className: "cpwb-context-list" },
-    React.createElement("article", { className: "cpwb-context-card cpwb-context-card-primary" }, React.createElement("span", null, "INHERITED"), React.createElement("strong", null, inherited), React.createElement("small", null, "随容器关联变化动态更新")),
-    rows.map((row, index) => React.createElement("article", { key: row.id || index, className: "cpwb-context-card" },
-      React.createElement("span", null, String(row.mode || "pinned").toUpperCase()),
-      React.createElement("strong", null, (row.sourceKind || row.source?.kind) + " / " + (row.sourceId || row.source?.id)),
-      React.createElement("small", null, row.available === false ? "引用来源已删除" : "会话固定来源"))));
-}
+export function SessionFilesPanel({ sessionId, state, store, scopeKind }) {
+  const [dragActive, setDragActive] = React.useState(false);
+  const [uploading, setUploading] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const files = state.sessionFilesBySession?.[sessionId] || [];
 
-function SessionFilesPanel() {
-  return React.createElement("div", { className: "cpwb-context-list" },
-    React.createElement("article", { className: "cpwb-context-card cpwb-context-card-primary" },
-      React.createElement("span", null, "DSH FILES API"),
-      React.createElement("strong", null, "文件与图片由原生输入区管理"),
-      React.createElement("small", null, "使用回形针、图片按钮或 @ 引用当前 Workspace 文件")));
+  React.useEffect(function () {
+    store.actions.loadSessionFiles?.(sessionId).catch(function (cause) { setError(cause?.message || "文件读取失败"); });
+  }, [sessionId, store]);
+
+  const upload = async function (fileList) {
+    const selectedFiles = Array.from(fileList || []);
+    if (selectedFiles.length === 0 || uploading) return;
+    setUploading(true);
+    setError(null);
+    try { await store.actions.uploadSessionFiles({ files: selectedFiles, sessionId }); }
+    catch (cause) { setError(cause?.message || "文件上传失败"); }
+    finally { setUploading(false); }
+  };
+
+  const onDrop = function (event) {
+    event.preventDefault();
+    setDragActive(false);
+    upload(event.dataTransfer?.files);
+  };
+
+  const scopeHint = scopeKind === "project"
+    ? "上传后用 @文件 引用，项目文件直接用 @路径"
+    : scopeKind === "knowledge_base"
+      ? "上传后用 @文件 引用，不会写入知识芯片"
+      : "上传后用 @文件 引用";
+
+  return React.createElement("div", { className: "cpwb-session-files" },
+    React.createElement("div", { className: "cpwb-tool-head" },
+      React.createElement("div", { className: "cpwb-tool-heading" },
+        React.createElement("span", null, "私有存储"),
+        React.createElement("h3", null, "会话文件")),
+      React.createElement("div", { className: "cpwb-tool-head-actions" },
+        React.createElement("code", null, String(files.length).padStart(2, "0")),
+        React.createElement("button", {
+          type: "button",
+          className: "cpwb-icon-button",
+          onClick: () => store.actions.loadSessionFiles?.(sessionId),
+          title: "刷新会话文件",
+          "aria-label": "刷新会话文件",
+        }, React.createElement(ArrowClockwise, { size: 14, "aria-hidden": true })))),
+    React.createElement("div", { className: "cpwb-session-file-scope" },
+      React.createElement(LockSimple, { size: 15, weight: "regular", "aria-hidden": true }),
+      React.createElement("div", null,
+        React.createElement("strong", null, "仅当前会话"),
+        React.createElement("small", null, scopeHint))),
+    React.createElement("label", {
+      className: "cpwb-drop" + (dragActive ? " cpwb-drop-active" : ""),
+      onDrop,
+      onDragOver: function (event) { event.preventDefault(); if (!uploading) setDragActive(true); },
+      onDragLeave: function () { setDragActive(false); },
+    },
+    React.createElement("input", {
+      type: "file",
+      multiple: true,
+      accept: ACCEPT,
+      disabled: uploading,
+      style: { display: "none" },
+      onChange: function (event) { upload(event.target.files); event.target.value = ""; },
+    }),
+    React.createElement(UploadSimple, { size: 20, "aria-hidden": true }),
+    React.createElement("strong", null, uploading ? "正在保存与解析…" : "上传会话文件"),
+    React.createElement("small", null, "点击或拖拽 · 单文件最大 50 MB")),
+    error ? React.createElement("div", { className: "cpwb-error-msg", role: "alert" }, error) : null,
+    files.length > 0
+      ? React.createElement("div", { className: "cpwb-list cpwb-session-document-list" }, files.map(function (file) {
+          return React.createElement(
+            "article",
+            { key: file.id, className: "cpwb-item cpwb-session-document" },
+            React.createElement("div", { className: "cpwb-item-main" },
+              React.createElement("div", { className: "cpwb-item-title" }, file.originalName),
+              React.createElement("div", { className: "cpwb-item-meta" }, formatBytes(file.size) + " · " + (file.parseStatus === "ready" ? "可直接引用" : "解析失败")),
+              file.parseError ? React.createElement("small", { className: "cpwb-error-msg" }, file.parseError) : null),
+            React.createElement("div", { className: "cpwb-session-document-actions" },
+              React.createElement("a", { className: "cpwb-icon-button", href: cpwbApi.sessionFiles.contentUrl(file.id), target: "_blank", rel: "noreferrer", title: "打开原始文件", "aria-label": "打开原始文件 " + file.originalName }, React.createElement(ArrowSquareOut, { size: 14, "aria-hidden": true })),
+              React.createElement("a", { className: "cpwb-icon-button", href: cpwbApi.sessionFiles.contentUrl(file.id, { download: true }), download: file.originalName, title: "下载原始文件", "aria-label": "下载原始文件 " + file.originalName }, React.createElement(DownloadSimple, { size: 14, "aria-hidden": true })),
+              React.createElement("button", { type: "button", className: "cpwb-icon-button cpwb-danger-icon", onClick: () => store.actions.deleteSessionFile({ sessionId, id: file.id }).catch((cause) => setError(cause?.message || "删除失败")), title: "删除会话文件", "aria-label": "删除会话文件 " + file.originalName }, React.createElement(Trash, { size: 14, "aria-hidden": true }))),
+          );
+        }))
+      : null,
+  );
 }
 
 function KnowledgeIndexPanel({ knowledgeBaseId, state, store }) {
@@ -288,6 +361,9 @@ function LinkedProjectsPanel({ knowledgeBaseId, state, store }) {
 
 /** Native rc.2 ConversationRoot remains the only conversation renderer. */
 export function WorkbenchSessionShell(props) {
+  const tabIdSeed = React.useId();
+  const tabIdPrefix = "cpwb-tool-tab-" + tabIdSeed.replace(/:/g, "-");
+  const tabRefs = React.useRef(new Map());
   const state = React.useSyncExternalStore(props.store.subscribe, props.store.getSnapshot, props.store.getSnapshot);
   const homeOpenSnapshot = useHomeOpen();
   const sessionSnapshot = React.useSyncExternalStore(
@@ -307,7 +383,7 @@ export function WorkbenchSessionShell(props) {
   const project = projectId == null ? null : projectFor(state, projectId);
   const knowledgeBase = knowledgeBaseId == null ? null : knowledgeBaseFor(state, knowledgeBaseId);
   const [activeTool, setActiveTool] = React.useState(function () {
-    return scope?.kind === "project" ? "todos" : scope?.kind === "knowledge_base" ? "documents" : "context";
+    return scope?.kind === "project" ? "todos" : "files";
   });
   const visible = props.open === undefined ? !homeOpenSnapshot : props.open;
   const scopeKey = scope?.kind ? scope.kind + ":" + String(scope.id ?? "") : null;
@@ -329,7 +405,7 @@ export function WorkbenchSessionShell(props) {
   }, [openError, opening, props.sessions, sessionId, visible]);
 
   React.useEffect(function () {
-    setActiveTool(scope?.kind === "project" ? "todos" : scope?.kind === "knowledge_base" ? "documents" : "context");
+    setActiveTool(scope?.kind === "project" ? "todos" : "files");
   }, [scope?.kind, scope?.id]);
 
   React.useEffect(function () {
@@ -355,44 +431,76 @@ export function WorkbenchSessionShell(props) {
   if (!visible || !sessionId || !String(sessionId).startsWith("session-cpwb-")) return null;
 
   const toolTabs = projectId != null ? PROJECT_TOOL_TABS : knowledgeBaseId != null ? KNOWLEDGE_TOOL_TABS : INDEPENDENT_TOOL_TABS;
+  const effectiveActiveTool = toolTabs.some(([id]) => id === activeTool) ? activeTool : toolTabs[0]?.[0];
+  const tabIdFor = (id) => tabIdPrefix + "-" + id;
+  const tabPanelId = tabIdPrefix + "-panel";
+  const setTabRef = (id) => (node) => {
+    if (node) tabRefs.current.set(id, node);
+    else tabRefs.current.delete(id);
+  };
+  const onToolTabKeyDown = (event, id) => {
+    const currentId = toolTabs.some(([tabId]) => tabId === id) ? id : effectiveActiveTool;
+    const currentIndex = toolTabs.findIndex(([tabId]) => tabId === currentId);
+    if (currentIndex < 0) return;
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1) % toolTabs.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (currentIndex - 1 + toolTabs.length) % toolTabs.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = toolTabs.length - 1;
+    else return;
+    event.preventDefault();
+    const nextId = toolTabs[nextIndex][0];
+    setActiveTool(nextId);
+    tabRefs.current.get(nextId)?.focus?.();
+  };
   let body = null;
   if (projectId != null) {
-    if (activeTool === "todos") body = React.createElement(Todos, { store: props.store, projectId });
-    else if (activeTool === "schedule") body = React.createElement(Automation, { store: props.store, projectId, view: "schedule" });
-    else if (activeTool === "knowledge") body = React.createElement(KnowledgeBase, { store: props.store, projectId, view: "linked" });
-    else if (activeTool === "summary") body = React.createElement(Automation, { store: props.store, projectId, view: "summary" });
+    if (effectiveActiveTool === "todos") body = React.createElement(Todos, { store: props.store, projectId });
+    else if (effectiveActiveTool === "schedule") body = React.createElement(Automation, { store: props.store, projectId, view: "schedule" });
+    else if (effectiveActiveTool === "files") body = React.createElement(SessionFilesPanel, { sessionId, state, store: props.store, scopeKind: "project" });
+    else if (effectiveActiveTool === "knowledge") body = React.createElement(KnowledgeBase, { store: props.store, projectId, view: "linked" });
+    else if (effectiveActiveTool === "summary") body = React.createElement(Automation, { store: props.store, projectId, view: "summary" });
+    else if (effectiveActiveTool === "skills") body = React.createElement(ProjectSkillsPanel, { store: props.store, projectId });
   } else if (knowledgeBaseId != null) {
-    if (activeTool === "documents") body = React.createElement(KnowledgeBase, { store: props.store, knowledgeBaseId, view: "documents" });
-    else if (activeTool === "index") body = React.createElement(KnowledgeIndexPanel, { knowledgeBaseId, state, store: props.store });
-    else if (activeTool === "projects") body = React.createElement(LinkedProjectsPanel, { knowledgeBaseId, state, store: props.store });
-    else if (activeTool === "global_schedule") body = React.createElement(GlobalSchedulesPanel, { state, store: props.store });
+    if (effectiveActiveTool === "files") body = React.createElement(SessionFilesPanel, { sessionId, state, store: props.store, scopeKind: "knowledge_base" });
+    else if (effectiveActiveTool === "documents") body = React.createElement(KnowledgeBase, { store: props.store, knowledgeBaseId, view: "documents" });
+    else if (effectiveActiveTool === "index") body = React.createElement(KnowledgeIndexPanel, { knowledgeBaseId, state, store: props.store });
+    else if (effectiveActiveTool === "projects") body = React.createElement(LinkedProjectsPanel, { knowledgeBaseId, state, store: props.store });
+    else if (effectiveActiveTool === "global_schedule") body = React.createElement(GlobalSchedulesPanel, { state, store: props.store });
   } else {
-    if (activeTool === "context") body = React.createElement(SessionContextPanel, { sessionId, scope: scope || { kind: "independent", id: null }, state, store: props.store });
-    else if (activeTool === "files") body = React.createElement(SessionFilesPanel);
-    else if (activeTool === "subagents") body = React.createElement("div", { className: "cpwb-context-list" },
+    if (effectiveActiveTool === "files") body = React.createElement(SessionFilesPanel, { sessionId, state, store: props.store, scopeKind: "independent" });
+    else if (effectiveActiveTool === "subagents") body = React.createElement("div", { className: "cpwb-context-list" },
       React.createElement("article", { className: "cpwb-context-card cpwb-context-card-primary" }, React.createElement("span", null, "SUBAGENT ACTIVITY"), React.createElement("strong", null, subagentCount + " 个子智能体"), React.createElement("small", null, "查看会话、状态与运行详情")),
       React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-primary", onClick: () => setSubagentOpen(true) }, "打开 Subagent 抽屉"));
-    else if (activeTool === "global_schedule") body = React.createElement(GlobalSchedulesPanel, { state, store: props.store });
+    else if (effectiveActiveTool === "global_schedule") body = React.createElement(GlobalSchedulesPanel, { state, store: props.store });
   }
 
   const contextRail = function (drawer = false) {
     const railKind = projectId != null ? "PROJECT SYSTEM" : knowledgeBaseId != null ? "KNOWLEDGE SYSTEM" : "SESSION SYSTEM";
     const railName = projectId != null ? project?.name || "项目工作台" : knowledgeBaseId != null ? knowledgeBase?.name || "知识库" : entry?.title || "独立会话";
-    const railMeta = projectId != null ? "项目上下文 · " + String(projectId).padStart(2, "0") : knowledgeBaseId != null ? "知识库上下文 · " + String(knowledgeBaseId).padStart(2, "0") : "无容器归属 · GLOBAL";
+    const railMeta = projectId != null ? "项目工具舱 · " + String(projectId).padStart(2, "0") : knowledgeBaseId != null ? "知识库上下文 · " + String(knowledgeBaseId).padStart(2, "0") : "无容器归属 · GLOBAL";
     return React.createElement("aside", { className: "cpwb-project-rail" + (drawer ? " cpwb-project-rail-drawer" : ""), "aria-label": "上下文工具" },
       React.createElement("header", { className: "cpwb-project-rail-header" },
         React.createElement("span", null, railKind),
         React.createElement("h2", null, railName),
         React.createElement("small", null, railMeta)),
-      React.createElement("nav", { className: "cpwb-project-tool-tabs", "aria-label": "上下文工具" }, toolTabs.map(([id, label, IconComponent]) => React.createElement("button", {
+      React.createElement("nav", { className: "cpwb-project-tool-tabs", role: "tablist", "aria-label": "上下文工具", "data-tool-count": String(toolTabs.length) }, toolTabs.map(([id, label, IconComponent]) => React.createElement("button", {
         type: "button",
+        role: "tab",
+        id: tabIdFor(id),
+        ref: setTabRef(id),
         key: id,
-        className: activeTool === id ? "cpwb-active" : "",
+        className: effectiveActiveTool === id ? "cpwb-active" : "",
         onClick: () => setActiveTool(id),
-        "aria-current": activeTool === id ? "page" : undefined,
-        title: label,
+        onKeyDown: (event) => onToolTabKeyDown(event, id),
+        tabIndex: effectiveActiveTool === id ? 0 : -1,
+        "aria-selected": effectiveActiveTool === id,
+        "aria-controls": tabPanelId,
+        "aria-current": effectiveActiveTool === id ? "page" : undefined,
+        "aria-label": label,
+        "data-tooltip": label,
       }, React.createElement(IconComponent, { size: 18, weight: "regular", "aria-hidden": true }), React.createElement("span", null, label)))),
-      React.createElement("div", { className: "cpwb-project-tool-body" }, body));
+      React.createElement("div", { id: tabPanelId, className: "cpwb-project-tool-body", role: "tabpanel", "aria-label": effectiveActiveTool, "aria-labelledby": tabIdFor(effectiveActiveTool) }, body));
   };
 
   const transitioning = opening || Boolean(openError);

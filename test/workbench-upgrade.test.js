@@ -15,6 +15,7 @@ import {
   encodeKnowledgeBaseReference,
   registerKnowledgeBaseReferenceSource,
 } from "../src/client/knowledgeReferences.js";
+import { createSessionFileReferenceSource } from "../src/client/sessionFileReferences.js";
 import { createWorkbenchRagPreStep, deriveSessionTitle } from "../src/host/sessions.js";
 import { Automation, buildSummaryMarkdown, filterSchedules } from "../src/client/Automation.js";
 import { getNewRecordIds } from "../src/client/arrivalPulse.js";
@@ -90,6 +91,51 @@ test("knowledge-base reference source registers through the injected rc.2 servic
   };
   registerKnowledgeBaseReferenceSource(ctx, staticStore({ knowledgeBases: [] }));
   assert.equal(registered.name, "cpwbKnowledge");
+});
+
+test("session-file references list only the active session and fail before send for unusable context", async () => {
+  const state = {
+    sessionFilesBySession: {
+      "session-cpwb-1": [
+        { id: 1, originalName: "产品 规范.md", parseStatus: "ready", contextCodePoints: 120 },
+        { id: 2, originalName: "损坏.pdf", parseStatus: "failed", contextCodePoints: 0 },
+      ],
+      "session-cpwb-2": [{ id: 3, originalName: "其他.txt", parseStatus: "ready", contextCodePoints: 20 }],
+    },
+  };
+  const loads = [];
+  const store = {
+    getSnapshot: () => state,
+    subscribe: () => () => {},
+    actions: { async loadSessionFiles(sessionId) { loads.push(sessionId); } },
+  };
+  const source = createSessionFileReferenceSource({ store });
+  const session = { sessionId: "session-cpwb-1" };
+  const candidates = await source.candidates(session, { query: "产品", signal: new AbortController().signal });
+  assert.deepEqual(candidates.map((item) => item.name), ["产品 规范.md"]);
+  assert.deepEqual(source.onPick({ session, candidate: candidates[0] }), { text: "@文件/产品 规范.md " });
+  assert.deepEqual(source.lexicon(session), ["@文件/产品 规范.md", "@文件/损坏.pdf"]);
+  await assert.rejects(
+    source.matchEnter(session, "请读 @文件/损坏.pdf"),
+    /解析失败/,
+  );
+  assert.deepEqual(loads, ["session-cpwb-1", "session-cpwb-1"]);
+});
+
+test("session-file references stay invisible in native non-Workbench sessions", async () => {
+  let loads = 0;
+  const store = {
+    getSnapshot: () => ({ sessionFilesBySession: {} }),
+    subscribe: () => { throw new Error("native sessions must not subscribe to the File Vault"); },
+    actions: { async loadSessionFiles() { loads += 1; } },
+  };
+  const source = createSessionFileReferenceSource({ store });
+  const session = { sessionId: "session-native-1" };
+  assert.deepEqual(await source.candidates(session, { query: "", signal: new AbortController().signal }), []);
+  assert.equal(source.lexicon(session), undefined);
+  assert.equal(await source.matchEnter(session, "@文件/本地.md"), undefined);
+  assert.equal(typeof source.subscribeLexicon(session, () => {}), "function");
+  assert.equal(loads, 0);
 });
 
 test("first natural sentence becomes a stable independent-session title", () => {
@@ -175,6 +221,8 @@ test("summary generation uses a quiet pulse rail and keeps failure feedback expl
     view: "summary",
   }));
   assert.match(running, /cpwb-generation-wave/);
+  assert.match(running, /项目日志/);
+  assert.match(running, /<details class="cpwb-summary-entry/);
   assert.match(running, /aria-label="正在生成每日总结"/);
   assert.doesNotMatch(running, /执行中|生成中|已完成/);
   assert.match(running, /aria-label="下载 2026-08-22 每日总结"/);

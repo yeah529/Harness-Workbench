@@ -18,7 +18,7 @@ export const DEFAULT_DATA_ROOT = join(DEFAULT_DSH_HOME, "cyberpunk-workbench");
 export const DB_FILENAME = "workbench.sqlite";
 
 /** Schema version persisted via PRAGMA user_version. */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /** Allowed document lifecycle states. */
 export const DOCUMENT_STATUSES = Object.freeze([

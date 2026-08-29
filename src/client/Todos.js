@@ -103,7 +103,9 @@ export function Todos({ store, projectId, now, initialQuery = "" }) {
   const sections = organizeTodos(filteredTodos, { view, timeZone, now: now || new Date() });
   const remove = () => store.actions.deleteTodo(deleteTarget.id).then(() => setDeleteTarget(null));
   return React.createElement("section", { className: "cpwb-tool-panel" },
-    React.createElement("div", { className: "cpwb-tool-head" }, React.createElement("span", null, "PROJECT TODO"), React.createElement("button", { className: "cpwb-btn cpwb-btn-primary cpwb-button-content", type: "button", onClick: () => setDialog({ todo: null }) }, React.createElement(Plus, { size: 14, weight: "bold" }), React.createElement("span", null, "新增"))),
+    React.createElement("div", { className: "cpwb-tool-head" },
+      React.createElement("div", { className: "cpwb-tool-heading" }, React.createElement("span", null, "任务队列"), React.createElement("h3", null, "待办")),
+      React.createElement("button", { className: "cpwb-btn cpwb-btn-primary cpwb-button-content", type: "button", onClick: () => setDialog({ todo: null }) }, React.createElement(Plus, { size: 14, weight: "bold" }), React.createElement("span", null, "新增"))),
     React.createElement("label", { className: "cpwb-tool-search" },
       React.createElement("span", { "aria-hidden": true }, "⌕"),
       React.createElement("input", { type: "search", value: query, onChange: (event) => setQuery(event.target.value), placeholder: "搜索待办事项", "aria-label": "搜索待办" })),

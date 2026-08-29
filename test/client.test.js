@@ -10,10 +10,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { unzipSync, strFromU8 } from "fflate";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { createCpwbApi, cpwbApi, CpwbApiError } from "../src/client/api.js";
+import { packSkillDirectory } from "../src/client/skill-import.js";
 import { createWorkbenchStore, localDateKey } from "../src/client/store.js";
 import { needsDocumentPolling } from "../src/client/KnowledgeBase.js";
 import { WorkbenchSidebar } from "../src/client/WorkbenchSidebar.js";
@@ -46,6 +48,263 @@ function parse(url) {
   const u = new URL(url, "http://dsh.local");
   return { pathname: u.pathname, searchParams: u.searchParams };
 }
+
+function fakeBrowserFile(webkitRelativePath, contents, name = webkitRelativePath.split("/").pop()) {
+  const bytes = typeof contents === "string" ? new TextEncoder().encode(contents) : new Uint8Array(contents);
+  return {
+    name,
+    size: bytes.byteLength,
+    type: "application/octet-stream",
+    webkitRelativePath,
+    async arrayBuffer() {
+      return bytes.slice().buffer;
+    },
+  };
+}
+
+test("packSkillDirectory preserves one selected root and binary bytes", async () => {
+  const files = [
+    fakeBrowserFile("example-skill/SKILL.md", "---\nname: example-skill\ndescription: Example.\n---\nbody"),
+    fakeBrowserFile("example-skill/assets/icon.bin", [0, 1, 2, 127, 128, 255]),
+  ];
+  const packed = await packSkillDirectory(files);
+  assert.equal(packed.sourceName, "example-skill");
+  assert.equal(packed.archive.type, "application/zip");
+  const entries = unzipSync(new Uint8Array(await packed.archive.arrayBuffer()));
+  assert.deepEqual(Object.keys(entries).sort(), ["example-skill/SKILL.md", "example-skill/assets/icon.bin"]);
+  assert.deepEqual([...entries["example-skill/assets/icon.bin"]], [0, 1, 2, 127, 128, 255]);
+  assert.equal(strFromU8(entries["example-skill/SKILL.md"]), "---\nname: example-skill\ndescription: Example.\n---\nbody");
+});
+
+test("packSkillDirectory rejects invalid roots, paths, counts, and source limits", async () => {
+  const invalidPaths = [
+    "skill\\SKILL.md",
+    "skill//SKILL.md",
+    "skill/./SKILL.md",
+    "skill/../SKILL.md",
+    "/skill/SKILL.md",
+    "skill/na\0me.md",
+  ];
+  for (const path of invalidPaths) {
+    await assert.rejects(
+      () => packSkillDirectory([fakeBrowserFile(path, "x")]),
+      (error) => error.code === "SKILL_ARCHIVE_UNSAFE",
+      path,
+    );
+  }
+  await assert.rejects(
+    () => packSkillDirectory([fakeBrowserFile("a/SKILL.md", "x"), fakeBrowserFile("b/other.md", "x")]),
+    (error) => error.code === "SKILL_PACKAGE_INVALID",
+  );
+  await assert.rejects(
+    () => packSkillDirectory([]),
+    (error) => error.code === "SKILL_PACKAGE_INVALID",
+  );
+  await assert.rejects(
+    () => packSkillDirectory(Array.from({ length: 1001 }, (_, index) => fakeBrowserFile("skill/" + index + ".md", "x"))),
+    (error) => error.code === "SKILL_PACKAGE_INVALID",
+  );
+  const oversizedSingle = fakeBrowserFile("skill/large.bin", "x");
+  oversizedSingle.size = 50 * 1024 * 1024 + 1;
+  await assert.rejects(
+    () => packSkillDirectory([oversizedSingle]),
+    (error) => error.code === "SKILL_ARCHIVE_TOO_LARGE",
+  );
+  const oversizedTotal = fakeBrowserFile("skill/b.bin", "x");
+  oversizedTotal.size = 34 * 1024 * 1024;
+  const totalLimit = fakeBrowserFile("skill/a.bin", "x");
+  totalLimit.size = 34 * 1024 * 1024;
+  const totalLimitThird = fakeBrowserFile("skill/c.bin", "x");
+  totalLimitThird.size = 34 * 1024 * 1024;
+  await assert.rejects(
+    () => packSkillDirectory([
+      totalLimit,
+      oversizedTotal,
+      totalLimitThird,
+    ]),
+    (error) => error.code === "SKILL_ARCHIVE_TOO_LARGE",
+  );
+});
+
+test("packSkillDirectory maps file read failures without leaking causes", async () => {
+  const thrown = new Error("/Users/private/secret should not escape");
+  const syncFailure = {
+    size: 1,
+    webkitRelativePath: "skill/SKILL.md",
+    arrayBuffer() { throw thrown; },
+  };
+  const rejectedFailure = {
+    size: 1,
+    webkitRelativePath: "skill/SKILL.md",
+    arrayBuffer() { return Promise.reject(new DOMException("permission denied: /Users/private", "NotReadableError")); },
+  };
+  for (const file of [syncFailure, rejectedFailure]) {
+    await assert.rejects(
+      () => packSkillDirectory([file]),
+      (error) => {
+        assert.equal(error.code, "SKILL_PACKAGE_INVALID");
+        assert.deepEqual(error.details, { path: "skill/SKILL.md" });
+        assert.equal(error.message.includes("/Users/private"), false);
+        return true;
+      },
+    );
+  }
+});
+
+test("packSkillDirectory rejects non-ArrayBuffer file bytes", async () => {
+  const invalidBuffers = [undefined, null, "text", {}, new DataView(new ArrayBuffer(1))];
+  for (const buffer of invalidBuffers) {
+    const file = {
+      size: 0,
+      webkitRelativePath: "skill/SKILL.md",
+      arrayBuffer() { return buffer; },
+    };
+    await assert.rejects(
+      () => packSkillDirectory([file]),
+      (error) => {
+        assert.equal(error.code, "SKILL_PACKAGE_INVALID");
+        assert.deepEqual(error.details, { path: "skill/SKILL.md" });
+        return true;
+      },
+      Object.prototype.toString.call(buffer),
+    );
+  }
+});
+
+test("packSkillDirectory reads files serially and stops after actual file limits", async () => {
+  let active = 0;
+  let maxActive = 0;
+  const delayedFile = (path, contents) => ({
+    size: 1,
+    webkitRelativePath: path,
+    async arrayBuffer() {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active -= 1;
+      return new TextEncoder().encode(contents).buffer;
+    },
+  });
+  await packSkillDirectory([
+    delayedFile("skill/a.md", "a"),
+    delayedFile("skill/b.md", "b"),
+    delayedFile("skill/c.md", "c"),
+  ]);
+  assert.equal(maxActive, 1);
+
+  let laterReads = 0;
+  const overLimit = {
+    size: 1,
+    webkitRelativePath: "skill/large.bin",
+    async arrayBuffer() { return new ArrayBuffer(50 * 1024 * 1024 + 1); },
+  };
+  const later = {
+    size: 1,
+    webkitRelativePath: "skill/later.md",
+    async arrayBuffer() { laterReads += 1; return new TextEncoder().encode("later").buffer; },
+  };
+  await assert.rejects(
+    () => packSkillDirectory([overLimit, later]),
+    (error) => error.code === "SKILL_ARCHIVE_TOO_LARGE",
+  );
+  assert.equal(laterReads, 0);
+
+  let cumulativeLaterReads = 0;
+  const actual = (path) => ({
+    size: 1,
+    webkitRelativePath: path,
+    async arrayBuffer() { return new ArrayBuffer(34 * 1024 * 1024); },
+  });
+  const cumulativeLater = {
+    size: 1,
+    webkitRelativePath: "skill/never.md",
+    async arrayBuffer() { cumulativeLaterReads += 1; return new ArrayBuffer(1); },
+  };
+  await assert.rejects(
+    () => packSkillDirectory([actual("skill/a.bin"), actual("skill/b.bin"), actual("skill/c.bin"), cumulativeLater]),
+    (error) => error.code === "SKILL_ARCHIVE_TOO_LARGE",
+  );
+  assert.equal(cumulativeLaterReads, 0);
+});
+
+test("packSkillDirectory validates array-like length before touching its items", async () => {
+  let touched = false;
+  const selection = {
+    length: 1001,
+    get 0() { touched = true; return fakeBrowserFile("skill/SKILL.md", "x"); },
+  };
+  await assert.rejects(
+    () => packSkillDirectory(selection),
+    (error) => error.code === "SKILL_PACKAGE_INVALID",
+  );
+  assert.equal(touched, false);
+});
+
+test("packSkillDirectory maps an unavailable Blob constructor", async () => {
+  const originalBlob = globalThis.Blob;
+  try {
+    globalThis.Blob = undefined;
+    await assert.rejects(
+      () => packSkillDirectory([fakeBrowserFile("skill/SKILL.md", "x")]),
+      (error) => error.code === "SKILL_PACKAGE_INVALID" && !error.message.includes("Blob"),
+    );
+  } finally {
+    globalThis.Blob = originalBlob;
+  }
+});
+
+test("api: skills expose all scoped methods with encoded names and preserved details", async () => {
+  const archive = new Blob(["zip"], { type: "application/zip" });
+  const signal = new AbortController().signal;
+  const fetchImpl = makeFetch(({ url, init }, index) => {
+    const parsed = parse(url);
+    if (index === 0) {
+      assert.equal(parsed.pathname, "/api/cpwb/skills");
+      assert.equal(parsed.searchParams.get("scope"), "project");
+      assert.equal(parsed.searchParams.get("projectId"), "7");
+      assert.equal(init.signal, signal);
+      return jsonResponse(200, { items: [] });
+    }
+    if (index === 1) {
+      assert.equal(parsed.pathname, "/api/cpwb/skills/import");
+      assert.equal(init.method, "POST");
+      assert.equal(init.body, archive);
+      assert.equal(init.headers["content-type"], "application/zip");
+      assert.equal(init.headers["x-cpwb-skill-scope"], "project");
+      assert.equal(init.headers["x-cpwb-project-id"], "7");
+      assert.equal(init.headers["x-cpwb-filename"], encodeURIComponent("x 名.zip"));
+      assert.equal(init.headers["x-cpwb-replace"], "false");
+      assert.equal(init.headers["x-cpwb-confirm-collection"], "false");
+      return jsonResponse(409, { error: { code: "SKILL_CONFLICT", message: "同名 Skill 已存在", details: { existing: { name: "x" }, incoming: { name: "x" } } } });
+    }
+    if (index === 2) {
+      assert.equal(parsed.pathname, "/api/cpwb/skills/a%2Fb");
+      assert.equal(init.method, "PATCH");
+      assert.deepEqual(JSON.parse(init.body), { scope: "project", projectId: 7, operation: "enable" });
+      return jsonResponse(200, { enabled: true });
+    }
+    if (index === 3) {
+      assert.equal(parsed.pathname, "/api/cpwb/skills/a%2Fb");
+      assert.equal(init.method, "DELETE");
+      assert.equal(parsed.searchParams.get("scope"), "project");
+      assert.equal(parsed.searchParams.get("projectId"), "7");
+      return jsonResponse(200, { removed: true });
+    }
+    assert.equal(parsed.pathname, "/api/cpwb/skills/a%2Fb/reveal");
+    assert.equal(init.method, "POST");
+    assert.deepEqual(JSON.parse(init.body), { scope: "project", projectId: 7 });
+    return jsonResponse(200, { path: "/tmp/project/.dsh/skills/a-b" });
+  });
+  const api = createCpwbApi({ fetchImpl });
+  await api.skills.list({ scope: "project", projectId: 7, signal });
+  await assert.rejects(
+    () => api.skills.importBundle({ archive, scope: "project", projectId: 7, sourceName: "x 名.zip", replace: false }, { signal }),
+    (error) => error.code === "SKILL_CONFLICT" && error.details.existing.name === "x",
+  );
+  await api.skills.setEnabled({ name: "a/b", scope: "project", projectId: 7, enabled: true }, { signal });
+  await api.skills.remove({ name: "a/b", scope: "project", projectId: 7 });
+  await api.skills.reveal({ name: "a/b", scope: "project", projectId: 7 });
+});
 
 test("sidebar renders the approved hierarchy with one Workbench-styled settings action", () => {
   const recentSessions = Array.from({ length: 25 }, (_, index) => ({
@@ -220,6 +479,65 @@ test("api: documents list encodes scope/scopeId query", async () => {
   });
   const api = createCpwbApi({ fetchImpl });
   await api.documents.list({ scope: "knowledgeBase", scopeId: 2 });
+});
+
+test("store keeps non-vector session files scoped to their owning session", async () => {
+  const sessionId = "session-cpwb-files";
+  const file = { name: "固定资料.md", size: 8 };
+  const calls = [];
+  const api = {
+    health: async () => ({ ok: true }),
+    sessionFiles: {
+      async list(inputSessionId) {
+        calls.push(["list", inputSessionId]);
+        return [{ id: 31, sessionId, originalName: "固定资料.md", parseStatus: "ready" }];
+      },
+      async upload(input) {
+        calls.push(["upload", input.sessionId, input.file]);
+        return { id: 31, sessionId, originalName: "固定资料.md", parseStatus: "ready" };
+      },
+      async remove(id) {
+        calls.push(["remove", id]);
+        return { removed: true };
+      },
+    },
+  };
+  const store = createWorkbenchStore(api);
+
+  await store.actions.loadSessionFiles(sessionId);
+  await store.actions.uploadSessionFiles({ files: [file], sessionId });
+  await store.actions.deleteSessionFile({ sessionId, id: 31 });
+
+  assert.deepEqual(calls, [
+    ["list", sessionId],
+    ["upload", sessionId, file],
+    ["list", sessionId],
+    ["remove", 31],
+    ["list", sessionId],
+  ]);
+  assert.equal(store.getSnapshot().sessionFilesBySession[sessionId][0].originalName, "固定资料.md");
+});
+
+test("api: session file upload uses the File Vault route and never document scope", async () => {
+  const file = { name: "中文 资料.md", size: 8 };
+  const fetchImpl = makeFetch(({ url, init }, index) => {
+    const parsed = parse(url);
+    if (index === 0) {
+      assert.equal(parsed.pathname, "/api/cpwb/session-files");
+      assert.equal(parsed.searchParams.get("sessionId"), "session-cpwb-1");
+      return jsonResponse(200, []);
+    }
+    assert.equal(parsed.pathname, "/api/cpwb/session-files");
+    assert.equal(init.method, "POST");
+    assert.equal(init.headers["x-cpwb-session-id"], "session-cpwb-1");
+    assert.equal(init.headers["x-cpwb-filename"], encodeURIComponent(file.name));
+    assert.equal(init.body, file);
+    return jsonResponse(201, { id: 1, sessionId: "session-cpwb-1", originalName: file.name, parseStatus: "ready" });
+  });
+  const api = createCpwbApi({ fetchImpl });
+  await api.sessionFiles.list("session-cpwb-1");
+  await api.sessionFiles.upload({ sessionId: "session-cpwb-1", file });
+  assert.equal(api.sessionFiles.contentUrl(1, { download: true }), "/api/cpwb/session-files/1/content?download=1");
 });
 
 test("api: document contentUrl builds safe inline and download URLs", () => {
@@ -538,6 +856,165 @@ test("api: cpwbApi is a ready singleton", () => {
 });
 
 // ---------------------------------------------------------------- store
+
+function skillCatalog(scope, projectId, suffix = "") {
+  return {
+    scope: scope === "global" ? { kind: "global" } : { kind: "project", projectId },
+    rootPath: scope === "global" ? "/dsh/skills" : "/project/.dsh/skills",
+    items: [{ name: "demo" + suffix, state: "enabled" }],
+    diagnostics: [],
+  };
+}
+
+test("store keeps independent global and project skill catalogs", async () => {
+  const calls = [];
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: {
+      async list(input) {
+        const { signal, ...request } = input;
+        calls.push(["list", request]);
+        return skillCatalog(input.scope, input.projectId);
+      },
+      async setEnabled(input) { calls.push(["setEnabled", input]); return { name: input.name, state: input.enabled ? "enabled" : "disabled" }; },
+      async remove(input) { calls.push(["remove", input]); return { removed: true }; },
+      async reveal(input) { calls.push(["reveal", input]); return { revealed: true }; },
+    },
+  };
+  const store = createWorkbenchStore(api);
+  await store.actions.loadSkills({ scope: "global" });
+  await store.actions.loadSkills({ scope: "project", projectId: 7 });
+  assert.equal(store.getSnapshot().skillCatalogs.global.status, "ready");
+  assert.equal(store.getSnapshot().skillCatalogs.global.data.rootPath, "/dsh/skills");
+  assert.equal(store.getSnapshot().skillCatalogs["project:7"].data.rootPath, "/project/.dsh/skills");
+  await store.actions.setSkillEnabled({ scope: "project", projectId: 7, name: "x", enabled: false });
+  assert.deepEqual(calls.at(-1), ["list", { scope: "project", projectId: 7 }]);
+  assert.equal(store.getSnapshot().action, null);
+});
+
+test("store makes same-key skill loads last-response-wins and keeps different keys independent", async () => {
+  const pending = [];
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: { list(input) {
+      return new Promise((resolve, reject) => { pending.push({ input, signal: input.signal, resolve, reject }); });
+    } },
+  };
+  const store = createWorkbenchStore(api);
+  const first = store.actions.loadSkills({ scope: "global" });
+  const second = store.actions.loadSkills({ scope: "global" });
+  const project = store.actions.loadSkills({ scope: "project", projectId: 3 });
+  assert.equal(pending.length, 3);
+  assert.equal(pending[0].signal.aborted, true);
+  pending[0].resolve(skillCatalog("global", null, "-old"));
+  pending[1].resolve(skillCatalog("global", null, "-new"));
+  pending[2].resolve(skillCatalog("project", 3, "-project"));
+  await Promise.all([first, second, project]);
+  assert.equal(store.getSnapshot().skillCatalogs.global.data.items[0].name, "demo-new");
+  assert.equal(store.getSnapshot().skillCatalogs["project:3"].data.items[0].name, "demo-project");
+  assert.equal(store.getSnapshot().skillCatalogs.global.data.items[0].name, "demo-new");
+});
+
+test("store retains last successful skill data on load error without touching general error", async () => {
+  let fail = false;
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: { list: async () => {
+      if (fail) throw Object.assign(new Error("读取失败"), { code: "SKILL_PERMISSION_DENIED", details: { scope: "global" } });
+      return skillCatalog("global");
+    } },
+  };
+  const store = createWorkbenchStore(api);
+  await store.actions.loadSkills({ scope: "global" });
+  const previous = store.getSnapshot().skillCatalogs.global.data;
+  fail = true;
+  await store.actions.loadSkills({ scope: "global" });
+  const slot = store.getSnapshot().skillCatalogs.global;
+  assert.equal(slot.status, "error");
+  assert.strictEqual(slot.data, previous);
+  assert.equal(slot.error.code, "SKILL_PERMISSION_DENIED");
+  assert.equal(store.getSnapshot().error, null);
+});
+
+test("store skill mutations reload exactly the affected key and preserve conflict details", async () => {
+  const calls = [];
+  const conflict = Object.assign(new Error("同名"), {
+    code: "SKILL_CONFLICT",
+    details: { existing: { name: "x" }, incoming: { name: "x" } },
+  });
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: {
+      list: async (input) => { calls.push(["list", input]); return skillCatalog(input.scope, input.projectId); },
+      importBundle: async (input) => { calls.push(["importBundle", input]); throw conflict; },
+      setEnabled: async (input) => { calls.push(["setEnabled", input]); return { ok: true }; },
+      remove: async (input) => { calls.push(["remove", input]); return { removed: true }; },
+      reveal: async (input) => { calls.push(["reveal", input]); return { revealed: true }; },
+    },
+  };
+  const store = createWorkbenchStore(api);
+  await assert.rejects(() => store.actions.importSkill({ scope: "global", archive: new Blob(), sourceName: "x.zip" }), /同名/);
+  assert.equal(store.getSnapshot().skillAction.type, "importSkill");
+  assert.equal(store.getSnapshot().skillAction.status, "error");
+  assert.deepEqual(store.getSnapshot().skillAction.error.details, conflict.details);
+  assert.notEqual(store.getSnapshot().action?.type, "importSkill");
+
+  calls.length = 0;
+  await assert.rejects(() => store.actions.importSkill({
+    scope: "global",
+    archive: new Blob(),
+    sourceName: "collection.zip",
+    replace: true,
+    confirmCollection: true,
+  }), /同名/);
+  assert.equal(calls[0][1].replace, true);
+  assert.equal(calls[0][1].confirmCollection, true);
+
+  calls.length = 0;
+  await store.actions.setSkillEnabled({ scope: "project", projectId: 7, name: "x", enabled: false });
+  assert.deepEqual(calls.map(([type, input]) => [type, input.scope, input.projectId]), [
+    ["setEnabled", "project", 7], ["list", "project", 7],
+  ]);
+  calls.length = 0;
+  await store.actions.deleteSkill({ scope: "global", name: "x" });
+  assert.deepEqual(calls.map(([type, input]) => [type, input.scope, input.projectId]), [
+    ["remove", "global", undefined], ["list", "global", undefined],
+  ]);
+  calls.length = 0;
+  await store.actions.revealSkill({ scope: "project", projectId: 7, name: "x" });
+  assert.deepEqual(calls.map(([type]) => type), ["reveal"]);
+});
+
+test("store skill actions validate scope and dispose aborts in-flight skill load", async () => {
+  let request;
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: { list: async (input) => new Promise((resolve) => { request = { resolve, signal: input.signal }; }) },
+  };
+  const store = createWorkbenchStore(api);
+  await assert.rejects(() => store.actions.loadSkills({ scope: "project", projectId: 0 }), /project/i);
+  const loading = store.actions.loadSkills({ scope: "global" });
+  store.dispose();
+  assert.equal(request.signal.aborted, true);
+  request.resolve(skillCatalog("global"));
+  await loading;
+  assert.equal(store.getSnapshot().skillCatalogs.global.status, "loading");
+});
+
+test("store reports an authoritative reload failure after a successful skill mutation", async () => {
+  const api = {
+    health: async () => ({ ok: true }),
+    skills: {
+      setEnabled: async () => ({ ok: true }),
+      list: async () => { throw Object.assign(new Error("刷新失败"), { code: "SKILL_PERMISSION_DENIED" }); },
+    },
+  };
+  const store = createWorkbenchStore(api);
+  await assert.rejects(() => store.actions.setSkillEnabled({ scope: "global", name: "demo", enabled: false }), /刷新失败/);
+  assert.equal(store.getSnapshot().skillAction.status, "error");
+  assert.equal(store.getSnapshot().skillAction.error.code, "SKILL_PERMISSION_DENIED");
+  assert.equal(store.getSnapshot().skillCatalogs.global.status, "error");
+});
 
 /** Build a mock fetch that serves a full refresh + project refresh. */
 function scenarioFetch(overrides = {}) {

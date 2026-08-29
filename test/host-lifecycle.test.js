@@ -15,7 +15,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { inject, apply, createScheduledRunPrompt } from "../src/host/index.js";
@@ -49,6 +49,13 @@ test("host injects the DSH agent/session/workspace services it composes", () => 
     assert.ok(inject.includes(name), "missing inject: " + name);
   }
   assert.equal(inject.includes("llm"), false, "the plugin must not register a generation adapter");
+});
+
+test("host wires one resolved Skill manager directly into the API", async () => {
+  const source = await readFile(new URL("../src/host/index.js", import.meta.url), "utf8");
+  assert.match(source, /const skillManager = createSkillManager\(\{ dshHome, repos \}\)/);
+  assert.match(source, /skills: skillManager/);
+  assert.equal(inject.includes("skillManager"), false, "Skill manager must not become a Cordis service slot");
 });
 
 test("host apply fails cleanly when initialization cannot open its database", async (t) => {

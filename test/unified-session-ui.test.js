@@ -14,12 +14,15 @@ import {
 import { WorkbenchNodeMark } from "../src/client/SidebarBrand.js";
 import { SessionListPage } from "../src/client/SessionListPage.js";
 import { createNavigationStore } from "../src/client/navigation.js";
+import { SkillsPage, SkillCollectionDialog, SkillConflictDialog } from "../src/client/SkillsPage.js";
+import { actionMatches, copySkillPath, shouldRetainSkillInput, skillCatalogCount, skillScopeKey, ProjectSkillsPanel, SkillScopeManager } from "../src/client/SkillsManager.js";
 import {
   WorkbenchSessionShell,
   PROJECT_TOOL_TABS,
   KNOWLEDGE_TOOL_TABS,
   INDEPENDENT_TOOL_TABS,
   GlobalSchedulesPanel,
+  SessionFilesPanel,
 } from "../src/client/WorkbenchSessionShell.js";
 
 const { DraftConversation, NewSessionDialog } = newSessionDialogModule;
@@ -165,7 +168,7 @@ test("new-session dialog exposes one owner choice and inherited-context preview"
   assert.doesNotMatch(html, /<select/);
 });
 
-test("zero-id draft uses the full conversation chrome with model and image controls", () => {
+test("zero-id draft uses the full conversation chrome with model, image, and file controls", () => {
   const state = {
     draft: { scope: { kind: "project", id: 1 }, pinnedSources: [], text: "", status: "pristine", sessionId: null, error: null },
     projects: [{ id: 1, name: "DSH Research", path: "/tmp/research" }],
@@ -184,6 +187,7 @@ test("zero-id draft uses the full conversation chrome with model and image contr
   assert.match(html, /Session ID 将在首次发送时生成/);
   assert.match(html, /选择模型与推理强度/);
   assert.match(html, /添加图片/);
+  assert.match(html, /添加文件/);
   assert.match(html, /PROJECT SYSTEM/);
   assert.match(html, /发送前不创建 Session/);
 });
@@ -269,6 +273,140 @@ test("sidebar separates the compact Workbench node from the footer wordmark", ()
   assert.doesNotMatch(html, /DEEPSEEK/);
   assert.match(html, /class="cpwb-sidebar-brand-footer"/);
   assert.match(html, /aria-label="Harness Workbench"/);
+});
+
+test("skills navigation is mutually exclusive and sidebar entry sits above settings", () => {
+  const navigation = createNavigationStore();
+  navigation.openSkills();
+  assert.equal(navigation.getSnapshot().page, "skills");
+  const html = renderToStaticMarkup(React.createElement(WorkbenchSidebar, { page: "skills", recentSessions: [] }));
+  assert.match(html, /aria-current="page"[^>]*>[\s\S]*Skills/);
+  assert.ok(html.indexOf(">Skills<") < html.indexOf(">设置<"));
+});
+
+test("SkillsPage presents Skills with the 技能矩阵 alias and defaults to global scope", () => {
+  const state = {
+    projects: [{ id: 7, name: "Research" }],
+    skillCatalogs: { global: { status: "ready", data: { scope: { kind: "global" }, rootPath: "/dsh/skills", items: [], diagnostics: [] }, error: null } },
+    skillAction: null,
+  };
+  const store = { subscribe: () => () => {}, getSnapshot: () => state, actions: { loadSkills: async () => {} } };
+  const html = renderToStaticMarkup(React.createElement(SkillsPage, { store }));
+  assert.match(html, /SKILL MATRIX \/ CHIP BAY/);
+  assert.match(html, /<h1>Skills <span class="cpwb-skills-title-alias">技能矩阵<\/span><\/h1>/);
+  assert.match(html, /将可复用能力写入神经芯片，在全局或当前项目接入 Workbench。/);
+  assert.match(html, /role="img" aria-label="神经技能芯片已连接"/);
+  assert.match(html, /class="cpwb-skills-chip-die"/);
+  assert.match(html, /role="tab" aria-selected="true"[^>]*>全局矩阵/);
+  assert.match(html, /项目矩阵/);
+  assert.match(html, /\/dsh\/skills/);
+  assert.match(html, /导入目录/);
+  assert.match(html, /导入 ZIP/);
+  assert.doesNotMatch(html, /替换 Skill/);
+});
+
+test("Skill conflict dialog is only an import decision", () => {
+  const html = renderToStaticMarkup(React.createElement(SkillConflictDialog, {
+    existing: { name: "x", description: "old", state: "enabled", files: ["SKILL.md"], installedPath: "/dsh/skills/x" },
+    incoming: { name: "x", description: "new", files: ["SKILL.md", "references/a.md"], sourceName: "x.zip" },
+    onCancel() {}, onReplace() {},
+  }));
+  assert.match(html, /同名 Skill 已存在/);
+  assert.match(html, /取消/);
+  assert.match(html, /确认替换/);
+  assert.match(html, /SKILL\.md/);
+  assert.match(html, /\/dsh\/skills\/x/);
+});
+
+test("Skill collection dialog previews every child and marks replacements before confirmation", () => {
+  const html = renderToStaticMarkup(React.createElement(SkillCollectionDialog, {
+    preview: {
+      kind: "collection",
+      sourceName: "superpowers.zip",
+      count: 2,
+      conflictCount: 1,
+      skills: [
+        { name: "brainstorming", description: "Explore intent", fileCount: 2, conflict: true, existing: { state: "disabled" } },
+        { name: "systematic-debugging", description: "Debug from evidence", fileCount: 1, conflict: false },
+      ],
+    },
+    scope: "global",
+    onCancel() {},
+    onConfirm() {},
+  }));
+  assert.match(html, /SKILL COLLECTION \/ MATRIX LOAD/);
+  assert.match(html, /检测到 2 个 Skills/);
+  assert.match(html, /brainstorming/);
+  assert.match(html, /systematic-debugging/);
+  assert.match(html, /替换已停用版本/);
+  assert.match(html, /新增/);
+  assert.match(html, /导入 2 个 Skills/);
+  assert.match(html, /superpowers\.zip/);
+});
+
+test("SkillsPage keeps each catalog count beside its scope tab and renders the A1 status reactor", () => {
+  const state = {
+    projects: [{ id: 7, name: "Research" }],
+    skillCatalogs: {
+      global: { status: "ready", data: { rootPath: "/dsh/skills", items: [{ name: "global", description: "Global skill", state: "enabled", health: "valid", path: "/dsh/skills/global", fileCount: 1 }], diagnostics: [] }, error: null },
+      "project:7": { status: "ready", data: { items: [{ name: "project-a" }, { name: "project-b" }] }, error: null },
+    },
+  };
+  const store = { subscribe: () => () => {}, getSnapshot: () => state, actions: { loadSkills: async () => {} } };
+  assert.equal(skillCatalogCount(state, "global"), 1);
+  assert.equal(skillCatalogCount(state, "project", 7), 2);
+  const html = renderToStaticMarkup(React.createElement(SkillsPage, { store }));
+  assert.match(html, />全局矩阵<span class="cpwb-skills-tab-count">（1）<\/span><\/button>/);
+  assert.match(html, />项目矩阵<span class="cpwb-skills-tab-count">（2）<\/span><\/button>/);
+  assert.doesNotMatch(html, /class="cpwb-skills-count"/);
+  assert.match(html, /class="cpwb-skill-reactor-core" aria-hidden="true"/);
+  assert.match(html, /class="cpwb-skill-reactor-label">已启用<\/span>/);
+});
+
+test("skill action matching is bound to the canonical scope key", () => {
+  const action = { type: "setSkillEnabled", name: "same-skill", key: "project:7", status: "running" };
+  assert.equal(skillScopeKey("global"), "global");
+  assert.equal(skillScopeKey("project", 7), "project:7");
+  assert.equal(actionMatches(action, "setSkillEnabled", "same-skill", "project:7"), true);
+  assert.equal(actionMatches(action, "setSkillEnabled", "same-skill", "global"), false);
+  assert.equal(actionMatches({ ...action, key: "global" }, "setSkillEnabled", "same-skill", "project:7"), false);
+});
+
+test("only same-scope conflicts retain an import payload", () => {
+  const details = { existing: { name: "same-skill" }, incoming: { name: "same-skill" } };
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT", details }, "global", "global", { archive: {} }), true);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT", details }, "project:7", "global", { archive: {} }), false);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_PACKAGE_INVALID", details }, "global", "global", { archive: {} }), false);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT", details: { incoming: { name: "same-skill" } } }, "global", "global", { archive: {} }), false);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT", details: { existing: { name: "same-skill" } } }, "global", "global", { archive: {} }), false);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_CONFLICT", details }, "global", "global", null), false);
+  const collection = { kind: "collection", count: 2, conflictCount: 0, skills: [
+    { name: "a", conflict: false }, { name: "b", conflict: false },
+  ] };
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_COLLECTION_CONFIRMATION_REQUIRED", details: collection }, "global", "global", { archive: {} }), true);
+  assert.equal(shouldRetainSkillInput({ code: "SKILL_COLLECTION_CONFIRMATION_REQUIRED", details: { ...collection, skills: [] } }, "global", "global", { archive: {} }), false);
+});
+
+test("copySkillPath reports missing and rejected clipboard writers instead of false success", async () => {
+  await assert.rejects(() => copySkillPath(undefined, "/dsh/skills"), /不支持复制/);
+  await assert.rejects(() => copySkillPath(async () => { throw new Error("denied"); }, "/dsh/skills"), /denied/);
+  let copied = "";
+  assert.equal(await copySkillPath(async (path) => { copied = path; }, "/dsh/skills"), true);
+  assert.equal(copied, "/dsh/skills");
+});
+
+test("skill import controls fail closed only when the selected project is unavailable", () => {
+  const unavailableState = { skillCatalogs: {}, skillAction: null };
+  const unavailableStore = { subscribe: () => () => {}, getSnapshot: () => unavailableState, actions: {} };
+  const unavailable = renderToStaticMarkup(React.createElement(SkillScopeManager, { store: unavailableStore, scope: "project", projectId: null }));
+  assert.match(unavailable, /disabled=""/);
+  assert.match(unavailable, /当前项目目录不可用/);
+
+  const validState = { skillCatalogs: {}, skillAction: null };
+  const validStore = { subscribe: () => () => {}, getSnapshot: () => validState, actions: {} };
+  const valid = renderToStaticMarkup(React.createElement(SkillScopeManager, { store: validStore, scope: "project", projectId: 7 }));
+  assert.doesNotMatch(valid, /当前项目目录不可用/);
+  assert.doesNotMatch(valid, /disabled=""/);
 });
 
 test("only the footer wordmark renders the static cyberpunk fracture layer", () => {
@@ -382,9 +520,18 @@ test("project session list keeps a visible locked project scope", () => {
 });
 
 test("right rail follows the project, knowledge-base, and independent tool matrix", () => {
-  assert.deepEqual(PROJECT_TOOL_TABS.map((item) => item[1]), ["待办", "定时任务", "关联知识库", "每日总结"]);
-  assert.deepEqual(KNOWLEDGE_TOOL_TABS.map((item) => item[1]), ["文档", "索引", "关联项目", "全局定时"]);
-  assert.deepEqual(INDEPENDENT_TOOL_TABS.map((item) => item[1]), ["上下文", "文件", "Subagent", "全局定时"]);
+  assert.deepEqual(PROJECT_TOOL_TABS.map(([id, label]) => [id, label]), [
+    ["todos", "待办"],
+    ["files", "会话文件"],
+    ["summary", "每日总结"],
+    ["schedule", "定时任务"],
+    ["knowledge", "知识芯片"],
+    ["skills", "Skills"],
+  ]);
+  assert.deepEqual(KNOWLEDGE_TOOL_TABS.map((item) => item[1]), ["会话文件", "芯片文档", "索引", "关联项目", "全局定时"]);
+  assert.deepEqual(INDEPENDENT_TOOL_TABS.map((item) => item[1]), ["会话文件", "Subagent", "全局定时"]);
+  assert.equal(KNOWLEDGE_TOOL_TABS.some(([id]) => id === "skills"), false);
+  assert.equal(INDEPENDENT_TOOL_TABS.some(([id]) => id === "skills"), false);
 
   for (const [kind, id, labels] of [
     ["project", 7, PROJECT_TOOL_TABS],
@@ -396,12 +543,142 @@ test("right rail follows the project, knowledge-base, and independent tool matri
       projects: [{ id: 7, name: "Research" }],
       knowledgeBases: [{ id: 2, name: "架构库" }],
       workbenchSessions: { [sessionId]: { sessionId, scope: { kind, id }, title: "会话" } },
-      linkedKnowledgeBases: [], documents: [], schedules: [], globalSchedules: [], contextBySession: {},
+      linkedKnowledgeBases: [], documents: [], schedules: [], globalSchedules: [], contextBySession: {}, sessionFilesBySession: {},
     };
     const store = { getSnapshot: () => state, subscribe: () => () => {}, actions: {} };
     const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, { sessionId, open: true, store, layoutMode: "desktop" }));
     for (const [, label] of labels) assert.match(html, new RegExp(label));
+    const toolLabels = [...html.matchAll(/data-tooltip="([^"]+)"/g)].map((match) => match[1]);
+    assert.deepEqual(toolLabels, labels.map(([, label]) => label));
+    for (const [, label] of labels) assert.match(html, new RegExp(`aria-label="${label}"`));
+    assert.doesNotMatch(html, /title="(?:待办|会话文件|每日总结|定时任务|知识芯片|Skills)"/);
+    if (kind === "project") assert.match(html, /项目工具舱 · 07/);
+    if (kind === "independent") {
+      assert.match(html, /type="file"/);
+      assert.match(html, /multiple=""/);
+      assert.doesNotMatch(html, />上下文</);
+      assert.doesNotMatch(html, /无默认继承来源/);
+    }
   }
+});
+
+test("session file panel keeps scope guidance compact and removes the redundant empty card", () => {
+  const sessionId = "session-cpwb-file-guidance";
+  const state = { sessionFilesBySession: { [sessionId]: [] } };
+  const store = { actions: { loadSessionFiles: async () => {} } };
+  const render = (scopeKind) => renderToStaticMarkup(React.createElement(SessionFilesPanel, {
+    sessionId,
+    state,
+    store,
+    scopeKind,
+  }));
+
+  const project = render("project");
+  assert.match(project, /私有存储/);
+  assert.match(project, /会话文件/);
+  assert.match(project, /仅当前会话/);
+  assert.match(project, /上传后用 @文件 引用/);
+  assert.match(project, /项目文件直接用 @路径/);
+  assert.match(project, /上传会话文件/);
+  assert.match(project, /点击或拖拽/);
+  assert.match(project, /单文件最大 50 MB/);
+  assert.doesNotMatch(project, /直接注入当前轮上下文/);
+  assert.doesNotMatch(project, /不会向量化/);
+  assert.doesNotMatch(project, /32,000/);
+  assert.doesNotMatch(project, /暂无会话文件/);
+
+  const knowledge = render("knowledge_base");
+  assert.match(knowledge, /上传后用 @文件 引用/);
+  assert.match(knowledge, /不会写入知识芯片/);
+  assert.doesNotMatch(knowledge, /项目文件直接用 @路径/);
+
+  const independent = render("independent");
+  assert.match(independent, /上传后用 @文件 引用/);
+  assert.doesNotMatch(independent, /项目文件直接用 @路径/);
+  assert.doesNotMatch(independent, /不会写入知识芯片/);
+});
+
+test("project Skills panel binds to the current project without global controls", () => {
+  const state = {
+    skillCatalogs: {
+      "project:7": {
+        status: "ready",
+        data: {
+          scope: { kind: "project", projectId: 7 },
+          rootPath: "/project/.dsh/skills",
+          items: [{
+            name: "release-notes",
+            description: "Draft release notes from the current project context.",
+            state: "enabled",
+            health: "valid",
+            path: "/project/.dsh/skills/release-notes",
+            fileCount: 2,
+            shadowsGlobal: true,
+          }],
+          diagnostics: [],
+        },
+        error: null,
+      },
+    },
+  };
+  const store = { subscribe: () => () => {}, getSnapshot: () => state, actions: { loadSkills: async () => {} } };
+  const html = renderToStaticMarkup(React.createElement(ProjectSkillsPanel, { store, projectId: 7 }));
+  assert.match(html, /项目 Skills/);
+  assert.match(html, /\.dsh\/skills\//);
+  assert.match(html, /title="\/project\/\.dsh\/skills"/);
+  assert.match(html, /title="\/project\/\.dsh\/skills\/release-notes"/);
+  assert.match(html, /2 个文件 · \.dsh\/skills\/release-notes/);
+  assert.match(html, /release-notes/);
+  assert.match(html, /覆盖全局版本/);
+  assert.match(html, /导入 Skill/);
+  assert.doesNotMatch(html, /选择项目/);
+});
+
+test("right rail tabs use unique accessible ids and roving keyboard tab stops", () => {
+  const state = {
+    projects: [{ id: 7, name: "Research" }],
+    workbenchSessions: {
+      "session-cpwb-project-a": { sessionId: "session-cpwb-project-a", scope: { kind: "project", id: 7 }, title: "A" },
+      "session-cpwb-project-b": { sessionId: "session-cpwb-project-b", scope: { kind: "project", id: 7 }, title: "B" },
+    },
+    linkedKnowledgeBases: [],
+  };
+  const store = { subscribe: () => () => {}, getSnapshot: () => state, actions: { refreshProject: async () => {} } };
+  const html = renderToStaticMarkup(React.createElement(React.Fragment, null,
+    React.createElement(WorkbenchSessionShell, { sessionId: "session-cpwb-project-a", open: true, store, layoutMode: "desktop" }),
+    React.createElement(WorkbenchSessionShell, { sessionId: "session-cpwb-project-b", open: true, store, layoutMode: "desktop" })));
+  const tabMatches = [...html.matchAll(/<button type="button" role="tab" id="([^"]+)"[^>]*tabindex="(-?\d+)"[^>]*aria-selected="([^"]+)"/g)];
+  const panelMatches = [...html.matchAll(/<div id="([^"]+)" class="cpwb-project-tool-body" role="tabpanel" aria-label="([^"]+)" aria-labelledby="([^"]+)"/g)];
+  const projectToolCount = PROJECT_TOOL_TABS.length;
+  assert.equal(tabMatches.length, projectToolCount * 2);
+  assert.equal(new Set(tabMatches.map((match) => match[1])).size, projectToolCount * 2);
+  for (let offset = 0; offset < tabMatches.length; offset += projectToolCount) {
+    assert.equal(tabMatches[offset][2], "0");
+    assert.equal(tabMatches[offset][3], "true");
+    for (const match of tabMatches.slice(offset + 1, offset + projectToolCount)) assert.equal(match[2], "-1");
+  }
+  assert.equal(panelMatches.length, 2);
+  assert.equal(new Set(panelMatches.map((match) => match[1])).size, 2);
+  assert.ok(panelMatches.every((match) => tabMatches.some((tab) => tab[1] === match[3] && tab[3] === "true")));
+});
+
+test("server-rendered project skill managers allocate unique import menu ids", () => {
+  const snapshot = {
+    skillCatalogs: {
+      "project:7": { status: "ready", data: { rootPath: "/project-a/.dsh/skills", items: [], diagnostics: [] } },
+      "project:8": { status: "ready", data: { rootPath: "/project-b/.dsh/skills", items: [], diagnostics: [] } },
+    },
+  };
+  const store = { subscribe: () => () => {}, getSnapshot: () => snapshot, actions: {} };
+  const html = renderToStaticMarkup(React.createElement(React.Fragment, null,
+    React.createElement(ProjectSkillsPanel, { store, projectId: 7 }),
+    React.createElement(ProjectSkillsPanel, { store, projectId: 8 })));
+  const triggerIds = [...html.matchAll(/id="([^"]+-trigger)"[^>]*aria-haspopup="menu"/g)].map((match) => match[1]);
+  const menuIds = [...html.matchAll(/<div id="([^"]+)"[^>]*role="menu"/g)].map((match) => match[1]);
+  assert.equal(triggerIds.length, 2);
+  assert.equal(menuIds.length, 0, "closed SSR menus should not render menu nodes");
+  assert.equal(new Set(triggerIds).size, 2);
+  assert.ok(triggerIds.every((id) => id.includes("cpwb-skills-import-menu-")));
 });
 
 test("container deletion defaults to preserving sessions and discloses every cleanup boundary", () => {

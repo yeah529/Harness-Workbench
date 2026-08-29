@@ -28,8 +28,10 @@ import { createCodexAuth } from "./codex-auth.js";
 import { createContextResolver } from "./context.js";
 import { createSessionIndexAdapter } from "./session-index.js";
 import { createMaintenanceService } from "./maintenance.js";
+import { createSessionFileVault } from "./session-files.js";
 import { createPurgeJobStore } from "../maintenance/purge-jobs.js";
 import { DEFAULT_DSH_HOME } from "./config.js";
+import { createSkillManager } from "./skill-manager.js";
 
 /**
  * Host plugin dependencies: the DSH web server, the LLM adapter registry, and
@@ -116,7 +118,9 @@ function apply(ctx, config = {}) {
     try {
       db = openDatabase({ dataDir });
       const repos = createRepositories(db);
+      const skillManager = createSkillManager({ dshHome, repos });
       const contextResolver = createContextResolver({ repos });
+      const sessionFiles = createSessionFileVault({ dataDir, repos });
       const settings = createWorkbenchSettings({ repos, dshInitial: config.settings?.initial });
       const ollama = createOllamaClient();
       vectorIndex = createVectorIndex({ dataDir });
@@ -178,7 +182,15 @@ function apply(ctx, config = {}) {
         const title = kind === "knowledge_base" ? "Workbench KB " + scopeId : "Workbench Independent";
         return existing ?? ctx.workspaceRegistry.create(path, title);
       };
-      sessionService = createSessionService({ ctx, repos, retriever, sessionWorkspace, contextResolver, sessionIndex });
+      sessionService = createSessionService({
+        ctx,
+        repos,
+        retriever,
+        sessionWorkspace,
+        contextResolver,
+        sessionIndex,
+        fileContext: sessionFiles,
+      });
       const runPrompt = createScheduledRunPrompt(sessionService);
       scheduler = createScheduler({
         repos,
@@ -225,12 +237,14 @@ function apply(ctx, config = {}) {
         retriever,
         dataDir,
         sessions: sessionService,
+        sessionFiles,
         settings,
         embeddingFactory: makeEmbedding,
         onEmbeddingConfigChange,
         credentials,
         codexAuth,
         dshAdapter: optionalContextService(ctx, "dshAdapter") ?? null,
+        skills: skillManager,
         services: {
           maintenance,
           deleteProject: ({ projectId, sessionPolicy }) => deleteContainer({ kind: "project", id: projectId, sessionPolicy }),

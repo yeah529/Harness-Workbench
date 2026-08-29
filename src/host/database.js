@@ -209,6 +209,26 @@ CREATE INDEX IF NOT EXISTS workbench_sessions_scope_activity
 CREATE INDEX IF NOT EXISTS workbench_sessions_archive_activity
   ON workbench_sessions(archived_at, updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS session_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL REFERENCES workbench_sessions(session_id) ON DELETE CASCADE,
+  sha256 TEXT NOT NULL,
+  original_name TEXT NOT NULL,
+  mime_type TEXT,
+  size INTEGER NOT NULL,
+  parse_status TEXT NOT NULL CHECK (parse_status IN ('ready', 'failed')),
+  parse_error TEXT,
+  context_text TEXT,
+  context_code_points INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  UNIQUE (session_id, original_name)
+);
+
+CREATE INDEX IF NOT EXISTS session_files_session_created
+  ON session_files(session_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS session_files_sha256
+  ON session_files(sha256);
+
 CREATE TABLE IF NOT EXISTS session_context_sources (
   session_id TEXT NOT NULL REFERENCES workbench_sessions(session_id) ON DELETE CASCADE,
   source_kind TEXT NOT NULL CHECK (source_kind IN ('knowledge_base', 'workspace_file', 'uploaded_file', 'session')),
@@ -410,6 +430,27 @@ CREATE UNIQUE INDEX schedules_session_id_unique
   ON schedules(session_id) WHERE session_id IS NOT NULL;
 `;
 
+const V9_TO_V10_MIGRATION_SQL = `
+CREATE TABLE IF NOT EXISTS session_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL REFERENCES workbench_sessions(session_id) ON DELETE CASCADE,
+  sha256 TEXT NOT NULL,
+  original_name TEXT NOT NULL,
+  mime_type TEXT,
+  size INTEGER NOT NULL,
+  parse_status TEXT NOT NULL CHECK (parse_status IN ('ready', 'failed')),
+  parse_error TEXT,
+  context_text TEXT,
+  context_code_points INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  UNIQUE (session_id, original_name)
+);
+CREATE INDEX IF NOT EXISTS session_files_session_created
+  ON session_files(session_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS session_files_sha256
+  ON session_files(sha256);
+`;
+
 /**
  * Apply one schema migration atomically.
  *
@@ -492,9 +533,12 @@ function migrate(db) {
       db.exec(V8_TO_V9_MIGRATION_SQL);
     } else if (current === 8) {
       db.exec(V8_TO_V9_MIGRATION_SQL);
+    } else if (current === 9) {
+      // v9 only needs the File Vault table below.
     } else {
       db.exec(SCHEMA_SQL);
     }
+    db.exec(V9_TO_V10_MIGRATION_SQL);
     db.exec("PRAGMA user_version = " + SCHEMA_VERSION);
   });
 }

@@ -80,6 +80,9 @@ export function createMaintenanceService({
       rootSessionIds: sessionIds,
     });
     const orphanDocuments = [...plan.orphanDocuments].sort((left, right) => left.id - right.id);
+    const orphanSessionFiles = [...plan.orphanSessionFiles].sort((left, right) =>
+      left.sha256.localeCompare(right.sha256),
+    );
     const payload = {
       kind,
       id,
@@ -87,11 +90,13 @@ export function createMaintenanceService({
       sessionIds,
       descendantSessionIds,
       orphanDocumentIds: orphanDocuments.map((document) => document.id),
+      orphanSessionFileHashes: orphanSessionFiles.map((file) => file.sha256),
     };
     return {
       ...payload,
       container,
       orphanDocuments,
+      orphanSessionFiles,
       linkedDocuments: plan.linkedDocuments,
       relationshipCount: plan.relationshipCount,
       planVersion: versionOf(payload),
@@ -121,6 +126,7 @@ export function createMaintenanceService({
       sessionIds: plan.sessionIds,
       descendantSessionIds: plan.descendantSessionIds,
       orphanDocuments: plan.orphanDocuments.map(({ id, sha256 }) => ({ id, sha256 })),
+      orphanSessionFiles: plan.orphanSessionFiles.map(({ sha256 }) => ({ sha256 })),
       createdAt: now().toISOString(),
       recoveryCommand: recoveryCommand(env),
     });
@@ -157,6 +163,7 @@ export function createMaintenanceService({
         id: job.container.id,
         expectedSessionIds: job.sessionIds,
         expectedOrphanDocumentIds: job.orphanDocuments.map((document) => document.id),
+        expectedSessionFileHashes: (job.orphanSessionFiles ?? []).map((file) => file.sha256),
       });
       const verifying = await jobs.transition(
         startupJobId,

@@ -11,9 +11,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createServer, request as httpRequest } from "node:http";
+import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { strToU8, zipSync } from "fflate";
 
 import { createApi } from "../src/host/api.js";
 import { createIndexQueue } from "../src/host/queue.js";
@@ -22,6 +25,8 @@ import { createRepositories } from "../src/host/repositories.js";
 import { createWorkbenchSettings } from "../src/host/settings.js";
 import { localDateTimeParts } from "../src/host/timezone.js";
 import { WorkbenchSessionError, SESSION_ERROR_CODES } from "../src/host/session-errors.js";
+import { createSkillManager } from "../src/host/skill-manager.js";
+import { SkillManagerError, SKILL_ERROR_CODES } from "../src/host/skill-package.js";
 import { createTempDir, removeTempDir } from "./helpers.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -175,10 +180,14 @@ function makeFakeSessionService({ materializeResult, materializeError, confirmRe
 }
 
 /** Start the full stack (real SQLite + files, fake Ollama/indexer) in-process. */
-async function startApi(t, { ollama, retriever, indexer, services, sessions, settings, embeddingFactory, onEmbeddingConfigChange, credentials, codexAuth, dshAdapter, logger, networkEnv } = {}) {
+async function startApi(t, { ollama, retriever, indexer, services, sessions, settings, embeddingFactory, onEmbeddingConfigChange, credentials, codexAuth, dshAdapter, logger, networkEnv, skills, skillManagerFactory } = {}) {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });
   const repos = createRepositories(db);
+  const dshHome = join(dataDir, "dsh-home");
+  const skillManager = skillManagerFactory
+    ? skillManagerFactory({ dshHome, repos })
+    : skills;
   const fakeOllama = ollama ?? makeFakeOllama();
   const fakeRetriever = retriever ?? makeFakeRetriever();
   const fakeIndexer = indexer ?? makeFakeIndexer(repos);
@@ -198,6 +207,7 @@ async function startApi(t, { ollama, retriever, indexer, services, sessions, set
     credentials,
     codexAuth,
     dshAdapter,
+    skills: skillManager,
     logger,
     networkEnv,
   });
@@ -210,7 +220,19 @@ async function startApi(t, { ollama, retriever, indexer, services, sessions, set
     closeDatabase(db);
     await removeTempDir(dataDir);
   });
-  return { base, repos, queue, fakeIndexer, fakeRetriever, dataDir, db };
+  return { base, repos, queue, fakeIndexer, fakeRetriever, dataDir, dshHome, db, api };
+}
+
+function requestHttp(port, options, body) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({ port, ...options }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({ statusCode: response.statusCode, body: Buffer.concat(chunks) }));
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
 }
 
 function uploadBody(name, scope, scopeId, body) {
@@ -224,6 +246,393 @@ function uploadBody(name, scope, scopeId, body) {
     body,
   };
 }
+
+const skillMd = (name, description = name) => `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
+
+function skillUploadBody(bytes, { scope, projectId, sourceName, replace, confirmCollection } = {}) {
+  const headers = {
+    "content-type": "application/zip",
+    "x-cpwb-skill-scope": scope,
+    "x-cpwb-filename": encodeURIComponent(sourceName),
+  };
+  if (projectId !== undefined) headers["x-cpwb-project-id"] = String(projectId);
+  if (replace !== undefined) headers["x-cpwb-replace"] = String(replace);
+  if (confirmCollection !== undefined) headers["x-cpwb-confirm-collection"] = String(confirmCollection);
+  return { method: "POST", headers, body: bytes };
+}
+
+test("skill API lists, imports, conflicts, replaces, disables, and deletes", async (t) => {
+  const { base } = await startApi(t, {
+    skillManagerFactory: ({ dshHome, repos }) => createSkillManager({
+      dshHome,
+      repos,
+      revealPath: async () => {},
+    }),
+  });
+  const bytes = zipSync({ "SKILL.md": strToU8(skillMd("api-skill")) });
+  let response = await fetch(base + "/skills/import", skillUploadBody(bytes, { scope: "global", sourceName: "api.zip" }));
+  assert.equal(response.status, 201);
+  response = await fetch(base + "/skills/import", skillUploadBody(bytes, { scope: "global", sourceName: "api.zip" }));
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "SKILL_CONFLICT");
+  response = await fetch(base + "/skills/import", skillUploadBody(bytes, { scope: "global", sourceName: "api.zip", replace: true }));
+  assert.equal(response.status, 200);
+  response = await fetch(base + "/skills/api-skill", {
+    method: "PATCH",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ scope: "global", operation: "disable" }),
+  });
+  assert.equal((await response.json()).state, "disabled");
+  response = await fetch(base + "/skills/api-skill?scope=global", { method: "DELETE" });
+  assert.equal(response.status, 200);
+});
+
+test("skill conflict API exposes safe catalog file summaries and installed path only", async (t) => {
+  const conflict = new SkillManagerError("SKILL_CONFLICT", "same skill", {
+      existing: {
+        name: "same-skill",
+        description: "installed",
+        state: "enabled",
+        files: ["SKILL.md", "references/readme.md"],
+        installedPath: "/dsh/skills/same-skill",
+        conflictSummary: "catalog-entry-v1",
+      },
+      incoming: {
+        name: "same-skill",
+        description: "incoming",
+        files: ["SKILL.md", "scripts/run.sh"],
+        sourceName: "same.zip",
+      },
+  });
+  const { base } = await startApi(t, { skills: { importArchive: async () => { throw conflict; } } });
+  const response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), { scope: "global", sourceName: "same.zip" }));
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.deepEqual(body.error.details, {
+    existing: {
+      name: "same-skill",
+      description: "installed",
+      state: "enabled",
+      files: ["SKILL.md", "references/readme.md"],
+      installedPath: "/dsh/skills/same-skill",
+    },
+    incoming: {
+      name: "same-skill",
+      description: "incoming",
+      files: ["SKILL.md", "scripts/run.sh"],
+      sourceName: "same.zip",
+    },
+  });
+});
+
+test("skill conflict API drops untrusted outside and staging paths", async (t) => {
+  const conflict = new SkillManagerError("SKILL_CONFLICT", "same skill", {
+      existing: { name: "same-skill", path: "/tmp/evil", installedPath: "/tmp/evil", files: ["../secret"] },
+      incoming: { name: "same-skill", path: "/tmp/staging", files: ["/absolute"] },
+  });
+  const { base } = await startApi(t, { skills: { importArchive: async () => { throw conflict; } } });
+  const response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), { scope: "global", sourceName: "same.zip" }));
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.deepEqual(body.error.details, { existing: { name: "same-skill" }, incoming: { name: "same-skill" } });
+  assert.doesNotMatch(JSON.stringify(body), /tmp|secret|absolute/);
+});
+
+test("skill collection confirmation exposes only safe preview fields and forwards explicit confirmation", async (t) => {
+  const preview = new SkillManagerError(SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED, "preview", {
+    kind: "collection",
+    sourceName: "superpowers.zip",
+    count: 2,
+    conflictCount: 1,
+    skills: [
+      { name: "brainstorming", description: "new", files: ["SKILL.md"], fileCount: 1, conflict: true, path: "/tmp/staging", existing: { name: "brainstorming", description: "old", state: "disabled", path: "/private/skill" } },
+      { name: "systematic-debugging", description: "fresh", files: ["SKILL.md"], fileCount: 1, conflict: false },
+    ],
+  });
+  const calls = [];
+  const { base } = await startApi(t, { skills: { importArchive: async (input) => {
+    calls.push(input);
+    if (!input.confirmCollection) throw preview;
+    return { kind: "collection", count: 2, replacedCount: 1, items: [] };
+  } } });
+
+  let response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), { scope: "global", sourceName: "superpowers.zip" }));
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.error.code, SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED);
+  assert.deepEqual(body.error.details.skills.map(({ name, conflict }) => ({ name, conflict })), [
+    { name: "brainstorming", conflict: true },
+    { name: "systematic-debugging", conflict: false },
+  ]);
+  assert.equal(body.error.details.skills[0].existing.state, "disabled");
+  assert.doesNotMatch(JSON.stringify(body), /\/tmp|\/private/);
+
+  response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), {
+    scope: "global",
+    sourceName: "superpowers.zip",
+    replace: true,
+    confirmCollection: true,
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(calls.at(-1).confirmCollection, true);
+  assert.equal(calls.at(-1).replace, true);
+});
+
+test("invalid Skill import headers drain chunked request bodies before responding", async (t) => {
+  const { api } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); }, setEnabled: async () => ({}) } });
+  class InvalidSkillRequest extends EventEmitter {
+    method = "POST";
+    url = "/api/cpwb/skills/import";
+    headers = { "content-type": "text/plain", "x-cpwb-skill-scope": "global", "x-cpwb-filename": "bad.zip" };
+    resumed = 0;
+    resume() { this.resumed += 1; this.emit("end"); }
+  }
+  const request = new InvalidSkillRequest();
+  let status;
+  let body;
+  const response = {
+    headersSent: false,
+    writeHead(nextStatus) { status = nextStatus; this.headersSent = true; },
+    end(value = "") { body = Buffer.from(String(value)); },
+    destroy() { throw new Error("response must not be destroyed"); },
+  };
+  await api.handler(request, response);
+  assert.equal(status, 415);
+  assert.equal(JSON.parse(body).error.code, "UNSUPPORTED_MEDIA_TYPE");
+  assert.equal(request.resumed, 1);
+  assert.equal(request.listenerCount("error"), 0);
+  assert.equal(request.listenerCount("end"), 0);
+  assert.equal(request.listenerCount("aborted"), 0);
+  t.after(() => request.removeAllListeners());
+
+  const patchRequest = new InvalidSkillRequest();
+  patchRequest.method = "PATCH";
+  patchRequest.url = "/api/cpwb/skills/demo-skill";
+  patchRequest.headers = { "content-type": "text/plain" };
+  const patchResponse = {
+    headersSent: false,
+    writeHead(nextStatus) { status = nextStatus; this.headersSent = true; },
+    end(value = "") { body = Buffer.from(String(value)); },
+    destroy() { throw new Error("response must not be destroyed"); },
+  };
+  await api.handler(patchRequest, patchResponse);
+  assert.equal(status, 415);
+  assert.equal(JSON.parse(body).error.code, "UNSUPPORTED_MEDIA_TYPE");
+  assert.equal(patchRequest.resumed, 1);
+  assert.equal(patchRequest.listenerCount("error"), 0);
+  assert.equal(patchRequest.listenerCount("end"), 0);
+  assert.equal(patchRequest.listenerCount("aborted"), 0);
+  t.after(() => patchRequest.removeAllListeners());
+});
+
+test("skill API never accepts an installation target path", async (t) => {
+  const fake = { list: async (input) => input };
+  const { base } = await startApi(t, { skills: fake });
+  const response = await fetch(base + "/skills?scope=global&path=%2Ftmp%2Fevil");
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "INVALID_FIELD");
+});
+
+test("skill routes return a stable unavailable error when the manager is absent", async (t) => {
+  const { base } = await startApi(t);
+  const response = await fetch(base + "/skills?scope=global");
+  assert.equal(response.status, 501);
+  assert.equal((await response.json()).error.code, "SKILL_MANAGER_UNAVAILABLE");
+});
+
+test("skill API rejects strict header, body, and query contract violations", async (t) => {
+  const calls = [];
+  const fake = {
+    list: async (input) => { calls.push(["list", input]); return input; },
+    importArchive: async (input) => { calls.push(["import", input]); return { name: "ok-skill" }; },
+    setEnabled: async (input) => { calls.push(["patch", input]); return input; },
+  };
+  const { base } = await startApi(t, { skills: fake });
+  let response = await fetch(base + "/skills?scope=global&extra=true");
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "INVALID_FIELD");
+
+  response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), { scope: "global", sourceName: "bad.zip" }));
+  assert.equal(response.status, 201);
+  assert.equal(calls.at(-1)[0], "import");
+  response = await fetch(base + "/skills/import", {
+    method: "POST",
+    headers: { "content-type": "application/zip; charset=binary", "x-cpwb-skill-scope": "global", "x-cpwb-filename": "bad.zip" },
+    body: new Uint8Array([1]),
+  });
+  assert.equal(response.status, 415);
+
+  response = await fetch(base + "/skills/ok-skill", {
+    method: "PATCH", headers: JSON_HEADERS,
+    body: JSON.stringify({ scope: "global", operation: "enable", path: "/tmp/evil" }),
+  });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "INVALID_FIELD");
+  assert.equal(calls.some(([kind]) => kind === "patch"), false);
+
+  response = await fetch(base + "/skills?scope=global&scope=project", { method: "GET" });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "INVALID_FIELD");
+  response = await fetch(base + "/skills?scope=global&projectId=1&projectId=2", { method: "GET" });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "INVALID_FIELD");
+  assert.equal(calls.filter(([kind]) => kind === "list").length, 0);
+});
+
+test("skill import aborts a compressed body over 50 MiB", async (t) => {
+  const { base } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
+  const body = new Uint8Array([1]);
+  const input = skillUploadBody(body, { scope: "global", sourceName: "large.zip" });
+  input.headers["content-length"] = String(50 * 1024 * 1024 + 1);
+  const response = await fetch(base + "/skills/import", input);
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+});
+
+test("real HTTP Skill upload keeps a 413 response when declared length is oversized", async (t) => {
+  const { api } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
+  const server = createServer(api.handler);
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const port = server.address().port;
+  const response = await requestHttp(port, {
+    method: "POST",
+    path: "/api/cpwb/skills/import",
+    headers: {
+      "content-type": "application/zip",
+      "content-length": String(50 * 1024 * 1024 + 1),
+      "x-cpwb-skill-scope": "global",
+      "x-cpwb-filename": "large.zip",
+    },
+  }, Buffer.alloc(50 * 1024 * 1024 + 1));
+  assert.equal(response.statusCode, 413);
+  assert.equal(JSON.parse(response.body).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+});
+
+test("real HTTP Skill upload keeps a 413 response when streamed body overflows", async (t) => {
+  const { api } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
+  const server = createServer(api.handler);
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const port = server.address().port;
+  const body = Buffer.alloc(50 * 1024 * 1024 + 1);
+  const response = await requestHttp(port, {
+    method: "POST",
+    path: "/api/cpwb/skills/import",
+    headers: {
+      "content-type": "application/zip",
+      "x-cpwb-skill-scope": "global",
+      "x-cpwb-filename": "large.zip",
+    },
+  }, body);
+  assert.equal(response.statusCode, 413);
+  assert.equal(JSON.parse(response.body).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+});
+
+test("oversized declared uploads absorb a disconnect while draining", async (t) => {
+  const { api } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
+  class DisconnectingRequest extends EventEmitter {
+    method = "POST";
+    url = "/api/cpwb/skills/import";
+    headers = {
+      "content-type": "application/zip",
+      "content-length": String(50 * 1024 * 1024 + 1),
+      "x-cpwb-skill-scope": "global",
+      "x-cpwb-filename": "large.zip",
+    };
+    resume() {
+      this.emit("error", new Error("client disconnected while draining"));
+    }
+  }
+  const request = new DisconnectingRequest();
+  let status;
+  let body;
+  const response = {
+    headersSent: false,
+    writeHead(nextStatus) { status = nextStatus; this.headersSent = true; },
+    end(value = "") { body = Buffer.from(String(value)); },
+    destroy() { throw new Error("response must not be destroyed"); },
+  };
+  await api.handler(request, response);
+  assert.equal(status, 413);
+  assert.equal(JSON.parse(body).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+  assert.equal(request.listenerCount("error"), 0);
+  assert.equal(request.listenerCount("end"), 0);
+  assert.equal(request.listenerCount("aborted"), 0);
+  t.after(() => request.removeAllListeners());
+});
+
+test("streamed overflow installs its drain guard before a nextTick disconnect", async (t) => {
+  const { api } = await startApi(t, { skills: { importArchive: async () => { throw new Error("must not import"); } } });
+  class RacyRequest extends EventEmitter {
+    method = "POST";
+    url = "/api/cpwb/skills/import";
+    headers = {
+      "content-type": "application/zip",
+      "x-cpwb-skill-scope": "global",
+      "x-cpwb-filename": "large.zip",
+    };
+    unhandledError = null;
+    emit(event, ...args) {
+      if (event === "error" && this.listenerCount("error") === 0) {
+        this.unhandledError = args[0];
+        return false;
+      }
+      return super.emit(event, ...args);
+    }
+    on(event, listener) {
+      super.on(event, listener);
+      if (event === "data") {
+        process.nextTick(() => {
+          listener(Buffer.alloc(50 * 1024 * 1024 + 1));
+          process.nextTick(() => this.emit("error", new Error("client disconnected before drain")));
+        });
+      }
+      return this;
+    }
+    resume() {}
+  }
+  const request = new RacyRequest();
+  let status;
+  let body;
+  const response = {
+    headersSent: false,
+    writeHead(nextStatus) { status = nextStatus; this.headersSent = true; },
+    end(value = "") { body = Buffer.from(String(value)); },
+    destroy() { throw new Error("response must not be destroyed"); },
+  };
+  await api.handler(request, response);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(status, 413);
+  assert.equal(JSON.parse(body).error.code, "SKILL_ARCHIVE_TOO_LARGE");
+  assert.equal(request.unhandledError, null);
+  assert.equal(request.listenerCount("error"), 0);
+  t.after(() => request.removeAllListeners());
+});
+
+test("skill manager errors map to stable responses without filesystem path leakage", async (t) => {
+  const fake = {
+    importArchive: async () => {
+      throw new SkillManagerError(SKILL_ERROR_CODES.CONFLICT, "secret /private/workbench/skills/old", {
+        existing: { name: "same-skill", state: "enabled", path: "/private/workbench/skills/same-skill" },
+        incoming: { name: "same-skill", sourceName: "upload.zip", path: "/private/tmp/staging" },
+      });
+    },
+  };
+  const { base } = await startApi(t, { skills: fake });
+  const response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), { scope: "global", sourceName: "upload.zip" }));
+  assert.equal(response.status, 409);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "SKILL_CONFLICT");
+  assert.equal(payload.error.message.includes("/private"), false);
+  assert.equal(JSON.stringify(payload).includes("/private"), false);
+});
 
 // ---------------------------------------------------------------- health
 
@@ -689,6 +1098,75 @@ test("knowledge-base list exposes real chip metrics and reverse project links", 
 
 // --------------------------------------------------------------- documents
 
+test("session file upload is parsed synchronously without documents, chunks, or index queue work", async (t) => {
+  const { base, repos, queue, fakeIndexer } = await startApi(t);
+  const sessionId = "session-cpwb-direct-file";
+  repos.workbenchSessions.create({ sessionId, scope: { kind: "independent", id: null } });
+
+  const uploaded = await fetch(base + "/session-files", {
+    method: "POST",
+    headers: {
+      "x-cpwb-session-id": sessionId,
+      "x-cpwb-filename": encodeURIComponent("brief.md"),
+    },
+    body: "# Brief\nDirect context",
+  });
+  assert.equal(uploaded.status, 201);
+  const file = await uploaded.json();
+  assert.equal(file.originalName, "brief.md");
+  assert.equal(file.parseStatus, "ready");
+  assert.equal("contextText" in file, false, "API never exposes extracted prompt contents");
+  await queue.idle();
+  assert.equal(fakeIndexer.state.calls.length, 0);
+  assert.equal(repos.documents.list().length, 0);
+
+  const listed = await fetch(base + "/session-files?sessionId=" + encodeURIComponent(sessionId));
+  assert.equal(listed.status, 200);
+  assert.deepEqual((await listed.json()).map((item) => item.id), [file.id]);
+
+  const opened = await fetch(base + `/session-files/${file.id}/content`);
+  assert.equal(opened.status, 200);
+  assert.equal(await opened.text(), "# Brief\nDirect context");
+  assert.match(opened.headers.get("content-disposition"), /^inline;/);
+
+  const downloaded = await fetch(base + `/session-files/${file.id}/content?download=1`);
+  assert.match(downloaded.headers.get("content-disposition"), /^attachment;/);
+
+  const removed = await fetch(base + `/session-files/${file.id}`, { method: "DELETE" });
+  assert.equal(removed.status, 200);
+  assert.equal((await removed.json()).removed, true);
+  assert.deepEqual(repos.sessionFiles.listBySession(sessionId), []);
+});
+
+test("session file API rejects missing sessions and duplicate names with stable errors", async (t) => {
+  const { base, repos } = await startApi(t);
+  let response = await fetch(base + "/session-files", {
+    method: "POST",
+    headers: {
+      "x-cpwb-session-id": "session-cpwb-missing",
+      "x-cpwb-filename": encodeURIComponent("brief.md"),
+    },
+    body: "# Brief",
+  });
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error.code, "SESSION_FILE_SESSION_NOT_FOUND");
+
+  const sessionId = "session-cpwb-duplicate-file";
+  repos.workbenchSessions.create({ sessionId, scope: { kind: "independent", id: null } });
+  const init = {
+    method: "POST",
+    headers: {
+      "x-cpwb-session-id": sessionId,
+      "x-cpwb-filename": encodeURIComponent("brief.md"),
+    },
+    body: "# Brief",
+  };
+  assert.equal((await fetch(base + "/session-files", init)).status, 201);
+  response = await fetch(base + "/session-files", init);
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "SESSION_FILE_DUPLICATE_NAME");
+});
+
 test("raw upload persists file + document + link, then indexes to ready", async (t) => {
   const { base, repos, queue, fakeIndexer, dataDir } = await startApi(t);
   const p = repos.projects.create({ name: "P" });
@@ -713,6 +1191,21 @@ test("raw upload persists file + document + link, then indexes to ready", async 
   assert.equal(fakeIndexer.state.calls.length, 1);
   assert.deepEqual(fakeIndexer.state.calls[0].projectIds, [p.id]);
   assert.deepEqual(fakeIndexer.state.calls[0].knowledgeBaseIds, []);
+});
+
+test("document API rejects legacy session scope so conversation files cannot enter the vector pipeline", async (t) => {
+  const sessionId = "session-cpwb-independent-files";
+  const { base, repos } = await startApi(t);
+  repos.workbenchSessions.create({ sessionId, scope: { kind: "independent", id: null } });
+
+  const uploaded = await fetch(base + "/documents", uploadBody("固定说明.md", "session", sessionId, "# 会话固定文件"));
+  assert.equal(uploaded.status, 422);
+  assert.equal((await uploaded.json()).error.code, "INVALID_SCOPE");
+  assert.deepEqual(repos.documents.list(), []);
+
+  const listed = await fetch(base + "/documents?scope=session&scopeId=" + encodeURIComponent(sessionId));
+  assert.equal(listed.status, 422);
+  assert.equal((await listed.json()).error.code, "INVALID_SCOPE");
 });
 
 test("document content opens or downloads the original bytes without exposing a local path", async (t) => {

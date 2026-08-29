@@ -50,6 +50,22 @@ function mapDocument(row) {
   };
 }
 
+function mapSessionFile(row) {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    sha256: row.sha256,
+    originalName: row.original_name,
+    mimeType: row.mime_type ?? null,
+    size: row.size,
+    parseStatus: row.parse_status,
+    parseError: row.parse_error ?? null,
+    contextText: row.context_text ?? null,
+    contextCodePoints: row.context_code_points,
+    createdAt: row.created_at,
+  };
+}
+
 function mapTodo(row, now = new Date()) {
   const due = new Date(row.due_at);
   return {
@@ -262,6 +278,21 @@ function upsertIndexMetadataCore(db, {
  * @param {import("node:sqlite").DatabaseSync} db
  */
 export function createRepositories(db) {
+  function orphanSessionFilesForSessions(sessionIds) {
+    const targets = new Set(sessionIds);
+    if (targets.size === 0) return [];
+    const ownership = new Map();
+    for (const row of db.prepare("SELECT session_id, sha256 FROM session_files ORDER BY sha256").all()) {
+      const state = ownership.get(row.sha256) ?? { hasTarget: false, hasOutside: false };
+      if (targets.has(row.session_id)) state.hasTarget = true;
+      else state.hasOutside = true;
+      ownership.set(row.sha256, state);
+    }
+    return [...ownership]
+      .filter(([, state]) => state.hasTarget && !state.hasOutside)
+      .map(([sha256]) => ({ sha256 }));
+  }
+
   const projects = {
     create({ name, path = null, workspaceId = null, now = new Date() }) {
       const iso = nowIso(now);
@@ -306,10 +337,11 @@ export function createRepositories(db) {
       const sessionIds = db.prepare(
         "SELECT session_id FROM workbench_sessions WHERE scope_kind = 'project' AND scope_id = ? ORDER BY session_id",
       ).all(id).map((row) => row.session_id);
+      const orphanSessionFiles = orphanSessionFilesForSessions(sessionIds);
       const relationshipCount = Number(db.prepare(
         "SELECT COUNT(*) AS n FROM project_knowledge_bases WHERE project_id = ?",
       ).get(id).n);
-      return { project, linkedDocuments, orphanDocuments, sessionIds, relationshipCount };
+      return { project, linkedDocuments, orphanDocuments, orphanSessionFiles, sessionIds, relationshipCount };
     },
 
     removeContainer(id) {
@@ -561,10 +593,11 @@ export function createRepositories(db) {
       const sessionIds = db.prepare(
         "SELECT session_id FROM workbench_sessions WHERE scope_kind = 'knowledge_base' AND scope_id = ? ORDER BY session_id",
       ).all(id).map((row) => row.session_id);
+      const orphanSessionFiles = orphanSessionFilesForSessions(sessionIds);
       const relationshipCount = Number(db.prepare(
         "SELECT COUNT(*) AS n FROM project_knowledge_bases WHERE knowledge_base_id = ?",
       ).get(id).n);
-      return { knowledgeBase, linkedDocuments, orphanDocuments, sessionIds, relationshipCount };
+      return { knowledgeBase, linkedDocuments, orphanDocuments, orphanSessionFiles, sessionIds, relationshipCount };
     },
 
     removeContainer(id) {
@@ -993,6 +1026,67 @@ export function createRepositories(db) {
     },
   };
 
+  const sessionFiles = {
+    create({
+      sessionId,
+      sha256,
+      originalName,
+      mimeType = null,
+      size,
+      parseStatus,
+      parseError = null,
+      contextText = null,
+      contextCodePoints = 0,
+      now = new Date(),
+    }) {
+      db.prepare(
+        "INSERT INTO session_files (session_id, sha256, original_name, mime_type, size, parse_status, parse_error, context_text, context_code_points, created_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        sessionId,
+        sha256,
+        originalName,
+        mimeType,
+        size,
+        parseStatus,
+        parseError,
+        contextText,
+        contextCodePoints,
+        nowIso(now),
+      );
+      return mapSessionFile(db.prepare("SELECT * FROM session_files WHERE id = last_insert_rowid()").get());
+    },
+
+    get(id) {
+      const row = db.prepare("SELECT * FROM session_files WHERE id = ?").get(id);
+      return row ? mapSessionFile(row) : null;
+    },
+
+    getBySessionAndName(sessionId, originalName) {
+      const row = db.prepare(
+        "SELECT * FROM session_files WHERE session_id = ? AND original_name = ?",
+      ).get(sessionId, originalName);
+      return row ? mapSessionFile(row) : null;
+    },
+
+    listBySession(sessionId) {
+      return db.prepare(
+        "SELECT * FROM session_files WHERE session_id = ? ORDER BY created_at DESC, id DESC",
+      ).all(sessionId).map(mapSessionFile);
+    },
+
+    countBySha256(sha256) {
+      return Number(db.prepare("SELECT COUNT(*) AS n FROM session_files WHERE sha256 = ?").get(sha256).n);
+    },
+
+    remove(id) {
+      const row = db.prepare("SELECT * FROM session_files WHERE id = ?").get(id);
+      if (!row) return null;
+      db.prepare("DELETE FROM session_files WHERE id = ?").run(id);
+      return mapSessionFile(row);
+    },
+  };
+
   const messageContextRefs = {
     addMany({ sessionId, messageId, sources, now = new Date() }) {
       if (typeof messageId !== "string" || messageId.trim() === "") throw new TypeError("messageId is required");
@@ -1206,6 +1300,7 @@ export function createRepositories(db) {
       id,
       expectedSessionIds,
       expectedOrphanDocumentIds,
+      expectedSessionFileHashes,
     }) {
       if (kind !== "project" && kind !== "knowledge_base") {
         throw new TypeError("maintenance purge requires a project or knowledge base");
@@ -1227,6 +1322,10 @@ export function createRepositories(db) {
         expectedOrphanDocumentIds,
         "expectedOrphanDocumentIds",
       );
+      const expectedFiles = normalizeIds(
+        expectedSessionFileHashes,
+        "expectedSessionFileHashes",
+      );
 
       return transaction(db, () => {
         const repository = kind === "project" ? projects : knowledgeBases;
@@ -1237,9 +1336,14 @@ export function createRepositories(db) {
           plan.orphanDocuments.map((document) => document.id),
           "current orphan document ids",
         );
+        const currentFiles = normalizeIds(
+          plan.orphanSessionFiles.map((file) => file.sha256),
+          "current session file hashes",
+        );
         if (
           JSON.stringify(currentSessions) !== JSON.stringify(expectedSessions) ||
-          JSON.stringify(currentDocuments) !== JSON.stringify(expectedDocuments)
+          JSON.stringify(currentDocuments) !== JSON.stringify(expectedDocuments) ||
+          JSON.stringify(currentFiles) !== JSON.stringify(expectedFiles)
         ) {
           throw new Error("stale purge plan: container graph changed after confirmation");
         }
@@ -1276,6 +1380,7 @@ export function createRepositories(db) {
     summaries,
     sessionContextSources,
     messageContextRefs,
+    sessionFiles,
     workbenchSessions,
     schedules,
     maintenance,

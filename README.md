@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>YOUR PROJECT. YOUR SYSTEM. YOUR INTELLIGENCE.</strong><br>
-  A local-first personal intelligence workbench for projects, sessions, knowledge chips, and automation.
+  A local-first personal intelligence workbench for projects, sessions, knowledge chips, Skills, and automation.
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 > [!IMPORTANT]
 > This release targets the public Session, Files, Subagent, and Slot APIs in **DeepSeek Harness 0.1.1-rc.2**. DSH is still a release candidate; validate compatibility before upgrading it independently.
 
-Harness Workbench does not replace the DeepSeek Harness chat runtime. DSH sessions remain the source of truth. Workbench adds project organization, knowledge chips, local RAG, todos, scheduled agents, daily summaries, and optional Codex authentication around that runtime—turning isolated AI chats into a durable personal work system.
+Harness Workbench does not replace the DeepSeek Harness chat runtime. DSH sessions remain the source of truth. Workbench adds project organization, knowledge chips, local RAG, scoped Skill management, a session File Vault, todos, scheduled agents, daily summaries, and optional Codex authentication around that runtime—turning isolated AI chats into a durable personal work system.
 
 ```bash
 npm install -g dsh-cyberpunk-workbench
@@ -55,6 +55,7 @@ An AI session is good at solving the problem in front of it. Real work spans day
 
 - Which sessions belong to a project, and what did each one accomplish?
 - Which documents and knowledge sources support that project, and are they indexed?
+- Which reusable Skills should apply everywhere, and which belong to one project?
 - What was completed today, and what should happen next?
 - Can a scheduled task launch a real agent and preserve its execution as a traceable session?
 - Can DSH keep owning models, tools, trajectories, Files, and subagents instead of being reimplemented incompletely?
@@ -67,13 +68,15 @@ Project sessions, knowledge-chip sessions, and independent sessions are all full
 
 | Scope | Best for | Inherited context | Scope-specific tools |
 | --- | --- | --- | --- |
-| **Project** | Ongoing work inside one workspace | Workspace files, linked knowledge chips, explicit `@` references | Todos, schedules, summaries, project session history |
-| **Knowledge chip** | Research and Q&A over a document set | Documents and vector retrieval from one chip | Source documents, citation footnotes, original-file open/download |
-| **Independent** | Quick questions and cross-project exploration | Explicitly selected sessions, chips, and files | Full native DSH session without requiring a project |
+| **Project** | Ongoing work inside one workspace | Workspace files, linked knowledge chips, global and project Skills, explicit `@` references | Todos, session files, daily summaries, schedules, knowledge-chip links, Skills, project session history |
+| **Knowledge chip** | Research and Q&A over a document set | Documents and vector retrieval from one chip, global Skills, explicit `@` references | Session files, source documents, citation footnotes, original-file open/download |
+| **Independent** | Quick questions and cross-project exploration | Global Skills plus explicit `@` sessions, chips, workspace paths, and session files | Persistent File Vault, Subagent activity, and global schedules without requiring a project |
 
 Projects and knowledge chips can each contain multiple sessions. Recent activity mixes all three scopes, grouped by date and marked with distinct icons. The full session page supports search, filtering, archiving, and restoration.
 
 New sessions are created lazily. Opening a blank composer does not mint a Session ID. The first real message creates the DSH session and adds it to recent activity, making cancellation and switching feel immediate.
+
+After any conversation has a Session ID, its **Session files** rail accepts the same text, Office, HTML, and code formats as a knowledge chip. These files are not embedded or indexed. They stay in the Workbench File Vault and enter model context only when the current prompt explicitly references `@文件/<name>`. The combined full-text context limit is 32,000 Unicode code points per turn; Workbench fails visibly instead of truncating or falling back to vectors.
 
 ## Projects as persistent control planes
 
@@ -81,11 +84,26 @@ A project binds to a real DSH workspace without copying or taking ownership of i
 
 Inside a project, the interface separates three concerns:
 
-1. **Global navigation** — new session, home, all sessions, knowledge chips, recent sessions, and settings.
+1. **Global navigation** — new session, home, all sessions, knowledge chips, recent sessions, Skills, and settings. The familiar **Skills** entry stays directly above Settings.
 2. **Native conversation** — DSH Chat and Trajectory, model and reasoning controls, streaming, tool calls, approvals, attachments, queues, retries, and context statistics.
-3. **Project tools** — todos, scheduled agents, linked knowledge chips, and daily summaries.
+3. **Project tool cockpit** — six icon-only tabs in a fixed order: **Todos, Session files, Daily summary, Scheduled tasks, Knowledge chips, Skills**. Hover or keyboard focus reveals the full name; the Skills tab is bound directly to the current project.
 
-Desktop uses a three-area layout, medium screens move project tools into a right drawer, and mobile uses mutually exclusive navigation and tool drawers. Keyboard focus, Escape close, focus restoration, reduced motion, and reduced-transparency fallbacks are included.
+Desktop uses a three-area layout, medium screens move the project tool cockpit into a right drawer, and mobile uses mutually exclusive navigation and tool drawers. The six-tab rail uses a compact active-state marker and roving keyboard focus. Escape close, focus restoration, reduced motion, and reduced-transparency fallbacks are included.
+
+## Skills: global and project capability layers
+
+The left-sidebar **Skills** entry opens **Skills — Skill Matrix**, the independent management surface for both scopes. A project conversation also exposes a compact **Skills** tab in its right tool cockpit for managing only that project. Workbench manages files and lifecycle state; the native DSH Skill provider remains responsible for discovery, loading, and execution.
+
+| Scope | Canonical location | Effective sessions |
+| --- | --- | --- |
+| **Global** | `<DSH_HOME>/skills/<skill-name>/` | Every project, independent session, and knowledge-chip session |
+| **Project** | `<project-directory>/.dsh/skills/<skill-name>/` | Sessions inside that project only; a same-name project Skill shadows the global one |
+
+Project Skill storage is created lazily on the first successful import. The manager lists enabled, disabled, invalid, and shadowed entries and supports reveal, enable, disable, delete, and same-scope replacement. A same-name Skill in another scope is not a conflict.
+
+Imports accept only a local directory rooted at `SKILL.md` or a local ZIP. ZIPs may contain one Skill or a fixed `skills/<skill-name>/...` collection. Collections are previewed before any write and installed as one recoverable transaction; validation, path traversal, symlink, size, or later installation failures leave no partial collection behind.
+
+A collection exported from a Codex plugin can be imported when the ZIP contains only the fixed `skills/` tree. Raw plugin archives with files outside that tree are rejected. Workbench does not install plugin manifests, hooks, MCP servers, or other plugin runtime capabilities, and it never executes package scripts during import.
 
 ## Knowledge chips: plug documents into your workbench
 
@@ -117,10 +135,11 @@ Retrieval is visible rather than hidden. The session Trajectory exposes injected
 Type `@` in the composer to reference accessible:
 
 - workspace files;
+- non-vectorized files saved to the current Session File Vault;
 - linked or available knowledge chips;
 - other Workbench sessions.
 
-Images and ordinary attachments continue through the native DSH 0.1.1-rc.2 Files API. Workbench does not create a second upload store or message system; it passes selected context to the native session.
+Images continue through the native DSH 0.1.1-rc.2 image path. Generic conversation files use the Workbench File Vault because their required lifetime is session-scoped and reusable through `@文件`; they do not enter `documents`, chunks, embeddings, or LanceDB. Project workspace paths remain native DSH file references, while knowledge-chip documents retain their separate vector pipeline.
 
 ## Todos, scheduled agents, and daily automation
 
@@ -284,7 +303,8 @@ Real project folders and DSH workspaces are outside the deletion scope. Unlinkin
 | Capability | Owner |
 | --- | --- |
 | Messages, streaming, Chat/Trajectory, models, attachments, tools, approvals, queues, retries, and compression | Native DSH session runtime |
-| Projects, session scopes, todos, schedules, summaries, knowledge metadata, and local retrieval | Harness Workbench |
+| Projects, session scopes, todos, schedules, summaries, knowledge metadata, local retrieval, and Skill file lifecycle | Harness Workbench |
+| Skill discovery, loading, and execution | Native DSH Skill provider and runtime |
 | Generation providers, model catalog, and credentials | Native DSH settings and credentials |
 | Embedding provider, document indexing, and vector configuration | Workbench settings; secrets still use DSH credentials |
 
@@ -325,6 +345,7 @@ test/                Unit, integration, contract, and UI tests
 - This release guarantees compatibility only with DSH `0.1.1-rc.2` public interfaces.
 - Schedules run while the DSH Host is running; Workbench does not install an operating-system service.
 - Generation-provider networking, rate limits, and model availability remain DSH responsibilities.
+- Skill collection import accepts a fixed `skills/`-only tree; raw plugin archives, hooks, manifests, and MCP servers are not installed or executed.
 - Codex cache scanning is opt-in and may need an adapter update if the local cache format changes.
 - Ollama is the default embedding route. Remote embedding APIs receive document chunks.
 

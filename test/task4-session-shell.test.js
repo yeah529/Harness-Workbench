@@ -88,7 +88,7 @@ test("home metrics fall back to loaded Workbench projects and use the paged sess
 });
 
 test("unified shell renders one mutually exclusive center page and no duplicate home sidebar", () => {
-  for (const page of ["home", "knowledge", "sessions", "conversation"]) {
+  for (const page of ["home", "knowledge", "sessions", "skills", "conversation"]) {
     const navigation = createNavigationStore({ initialPage: page === "conversation" ? "home" : page });
     if (page === "conversation") navigation.openConversation("session-cpwb-i");
     const html = renderToStaticMarkup(React.createElement(WorkbenchShell, {
@@ -103,6 +103,7 @@ test("unified shell renders one mutually exclusive center page and no duplicate 
     }));
     assert.match(html, new RegExp('class="cpwb-app-shell cpwb-layout-desktop" data-page="' + page + '"'));
     assert.equal((html.match(/class="cpwb-global-sidebar"/g) || []).length, 1);
+    assert.equal((html.match(/class="cpwb-workbench-stage"/g) || []).length, 1);
     assert.doesNotMatch(html, /cpwb-home-identity/);
     if (page === "home") {
       assert.match(html, /接入知识芯片/);
@@ -148,9 +149,11 @@ test("mobile shell hides the docked sidebar and exposes one accessible navigatio
 test("project rail contains only the approved project-owned tools", () => {
   assert.deepEqual(PROJECT_TOOL_TABS.map(([id, label]) => [id, label]), [
     ["todos", "待办"],
-    ["schedule", "定时任务"],
-    ["knowledge", "关联知识库"],
+    ["files", "会话文件"],
     ["summary", "每日总结"],
+    ["schedule", "定时任务"],
+    ["knowledge", "知识芯片"],
+    ["skills", "Skills"],
   ]);
   assert.equal(PROJECT_TOOL_TABS.some(([, label]) => label === "任务" || label === "计划"), false);
 });
@@ -335,6 +338,20 @@ test("knowledge-base and independent conversations render scoped tools without p
       assert.match(html, /未启用知识库/);
     }
   }
+});
+
+test("tablet session shell renders the context-tools drawer trigger without crashing", () => {
+  const sessionId = "session-cpwb-tablet";
+  const store = shellStore({
+    workbenchSessions: { [sessionId]: { scope: { kind: "independent", id: null }, title: "Tablet" } },
+  });
+  const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, {
+    sessionId,
+    open: true,
+    layoutMode: "tablet",
+    store,
+  }));
+  assert.match(html, /aria-label="打开上下文工具"/);
 });
 
 test("session shell unmounts while the Workbench home state is open", () => {

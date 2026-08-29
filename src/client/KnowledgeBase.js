@@ -295,8 +295,12 @@ export function KnowledgeBase({ store, projectId, knowledgeBaseId, sessions, wor
           React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-primary", onClick: retryError, title: "刷新/重试" }, glyph(ICONS.refresh), " 刷新 / 重试"))
       : null,
     showDirectory ? React.createElement("div", { className: "cpwb-section" },
-      React.createElement("div", { className: "cpwb-section-head" },
-        React.createElement("div", { className: "cpwb-label" }, "知识库 · " + knowledgeBases.length)),
+      view === "linked"
+        ? React.createElement("div", { className: "cpwb-tool-head" },
+            React.createElement("div", { className: "cpwb-tool-heading" }, React.createElement("span", null, "知识链路"), React.createElement("h3", null, "关联知识芯片")),
+            React.createElement("code", { className: "cpwb-tool-count" }, String(knowledgeBases.length).padStart(2, "0")))
+        : React.createElement("div", { className: "cpwb-section-head" },
+            React.createElement("div", { className: "cpwb-label" }, "知识库 · " + knowledgeBases.length)),
       React.createElement("div", { className: "cpwb-addrow" },
         React.createElement("input", { className: "cpwb-input", value: newKb, placeholder: "新建知识库…", onChange: function (e) { setNewKb(e.target.value); }, onKeyDown: function (e) { if (e.key === "Enter") createKb(); } }),
         React.createElement("button", { type: "button", className: "cpwb-btn cpwb-btn-primary", onClick: createKb, title: "新建知识库", disabled: creatingKb }, glyph(ICONS.plus))),
