@@ -25,6 +25,11 @@ import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 
 import { saveFile, FileStorageError, FILE_ERROR_CODES } from "./files.js";
+import {
+  createSessionFileVault,
+  SessionFileError,
+  SESSION_FILE_ERROR_CODES,
+} from "./session-files.js";
 import { RetrievalError } from "./retrieval.js";
 import { WorkbenchSessionError, SESSION_ERROR_CODES } from "./session-errors.js";
 import { ContextSourceError } from "./context.js";
@@ -87,6 +92,7 @@ const SKILL_ERROR_STATUS = {
   [SKILL_ERROR_CODES.PACKAGE_INVALID]: 422,
   [SKILL_ERROR_CODES.NAME_INVALID]: 422,
   [SKILL_ERROR_CODES.CONFLICT]: 409,
+  [SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED]: 409,
   [SKILL_ERROR_CODES.STATE_CONFLICT]: 409,
   [SKILL_ERROR_CODES.NOT_FOUND]: 404,
   [SKILL_ERROR_CODES.PERMISSION_DENIED]: 403,
@@ -103,6 +109,7 @@ const SKILL_ERROR_MESSAGES = {
   [SKILL_ERROR_CODES.PACKAGE_INVALID]: "Skill 包格式无效",
   [SKILL_ERROR_CODES.NAME_INVALID]: "Skill 名称无效",
   [SKILL_ERROR_CODES.CONFLICT]: "Skill 已存在",
+  [SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED]: "请确认导入 Skill 集合",
   [SKILL_ERROR_CODES.STATE_CONFLICT]: "Skill 状态冲突",
   [SKILL_ERROR_CODES.NOT_FOUND]: "Skill 不存在",
   [SKILL_ERROR_CODES.PERMISSION_DENIED]: "Skill 目录无权访问",
@@ -232,6 +239,32 @@ function safeSkillErrorDetails(error) {
     const incoming = safeSkillSummary(details.incoming);
     return existing || incoming ? { ...(existing ? { existing } : {}), ...(incoming ? { incoming } : {}) } : undefined;
   }
+  if (error.code === SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED
+    && details.kind === "collection"
+    && Number.isSafeInteger(details.count)
+    && details.count >= 2
+    && Number.isSafeInteger(details.conflictCount)
+    && details.conflictCount >= 0
+    && Array.isArray(details.skills)
+    && details.skills.length === details.count
+    && details.skills.length <= SKILL_PACKAGE_LIMITS.entries) {
+    const skills = [];
+    for (const value of details.skills) {
+      const summary = safeSkillSummary(value);
+      if (!summary || !SKILL_NAME_PATTERN.test(summary.name ?? "") || typeof value.conflict !== "boolean") return undefined;
+      const existing = value.existing === undefined ? undefined : safeSkillSummary(value.existing);
+      if (value.conflict && (!existing || existing.name !== summary.name)) return undefined;
+      skills.push({ ...summary, conflict: value.conflict, ...(existing ? { existing } : {}) });
+    }
+    if (skills.filter((skill) => skill.conflict).length !== details.conflictCount
+      || new Set(skills.map((skill) => skill.name)).size !== details.count) return undefined;
+    const sourceName = typeof details.sourceName === "string"
+      && details.sourceName.length <= 1024
+      && !/[\0\r\n]/.test(details.sourceName)
+      ? details.sourceName
+      : "";
+    return { kind: "collection", sourceName, count: details.count, conflictCount: details.conflictCount, skills };
+  }
   const safe = {};
   if (Number.isSafeInteger(details.bytes)) safe.bytes = details.bytes;
   if (Number.isSafeInteger(details.limit)) safe.limit = details.limit;
@@ -250,6 +283,18 @@ function toApiError(err) {
     }
     if (err.code === FILE_ERROR_CODES.UNSUPPORTED_EXTENSION) {
       return new ApiError(415, err.code, err.message);
+    }
+    return new ApiError(422, err.code, err.message);
+  }
+  if (err instanceof SessionFileError) {
+    if (err.code === SESSION_FILE_ERROR_CODES.SESSION_NOT_FOUND || err.code === SESSION_FILE_ERROR_CODES.NOT_FOUND) {
+      return new ApiError(404, err.code, err.message);
+    }
+    if (err.code === SESSION_FILE_ERROR_CODES.DUPLICATE_NAME) {
+      return new ApiError(409, err.code, err.message);
+    }
+    if (err.code === SESSION_FILE_ERROR_CODES.CONTEXT_TOO_LARGE) {
+      return new ApiError(413, err.code, err.message);
     }
     return new ApiError(422, err.code, err.message);
   }
@@ -591,7 +636,7 @@ function matchParams(path, pattern) {
  * @param {{ runSchedule?: Function, runSummary?: Function }} [deps.services]
  * @param {{ error?: Function }} [deps.logger]
  */
-export function createApi({ repos, queue, ollama, retriever, dataDir, services = {}, sessions, settings, embeddingFactory, onEmbeddingConfigChange, credentials, codexAuth, dshAdapter, skills, logger = console, networkEnv = process.env }) {
+export function createApi({ repos, queue, ollama, retriever, dataDir, services = {}, sessions, sessionFiles, settings, embeddingFactory, onEmbeddingConfigChange, credentials, codexAuth, dshAdapter, skills, logger = console, networkEnv = process.env }) {
   if (!repos || !queue || !ollama || !retriever || typeof dataDir !== "string") {
     throw new Error("createApi requires repos, queue, ollama, retriever, and dataDir");
   }
@@ -611,6 +656,7 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
   const maintenance = services.maintenance ?? null;
   const logError = typeof logger?.error === "function" ? logger.error.bind(logger) : () => {};
   const configuredTimeZone = () => settings?.get?.("timezone") ?? DEFAULT_TIME_ZONE;
+  const sessionFileVault = sessionFiles ?? createSessionFileVault({ dataDir, repos });
 
   function requireSkillMethod(method) {
     if (typeof skills?.[method] !== "function") {
@@ -701,10 +747,15 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
       if (replaceRaw !== undefined && replaceRaw !== "true" && replaceRaw !== "false") {
         throw new ApiError(422, "INVALID_FIELD", "replace must be true or false");
       }
+      const confirmCollectionRaw = req.headers["x-cpwb-confirm-collection"];
+      if (confirmCollectionRaw !== undefined && confirmCollectionRaw !== "true" && confirmCollectionRaw !== "false") {
+        throw new ApiError(422, "INVALID_FIELD", "confirmCollection must be true or false");
+      }
       return {
         ...parseSkillScope(scope, projectId),
         sourceName: parseSkillFilename(req.headers["x-cpwb-filename"]),
         replace: replaceRaw === "true",
+        confirmCollection: confirmCollectionRaw === "true",
       };
     } catch (error) {
       discardRequestBody(req);
@@ -744,6 +795,66 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
   }
 
   // ----- documents -----
+
+  function publicSessionFile(file) {
+    return {
+      id: file.id,
+      sessionId: file.sessionId,
+      originalName: file.originalName,
+      mimeType: file.mimeType,
+      size: file.size,
+      parseStatus: file.parseStatus,
+      parseError: file.parseError,
+      contextCodePoints: file.contextCodePoints,
+      createdAt: file.createdAt,
+    };
+  }
+
+  async function handleSessionFileUpload(req, res) {
+    const sessionId = req.headers["x-cpwb-session-id"];
+    if (typeof sessionId !== "string" || sessionId.trim() === "") {
+      throw new ApiError(422, "INVALID_SESSION_ID", "x-cpwb-session-id header is required");
+    }
+    const rawName = req.headers["x-cpwb-filename"];
+    if (typeof rawName !== "string" || rawName === "") {
+      throw new ApiError(422, "INVALID_FILENAME", "x-cpwb-filename header is required");
+    }
+    let originalName;
+    try { originalName = decodeURIComponent(rawName); }
+    catch { throw new ApiError(422, "INVALID_FILENAME", "x-cpwb-filename is not valid URI encoding"); }
+    const file = await sessionFileVault.upload({ sessionId: sessionId.trim(), originalName, stream: req });
+    ok(res, publicSessionFile(file), 201);
+  }
+
+  async function handleSessionFilesList(req, res, { url }) {
+    const sessionId = url.searchParams.get("sessionId")?.trim();
+    if (!sessionId) throw new ApiError(422, "INVALID_SESSION_ID", "sessionId is required");
+    if (!repos.workbenchSessions.get(sessionId)) {
+      throw new SessionFileError(SESSION_FILE_ERROR_CODES.SESSION_NOT_FOUND, "session not found: " + sessionId);
+    }
+    ok(res, sessionFileVault.list(sessionId).map(publicSessionFile));
+  }
+
+  async function handleSessionFileContent(req, res, { params, url }) {
+    const id = parseId(params.id);
+    const file = sessionFileVault.get(id);
+    if (!file) throw new SessionFileError(SESSION_FILE_ERROR_CODES.NOT_FOUND, "session file not found: " + id);
+    let bytes;
+    try { bytes = await readFile(sessionFileVault.contentPath(file)); }
+    catch { throw new SessionFileError(SESSION_FILE_ERROR_CODES.NOT_FOUND, "session file bytes are unavailable: " + id); }
+    res.writeHead(200, {
+      ...originalFileHeaders(file, url.searchParams.get("download") === "1"),
+      "content-length": bytes.byteLength,
+    });
+    res.end(bytes);
+  }
+
+  async function handleSessionFileDelete(req, res, { params }) {
+    const id = parseId(params.id);
+    const removed = await sessionFileVault.remove(id);
+    if (!removed) throw new SessionFileError(SESSION_FILE_ERROR_CODES.NOT_FOUND, "session file not found: " + id);
+    ok(res, { removed: true, file: publicSessionFile(removed) });
+  }
 
   async function handleUpload(req, res) {
     const rawName = req.headers["x-cpwb-filename"];
@@ -1727,6 +1838,9 @@ export function createApi({ repos, queue, ollama, retriever, dataDir, services =
     { pattern: "/knowledge-bases", methods: { GET: handleKnowledgeBasesList, POST: handleKnowledgeBaseCreate } },
     { pattern: "/knowledge-bases/:id/deletion-plan", methods: { GET: handleKnowledgeBaseDeletionPlan } },
     { pattern: "/knowledge-bases/:id", methods: { DELETE: handleKnowledgeBaseDelete } },
+    { pattern: "/session-files", methods: { GET: handleSessionFilesList, POST: handleSessionFileUpload } },
+    { pattern: "/session-files/:id/content", methods: { GET: handleSessionFileContent } },
+    { pattern: "/session-files/:id", methods: { DELETE: handleSessionFileDelete } },
     { pattern: "/documents", methods: { GET: handleDocumentsList, POST: handleUpload } },
     { pattern: "/documents/:id/content", methods: { GET: handleDocumentContent } },
     { pattern: "/documents/:id/reindex", methods: { POST: handleReindex } },

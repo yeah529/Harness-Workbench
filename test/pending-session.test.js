@@ -72,6 +72,43 @@ test("knowledge-base first submit uses the payload-direct rc.2 model contract be
   ]);
 });
 
+test("first submit materializes before uploading File Vault assets and sends their visible references", async () => {
+  const order = [];
+  const file = { name: "需求 说明.md" };
+  let draft = { status: "pristine", sessionId: null, scope: { kind: "project", id: 7 } };
+  const store = {
+    getSnapshot: () => ({ draft, sessionFilesBySession: {} }),
+    actions: {
+      async materializeDraft({ text }) { order.push(["materialize", text]); draft = { ...draft, text, status: "materialized", sessionId: "session-cpwb-file" }; return { sessionId: draft.sessionId }; },
+      async loadSessionFiles(sessionId) { order.push(["list-files", sessionId]); return []; },
+      async uploadSessionFiles(input) { order.push(["upload-files", input.sessionId, input.files]); return [{ id: 4, originalName: file.name, parseStatus: "ready" }]; },
+      markDraftAdmitted() { order.push(["admitted"]); draft = { ...draft, status: "admitted" }; },
+      markDraftError(error) { order.push(["error", error.message]); },
+      async confirmDraft() { order.push(["confirm"]); return { sessionId: draft.sessionId }; },
+    },
+  };
+  const sessionFace = {};
+  const result = await submitPendingDraft({
+    store,
+    sessions: { binding: () => ({ session: sessionFace }) },
+    workspaces: {},
+    conversation: { async sendSession(session, text) { order.push(["send", session === sessionFace, text]); return { kind: "success" }; } },
+    text: "请检查",
+    files: [file],
+    waitForReady: async () => order.push(["ready"]),
+  });
+  assert.equal(result.sessionId, "session-cpwb-file");
+  assert.deepEqual(order, [
+    ["materialize", "请检查"],
+    ["list-files", "session-cpwb-file"],
+    ["upload-files", "session-cpwb-file", [file]],
+    ["ready"],
+    ["send", true, "请检查 @文件/需求 说明.md"],
+    ["admitted"],
+    ["confirm"],
+  ]);
+});
+
 test("an admitted draft retries confirmation without duplicating the native prompt", async () => {
   const order = [];
   const draft = { status: "admitted", sessionId: "session-cpwb-new", scope: { kind: "independent", id: null }, text: "已经发送" };

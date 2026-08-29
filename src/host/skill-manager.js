@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
-  extractSkillArchive,
+  extractSkillPackage,
   parseSkillMarkdown,
   SkillManagerError,
   SKILL_ERROR_CODES,
@@ -52,6 +52,14 @@ function serialize(key, operation) {
   return current.finally(() => {
     if (locks.get(key) === current) locks.delete(key);
   });
+}
+
+function serializeMany(keys, operation) {
+  const ordered = [...new Set(keys)].sort();
+  const acquire = (index) => index >= ordered.length
+    ? operation()
+    : serialize(ordered[index], () => acquire(index + 1));
+  return acquire(0);
 }
 
 function permissionDenied(error, operation) {
@@ -328,6 +336,17 @@ async function writeTransaction(ops, transactionsPath, descriptor) {
   return descriptorPath;
 }
 
+async function replaceTransaction(ops, transactionsPath, descriptor) {
+  const descriptorPath = join(transactionsPath, `${descriptor.id}.json`);
+  const temporaryPath = join(transactionsPath, `.${descriptor.id}.json.update.tmp`);
+  await removePath(ops, temporaryPath).catch(() => {});
+  await callFs("writeFile", ops.writeFile, temporaryPath, `${JSON.stringify(descriptor)}\n`, { flag: "wx" });
+  await syncFile(ops, temporaryPath);
+  await callFs("rename", ops.rename, temporaryPath, descriptorPath);
+  await syncFile(ops, transactionsPath);
+  return descriptorPath;
+}
+
 async function removePath(ops, path, operation = "rm") {
   try {
     await ops.rm(path, { recursive: true, force: true });
@@ -353,6 +372,81 @@ function transactionPaths(rootPath, descriptor) {
     previous: join(rootPath, ".staging", id, "previous"),
     staging: join(rootPath, ".staging", id),
   };
+}
+
+function collectionTransactionPaths(rootPath, descriptor) {
+  if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) return null;
+  if (descriptor.version !== 2 || descriptor.kind !== "collection" || !safeTransactionId(descriptor.id)) return null;
+  if (descriptor.phase !== "prepared" && descriptor.phase !== "committed") return null;
+  if (!Array.isArray(descriptor.items) || descriptor.items.length < 2 || descriptor.items.length > SKILL_PACKAGE_LIMITS.entries) return null;
+  const names = new Set();
+  const items = [];
+  for (const item of descriptor.items) {
+    if (!item || typeof item !== "object" || Array.isArray(item) || !safeName(item.name) || names.has(item.name)) return null;
+    names.add(item.name);
+    const state = item.state === "disabled" ? "disabled" : item.state === "enabled" ? "enabled" : null;
+    if (!state || typeof item.existed !== "boolean") return null;
+    const finalRelative = state === "disabled" ? `.disabled/${item.name}` : item.name;
+    const incomingRelative = `.staging/${descriptor.id}/incoming/${item.name}`;
+    const previousRelative = `.staging/${descriptor.id}/previous/${item.name}`;
+    if (item.finalRelative !== finalRelative
+      || item.incomingRelative !== incomingRelative
+      || item.previousRelative !== previousRelative) return null;
+    items.push({
+      ...item,
+      final: join(rootPath, finalRelative),
+      incoming: join(rootPath, incomingRelative),
+      previous: join(rootPath, previousRelative),
+      alternate: state === "disabled" ? join(rootPath, item.name) : join(rootPath, ".disabled", item.name),
+    });
+  }
+  return { staging: join(rootPath, ".staging", descriptor.id), items };
+}
+
+async function settleCollectionTransaction({ rootPath, ops, descriptor, descriptorPath }) {
+  const paths = collectionTransactionPaths(rootPath, descriptor);
+  if (!paths) throw recoveryError(descriptor);
+  const safePaths = { staging: paths.staging, descriptor: descriptorPath };
+  for (const [index, item] of paths.items.entries()) {
+    safePaths[`final${index}`] = item.final;
+    safePaths[`incoming${index}`] = item.incoming;
+    safePaths[`previous${index}`] = item.previous;
+    safePaths[`alternate${index}`] = item.alternate;
+  }
+  await assertRecoveryPathsSafe(ops, rootPath, safePaths, descriptor);
+
+  const inspected = [];
+  for (const item of paths.items) {
+    if (await optionalInspect(ops, item.alternate, "lstat")) throw recoveryError(descriptor);
+    const final = await optionalInspect(ops, item.final, "lstat");
+    const incoming = await optionalInspect(ops, item.incoming, "lstat");
+    const previous = await optionalInspect(ops, item.previous, "lstat");
+    if ([final, incoming, previous].some((stat) => stat && (stat.isSymbolicLink() || !stat.isDirectory()))) {
+      throw recoveryError(descriptor);
+    }
+    inspected.push({ item, final, incoming, previous });
+  }
+
+  if (descriptor.phase === "committed") {
+    if (inspected.some(({ final }) => !final)) throw recoveryError(descriptor);
+  } else {
+    for (const { item, final, incoming, previous } of inspected.reverse()) {
+      if (item.existed) {
+        if (previous) {
+          if (final && incoming) throw recoveryError(descriptor);
+          if (final) await removePath(ops, item.final);
+          await callFs("mkdir", ops.mkdir, dirname(item.final), { recursive: true });
+          await callFs("rename", ops.rename, item.previous, item.final);
+        } else if (!final || !incoming) {
+          throw recoveryError(descriptor);
+        }
+      } else if (final && !incoming) {
+        await removePath(ops, item.final);
+      }
+    }
+  }
+  await removePath(ops, paths.staging);
+  await removePath(ops, descriptorPath);
 }
 
 async function scanBundle({ rootPath, bundlePath, state, ops }) {
@@ -591,10 +685,17 @@ async function recoverTransactions({ rootPath, ops, identity }) {
     } catch {
       throw recoveryError({ name });
     }
-    const paths = transactionPaths(rootPath, descriptor);
-    if (!paths || name !== `${descriptor.id}.json`) throw recoveryError(descriptor);
-
+    if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor) || !safeTransactionId(descriptor.id)) {
+      throw recoveryError(descriptor);
+    }
+    if (name !== `${descriptor.id}.json`) throw recoveryError(descriptor);
     if (activeTransactions.has(`${identity}\0${descriptor.id}`)) continue;
+    if (descriptor.version === 2 && descriptor.kind === "collection") {
+      await settleCollectionTransaction({ rootPath, ops, descriptor, descriptorPath });
+      continue;
+    }
+    const paths = transactionPaths(rootPath, descriptor);
+    if (!paths) throw recoveryError(descriptor);
     const alternate = descriptor.state === "disabled"
       ? join(rootPath, descriptor.name)
       : join(rootPath, ".disabled", descriptor.name);
@@ -687,7 +788,140 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
     return result.item;
   }
 
-  async function importArchive({ scope, projectId, archiveBytes, sourceName, replace = false } = {}) {
+  async function importCollection({ target, packageSummary, extractedRoot, sourceName, replace, confirmCollection }) {
+    const lockKeys = packageSummary.skills.map((skill) => `${target.identity}\0${skill.name}`);
+    return serializeMany(lockKeys, async () => {
+      await assertRootPathSafe(ops, target.rootPath, target.anchorPath);
+      await recoverTransactionsShared({ rootPath: target.rootPath, ops, identity: target.identity });
+      const records = [];
+      for (const summary of packageSummary.skills) {
+        records.push({ summary, existing: await readState(target, summary.name) });
+      }
+      const conflictCount = records.filter(({ existing }) => existing).length;
+      const preview = {
+        kind: "collection",
+        sourceName: typeof sourceName === "string" ? sourceName : "",
+        count: records.length,
+        conflictCount,
+        skills: records.map(({ summary, existing }) => ({
+          name: summary.name,
+          description: summary.description,
+          files: summary.files,
+          fileCount: summary.fileCount,
+          conflict: !!existing,
+          ...(existing ? {
+            existing: {
+              name: existing.name,
+              description: existing.description,
+              state: existing.state,
+              health: existing.health,
+              files: existing.files,
+              fileCount: existing.fileCount,
+            },
+          } : {}),
+        })),
+      };
+      if (!confirmCollection || (conflictCount > 0 && !replace)) {
+        throw mutationError(
+          SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED,
+          "Skill collection requires confirmation",
+          preview,
+        );
+      }
+
+      await callFs("mkdir", ops.mkdir, target.rootPath, { recursive: true });
+      const transactionId = randomUUID();
+      const stagingRoot = join(target.rootPath, ".staging", transactionId);
+      const stagingIncoming = join(stagingRoot, "incoming");
+      const transactionsPath = join(target.rootPath, ".transactions");
+      try {
+        await callFs("mkdir", ops.mkdir, stagingIncoming, { recursive: true });
+        for (const { summary } of records) {
+          await copyTree(ops, join(extractedRoot, summary.name), join(stagingIncoming, summary.name));
+        }
+        await callFs("mkdir", ops.mkdir, transactionsPath, { recursive: true });
+      } catch (error) {
+        await removePath(ops, stagingRoot).catch(() => {});
+        throwMapped(error, "mutation");
+      }
+      const descriptor = {
+        version: 2,
+        kind: "collection",
+        phase: "prepared",
+        id: transactionId,
+        items: records.map(({ summary, existing }) => {
+          const state = existing?.state ?? "enabled";
+          return {
+            name: summary.name,
+            state,
+            existed: !!existing,
+            finalRelative: state === "disabled" ? `.disabled/${summary.name}` : summary.name,
+            incomingRelative: `.staging/${transactionId}/incoming/${summary.name}`,
+            previousRelative: `.staging/${transactionId}/previous/${summary.name}`,
+          };
+        }),
+      };
+      const activeKey = `${target.identity}\0${transactionId}`;
+      activeTransactions.add(activeKey);
+      try {
+        let descriptorPath;
+        let committed = false;
+        let installedItems = [];
+        try {
+          descriptorPath = await writeTransaction(ops, transactionsPath, descriptor);
+          for (const [index, record] of records.entries()) {
+            const item = descriptor.items[index];
+            const finalPath = join(target.rootPath, item.finalRelative);
+            const incomingPath = join(target.rootPath, item.incomingRelative);
+            if (record.existing) {
+              const previousPath = join(target.rootPath, item.previousRelative);
+              await callFs("mkdir", ops.mkdir, dirname(previousPath), { recursive: true });
+              await callFs("rename", ops.rename, record.existing.path, previousPath);
+            } else {
+              await callFs("mkdir", ops.mkdir, dirname(finalPath), { recursive: true });
+            }
+            await callFs("rename", ops.rename, incomingPath, finalPath);
+            const installed = await scanBundle({ rootPath: target.rootPath, bundlePath: finalPath, state: item.state, ops });
+            if (!installed.item || installed.diagnostics.length > 0) {
+              throw mutationError(SKILL_ERROR_CODES.PACKAGE_INVALID, "Installed Skill collection could not be scanned");
+            }
+            installedItems.push(installed.item);
+          }
+          descriptor.phase = "committed";
+          await replaceTransaction(ops, transactionsPath, descriptor);
+          committed = true;
+        } catch (error) {
+          if (descriptorPath) {
+            try {
+              await settleCollectionTransaction({
+                rootPath: target.rootPath,
+                ops,
+                descriptor: { ...descriptor, phase: "prepared" },
+                descriptorPath,
+              });
+            } catch {
+              throw recoveryError(descriptor);
+            }
+          } else {
+            await removePath(ops, stagingRoot).catch(() => {});
+          }
+          throwMapped(error, "mutation");
+        }
+        if (!committed) throw recoveryError(descriptor);
+        try {
+          await settleCollectionTransaction({ rootPath: target.rootPath, ops, descriptor, descriptorPath });
+        } catch {
+          throw recoveryError(descriptor);
+        }
+        installedItems = installedItems.sort((left, right) => compareStrings(left.name, right.name));
+        return { kind: "collection", count: installedItems.length, replacedCount: conflictCount, items: installedItems };
+      } finally {
+        activeTransactions.delete(activeKey);
+      }
+    });
+  }
+
+  async function importArchive({ scope, projectId, archiveBytes, sourceName, replace = false, confirmCollection = false } = {}) {
     const target = await resolveTarget({ scope, projectId, dshHome, repos, ops });
     const bytes = archiveBytes instanceof Uint8Array ? archiveBytes : new Uint8Array(archiveBytes ?? 0);
     if (bytes.byteLength > SKILL_PACKAGE_LIMITS.archiveBytes) {
@@ -702,7 +936,18 @@ export function createSkillManager({ dshHome, repos, fileOps = defaultFileOps, r
     try {
       const canonicalTempRoot = await callFs("realpath", ops.realpath, temporaryRoot);
       extractedRoot = join(canonicalTempRoot, "incoming");
-      const summary = await extractSkillArchive({ archiveBytes: bytes, destination: extractedRoot });
+      const packageSummary = await extractSkillPackage({ archiveBytes: bytes, destination: extractedRoot });
+      if (packageSummary.kind === "collection") {
+        return await importCollection({
+          target,
+          packageSummary,
+          extractedRoot,
+          sourceName,
+          replace,
+          confirmCollection,
+        });
+      }
+      const summary = packageSummary.skills[0];
       const key = `${target.identity}\0${summary.name}`;
       return await serialize(key, async () => {
         await assertRootPathSafe(ops, target.rootPath, target.anchorPath);

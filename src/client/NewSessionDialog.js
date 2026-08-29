@@ -1,9 +1,10 @@
 import React from "react";
-import { ArrowRight, Books, CaretDown, FolderOpen, Image, PaperPlaneTilt, Sparkle, UserCircle, X } from "@phosphor-icons/react";
+import { ArrowRight, Books, CaretDown, FolderOpen, Image, Paperclip, PaperPlaneTilt, Sparkle, UserCircle, X } from "@phosphor-icons/react";
 
 import { CyberSelect } from "./CyberSelect.js";
 import { GlobalModal } from "./globalModal.js";
 import { loadPendingModelCatalog, submitPendingDraft } from "./pendingSession.js";
+import { ACCEPT } from "./KnowledgeBase.js";
 
 const OWNER_TYPES = [
   ["project", "项目", FolderOpen],
@@ -126,9 +127,11 @@ export function DraftConversation({ store, sessions, workspaces, connection, con
   const [selection, setSelection] = React.useState(null);
   const [modelOpen, setModelOpen] = React.useState(false);
   const [attachments, setAttachments] = React.useState([]);
+  const [files, setFiles] = React.useState([]);
   const [submitting, setSubmitting] = React.useState(false);
   const [localError, setLocalError] = React.useState(null);
   const fileInput = React.useRef(null);
+  const documentInput = React.useRef(null);
   const modelRoot = React.useRef(null);
 
   React.useEffect(function () { setText(draft?.text || ""); }, [draft?.sessionId, draft?.status]);
@@ -161,6 +164,7 @@ export function DraftConversation({ store, sessions, workspaces, connection, con
         conversation,
         text,
         imageIds: attachments.map((item) => item.id),
+        files,
         modelSelection: selection,
       });
       await onActivated?.(result);
@@ -188,6 +192,16 @@ export function DraftConversation({ store, sessions, workspaces, connection, con
     conversation?.releaseDraftImage?.(id);
     setAttachments((current) => current.filter((item) => item.id !== id));
   };
+  const chooseDocuments = function (event) {
+    const selected = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!selected.length) return;
+    setFiles((current) => {
+      const names = new Set(current.map((file) => file.name));
+      return [...current, ...selected.filter((file) => !names.has(file.name))];
+    });
+    setLocalError(null);
+  };
   const cancel = function () {
     for (const attachment of attachments) conversation?.releaseDraftImage?.(attachment.id);
     onCancel?.();
@@ -209,6 +223,10 @@ export function DraftConversation({ store, sessions, workspaces, connection, con
         attachments.length ? React.createElement("div", { className: "cpwb-pending-attachments", "aria-label": "待发送图片" }, attachments.map((attachment) => React.createElement("figure", { key: attachment.id },
           React.createElement("img", { src: attachment.previewUrl, alt: attachment.file?.name || "待发送图片" }),
           React.createElement("button", { type: "button", onClick: () => removeAttachment(attachment.id), "aria-label": "移除 " + (attachment.file?.name || "图片") }, React.createElement(X, { size: 13, "aria-hidden": true }))))) : null,
+        files.length ? React.createElement("div", { className: "cpwb-pending-files", "aria-label": "待保存文件" }, files.map((file) => React.createElement("span", { key: file.name },
+          React.createElement(Paperclip, { size: 14, "aria-hidden": true }),
+          React.createElement("b", null, file.name),
+          React.createElement("button", { type: "button", onClick: () => setFiles((current) => current.filter((item) => item !== file)), "aria-label": "移除 " + file.name }, React.createElement(X, { size: 12, "aria-hidden": true }))))) : null,
         React.createElement("textarea", {
           value: text,
           disabled: busy,
@@ -218,7 +236,9 @@ export function DraftConversation({ store, sessions, workspaces, connection, con
         }),
         React.createElement("div", { className: "cpwb-pending-composer-tools" },
           React.createElement("input", { ref: fileInput, type: "file", accept: "image/*", multiple: true, hidden: true, onChange: chooseFiles }),
+          React.createElement("input", { ref: documentInput, type: "file", accept: ACCEPT, multiple: true, hidden: true, onChange: chooseDocuments }),
           React.createElement("button", { type: "button", className: "cpwb-pending-tool", onClick: () => fileInput.current?.click(), "aria-label": "添加图片", title: "添加图片" }, React.createElement(Image, { size: 20, "aria-hidden": true })),
+          React.createElement("button", { type: "button", className: "cpwb-pending-tool", onClick: () => documentInput.current?.click(), "aria-label": "添加文件", title: "添加文件（不向量化）" }, React.createElement(Paperclip, { size: 20, "aria-hidden": true })),
           React.createElement("div", { ref: modelRoot, className: "cpwb-pending-model" },
             React.createElement("button", { type: "button", className: "cpwb-pending-model-trigger", onClick: () => setModelOpen((value) => !value), "aria-expanded": modelOpen, "aria-label": "选择模型与推理强度" },
               React.createElement("span", null, modelLabel), React.createElement(CaretDown, { size: 15, "aria-hidden": true })),

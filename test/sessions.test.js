@@ -220,6 +220,28 @@ test("native pre-step RAG injects one plugin recall for direct user input and ne
   assert.equal(alreadyRecalled.messages.length, 2);
 });
 
+test("native pre-step injects referenced session files even when knowledge recall already exists", async () => {
+  const fileCalls = [];
+  const listener = createWorkbenchRagPreStep({
+    retriever: { search: async () => { throw new Error("must not retrieve twice"); } },
+    scope: { kind: "independent", id: null },
+    sessionId: "session-cpwb-files",
+    fileContext: {
+      async resolveReferences(input) {
+        fileCalls.push(input);
+        return { files: [{ id: 2 }], text: "<file_context>full text</file_context>", codePoints: 9 };
+      },
+    },
+  });
+  const user = { content: [{ type: "text", text: "检查 @文件/设计.md" }], source: { kind: "user" } };
+  const existingRecall = { content: [{ type: "text", text: "knowledge" }], source: { kind: "plugin", plugin: "dsh-cyberpunk-workbench", form: "recall" } };
+  const result = await listener({ signal: new AbortController().signal }, async () => ({ kind: "enter", messages: [existingRecall, user] }));
+  assert.deepEqual(fileCalls, [{ sessionId: "session-cpwb-files", text: "检查 @文件/设计.md" }]);
+  assert.equal(result.messages.length, 3);
+  assert.equal(result.messages[0].source.form, "file-context");
+  assert.equal(result.messages[1], existingRecall);
+});
+
 test("native pre-step RAG rejects before model entry when retrieval fails", async () => {
   const listener = createWorkbenchRagPreStep({
     retriever: { search: async () => { throw new Error("retrieval down"); } },

@@ -50,6 +50,22 @@ function mapDocument(row) {
   };
 }
 
+function mapSessionFile(row) {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    sha256: row.sha256,
+    originalName: row.original_name,
+    mimeType: row.mime_type ?? null,
+    size: row.size,
+    parseStatus: row.parse_status,
+    parseError: row.parse_error ?? null,
+    contextText: row.context_text ?? null,
+    contextCodePoints: row.context_code_points,
+    createdAt: row.created_at,
+  };
+}
+
 function mapTodo(row, now = new Date()) {
   const due = new Date(row.due_at);
   return {
@@ -993,6 +1009,67 @@ export function createRepositories(db) {
     },
   };
 
+  const sessionFiles = {
+    create({
+      sessionId,
+      sha256,
+      originalName,
+      mimeType = null,
+      size,
+      parseStatus,
+      parseError = null,
+      contextText = null,
+      contextCodePoints = 0,
+      now = new Date(),
+    }) {
+      db.prepare(
+        "INSERT INTO session_files (session_id, sha256, original_name, mime_type, size, parse_status, parse_error, context_text, context_code_points, created_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        sessionId,
+        sha256,
+        originalName,
+        mimeType,
+        size,
+        parseStatus,
+        parseError,
+        contextText,
+        contextCodePoints,
+        nowIso(now),
+      );
+      return mapSessionFile(db.prepare("SELECT * FROM session_files WHERE id = last_insert_rowid()").get());
+    },
+
+    get(id) {
+      const row = db.prepare("SELECT * FROM session_files WHERE id = ?").get(id);
+      return row ? mapSessionFile(row) : null;
+    },
+
+    getBySessionAndName(sessionId, originalName) {
+      const row = db.prepare(
+        "SELECT * FROM session_files WHERE session_id = ? AND original_name = ?",
+      ).get(sessionId, originalName);
+      return row ? mapSessionFile(row) : null;
+    },
+
+    listBySession(sessionId) {
+      return db.prepare(
+        "SELECT * FROM session_files WHERE session_id = ? ORDER BY created_at DESC, id DESC",
+      ).all(sessionId).map(mapSessionFile);
+    },
+
+    countBySha256(sha256) {
+      return Number(db.prepare("SELECT COUNT(*) AS n FROM session_files WHERE sha256 = ?").get(sha256).n);
+    },
+
+    remove(id) {
+      const row = db.prepare("SELECT * FROM session_files WHERE id = ?").get(id);
+      if (!row) return null;
+      db.prepare("DELETE FROM session_files WHERE id = ?").run(id);
+      return mapSessionFile(row);
+    },
+  };
+
   const messageContextRefs = {
     addMany({ sessionId, messageId, sources, now = new Date() }) {
       if (typeof messageId !== "string" || messageId.trim() === "") throw new TypeError("messageId is required");
@@ -1276,6 +1353,7 @@ export function createRepositories(db) {
     summaries,
     sessionContextSources,
     messageContextRefs,
+    sessionFiles,
     workbenchSessions,
     schedules,
     maintenance,

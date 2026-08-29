@@ -249,7 +249,7 @@ function uploadBody(name, scope, scopeId, body) {
 
 const skillMd = (name, description = name) => `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
 
-function skillUploadBody(bytes, { scope, projectId, sourceName, replace } = {}) {
+function skillUploadBody(bytes, { scope, projectId, sourceName, replace, confirmCollection } = {}) {
   const headers = {
     "content-type": "application/zip",
     "x-cpwb-skill-scope": scope,
@@ -257,6 +257,7 @@ function skillUploadBody(bytes, { scope, projectId, sourceName, replace } = {}) 
   };
   if (projectId !== undefined) headers["x-cpwb-project-id"] = String(projectId);
   if (replace !== undefined) headers["x-cpwb-replace"] = String(replace);
+  if (confirmCollection !== undefined) headers["x-cpwb-confirm-collection"] = String(confirmCollection);
   return { method: "POST", headers, body: bytes };
 }
 
@@ -335,6 +336,46 @@ test("skill conflict API drops untrusted outside and staging paths", async (t) =
   const body = await response.json();
   assert.deepEqual(body.error.details, { existing: { name: "same-skill" }, incoming: { name: "same-skill" } });
   assert.doesNotMatch(JSON.stringify(body), /tmp|secret|absolute/);
+});
+
+test("skill collection confirmation exposes only safe preview fields and forwards explicit confirmation", async (t) => {
+  const preview = new SkillManagerError(SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED, "preview", {
+    kind: "collection",
+    sourceName: "superpowers.zip",
+    count: 2,
+    conflictCount: 1,
+    skills: [
+      { name: "brainstorming", description: "new", files: ["SKILL.md"], fileCount: 1, conflict: true, path: "/tmp/staging", existing: { name: "brainstorming", description: "old", state: "disabled", path: "/private/skill" } },
+      { name: "systematic-debugging", description: "fresh", files: ["SKILL.md"], fileCount: 1, conflict: false },
+    ],
+  });
+  const calls = [];
+  const { base } = await startApi(t, { skills: { importArchive: async (input) => {
+    calls.push(input);
+    if (!input.confirmCollection) throw preview;
+    return { kind: "collection", count: 2, replacedCount: 1, items: [] };
+  } } });
+
+  let response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), { scope: "global", sourceName: "superpowers.zip" }));
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.error.code, SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED);
+  assert.deepEqual(body.error.details.skills.map(({ name, conflict }) => ({ name, conflict })), [
+    { name: "brainstorming", conflict: true },
+    { name: "systematic-debugging", conflict: false },
+  ]);
+  assert.equal(body.error.details.skills[0].existing.state, "disabled");
+  assert.doesNotMatch(JSON.stringify(body), /\/tmp|\/private/);
+
+  response = await fetch(base + "/skills/import", skillUploadBody(new Uint8Array([1]), {
+    scope: "global",
+    sourceName: "superpowers.zip",
+    replace: true,
+    confirmCollection: true,
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(calls.at(-1).confirmCollection, true);
+  assert.equal(calls.at(-1).replace, true);
 });
 
 test("invalid Skill import headers drain chunked request bodies before responding", async (t) => {
@@ -1057,6 +1098,75 @@ test("knowledge-base list exposes real chip metrics and reverse project links", 
 
 // --------------------------------------------------------------- documents
 
+test("session file upload is parsed synchronously without documents, chunks, or index queue work", async (t) => {
+  const { base, repos, queue, fakeIndexer } = await startApi(t);
+  const sessionId = "session-cpwb-direct-file";
+  repos.workbenchSessions.create({ sessionId, scope: { kind: "independent", id: null } });
+
+  const uploaded = await fetch(base + "/session-files", {
+    method: "POST",
+    headers: {
+      "x-cpwb-session-id": sessionId,
+      "x-cpwb-filename": encodeURIComponent("brief.md"),
+    },
+    body: "# Brief\nDirect context",
+  });
+  assert.equal(uploaded.status, 201);
+  const file = await uploaded.json();
+  assert.equal(file.originalName, "brief.md");
+  assert.equal(file.parseStatus, "ready");
+  assert.equal("contextText" in file, false, "API never exposes extracted prompt contents");
+  await queue.idle();
+  assert.equal(fakeIndexer.state.calls.length, 0);
+  assert.equal(repos.documents.list().length, 0);
+
+  const listed = await fetch(base + "/session-files?sessionId=" + encodeURIComponent(sessionId));
+  assert.equal(listed.status, 200);
+  assert.deepEqual((await listed.json()).map((item) => item.id), [file.id]);
+
+  const opened = await fetch(base + `/session-files/${file.id}/content`);
+  assert.equal(opened.status, 200);
+  assert.equal(await opened.text(), "# Brief\nDirect context");
+  assert.match(opened.headers.get("content-disposition"), /^inline;/);
+
+  const downloaded = await fetch(base + `/session-files/${file.id}/content?download=1`);
+  assert.match(downloaded.headers.get("content-disposition"), /^attachment;/);
+
+  const removed = await fetch(base + `/session-files/${file.id}`, { method: "DELETE" });
+  assert.equal(removed.status, 200);
+  assert.equal((await removed.json()).removed, true);
+  assert.deepEqual(repos.sessionFiles.listBySession(sessionId), []);
+});
+
+test("session file API rejects missing sessions and duplicate names with stable errors", async (t) => {
+  const { base, repos } = await startApi(t);
+  let response = await fetch(base + "/session-files", {
+    method: "POST",
+    headers: {
+      "x-cpwb-session-id": "session-cpwb-missing",
+      "x-cpwb-filename": encodeURIComponent("brief.md"),
+    },
+    body: "# Brief",
+  });
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error.code, "SESSION_FILE_SESSION_NOT_FOUND");
+
+  const sessionId = "session-cpwb-duplicate-file";
+  repos.workbenchSessions.create({ sessionId, scope: { kind: "independent", id: null } });
+  const init = {
+    method: "POST",
+    headers: {
+      "x-cpwb-session-id": sessionId,
+      "x-cpwb-filename": encodeURIComponent("brief.md"),
+    },
+    body: "# Brief",
+  };
+  assert.equal((await fetch(base + "/session-files", init)).status, 201);
+  response = await fetch(base + "/session-files", init);
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "SESSION_FILE_DUPLICATE_NAME");
+});
+
 test("raw upload persists file + document + link, then indexes to ready", async (t) => {
   const { base, repos, queue, fakeIndexer, dataDir } = await startApi(t);
   const p = repos.projects.create({ name: "P" });
@@ -1081,6 +1191,21 @@ test("raw upload persists file + document + link, then indexes to ready", async 
   assert.equal(fakeIndexer.state.calls.length, 1);
   assert.deepEqual(fakeIndexer.state.calls[0].projectIds, [p.id]);
   assert.deepEqual(fakeIndexer.state.calls[0].knowledgeBaseIds, []);
+});
+
+test("document API rejects legacy session scope so conversation files cannot enter the vector pipeline", async (t) => {
+  const sessionId = "session-cpwb-independent-files";
+  const { base, repos } = await startApi(t);
+  repos.workbenchSessions.create({ sessionId, scope: { kind: "independent", id: null } });
+
+  const uploaded = await fetch(base + "/documents", uploadBody("固定说明.md", "session", sessionId, "# 会话固定文件"));
+  assert.equal(uploaded.status, 422);
+  assert.equal((await uploaded.json()).error.code, "INVALID_SCOPE");
+  assert.deepEqual(repos.documents.list(), []);
+
+  const listed = await fetch(base + "/documents?scope=session&scopeId=" + encodeURIComponent(sessionId));
+  assert.equal(listed.status, 422);
+  assert.equal((await listed.json()).error.code, "INVALID_SCOPE");
 });
 
 test("document content opens or downloads the original bytes without exposing a local path", async (t) => {

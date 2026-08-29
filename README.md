@@ -69,11 +69,13 @@ Project sessions, knowledge-chip sessions, and independent sessions are all full
 | --- | --- | --- | --- |
 | **Project** | Ongoing work inside one workspace | Workspace files, linked knowledge chips, explicit `@` references | Todos, schedules, summaries, project session history |
 | **Knowledge chip** | Research and Q&A over a document set | Documents and vector retrieval from one chip | Source documents, citation footnotes, original-file open/download |
-| **Independent** | Quick questions and cross-project exploration | Explicitly selected sessions, chips, and files | Full native DSH session without requiring a project |
+| **Independent** | Quick questions and cross-project exploration | Explicit `@` sessions, chips, workspace paths, and session files | Persistent File Vault, Subagent activity, and global schedules without requiring a project |
 
 Projects and knowledge chips can each contain multiple sessions. Recent activity mixes all three scopes, grouped by date and marked with distinct icons. The full session page supports search, filtering, archiving, and restoration.
 
 New sessions are created lazily. Opening a blank composer does not mint a Session ID. The first real message creates the DSH session and adds it to recent activity, making cancellation and switching feel immediate.
+
+After any conversation has a Session ID, its **Session files** rail accepts the same text, Office, HTML, and code formats as a knowledge chip. These files are not embedded or indexed. They stay in the Workbench File Vault and enter model context only when the current prompt explicitly references `@文件/<name>`. The combined full-text context limit is 32,000 Unicode code points per turn; Workbench fails visibly instead of truncating or falling back to vectors.
 
 ## Projects as persistent control planes
 
@@ -83,7 +85,7 @@ Inside a project, the interface separates three concerns:
 
 1. **Global navigation** — new session, home, all sessions, knowledge chips, recent sessions, and settings.
 2. **Native conversation** — DSH Chat and Trajectory, model and reasoning controls, streaming, tool calls, approvals, attachments, queues, retries, and context statistics.
-3. **Project tools** — todos, scheduled agents, linked knowledge chips, and daily summaries.
+3. **Project tools** — todos, scheduled agents, session files, linked knowledge chips, and daily summaries.
 
 Desktop uses a three-area layout, medium screens move project tools into a right drawer, and mobile uses mutually exclusive navigation and tool drawers. Keyboard focus, Escape close, focus restoration, reduced motion, and reduced-transparency fallbacks are included.
 
@@ -117,10 +119,11 @@ Retrieval is visible rather than hidden. The session Trajectory exposes injected
 Type `@` in the composer to reference accessible:
 
 - workspace files;
+- non-vectorized files saved to the current Session File Vault;
 - linked or available knowledge chips;
 - other Workbench sessions.
 
-Images and ordinary attachments continue through the native DSH 0.1.1-rc.2 Files API. Workbench does not create a second upload store or message system; it passes selected context to the native session.
+Images continue through the native DSH 0.1.1-rc.2 image path. Generic conversation files use the Workbench File Vault because their required lifetime is session-scoped and reusable through `@文件`; they do not enter `documents`, chunks, embeddings, or LanceDB. Project workspace paths remain native DSH file references, while knowledge-chip documents retain their separate vector pipeline.
 
 ## Todos, scheduled agents, and daily automation
 

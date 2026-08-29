@@ -132,7 +132,7 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
       list({ scope, projectId, signal } = {}) {
         return request({ path: "/skills", query: { scope, projectId }, signal });
       },
-      importBundle({ archive, scope, projectId, sourceName, replace = false }, { signal } = {}) {
+      importBundle({ archive, scope, projectId, sourceName, replace = false, confirmCollection = false }, { signal } = {}) {
         return request({
           method: "POST",
           path: "/skills/import",
@@ -143,6 +143,7 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
             "x-cpwb-filename": encodeURIComponent(sourceName),
             ...(projectId === undefined ? {} : { "x-cpwb-project-id": String(projectId) }),
             "x-cpwb-replace": String(replace),
+            "x-cpwb-confirm-collection": String(confirmCollection),
           },
           signal,
         });
@@ -201,7 +202,32 @@ export function createCpwbApi({ fetchImpl, basePath = API_PREFIX } = {}) {
         return request({ method: "POST", path: "/documents/" + id + "/reindex", signal });
       },
       unlink({ id, scope, scopeId }, { signal } = {}) {
-        return request({ method: "DELETE", path: "/documents/" + id + "/links/" + scope + "/" + scopeId, signal });
+        return request({ method: "DELETE", path: "/documents/" + id + "/links/" + scope + "/" + encodeURIComponent(scopeId), signal });
+      },
+    },
+
+    sessionFiles: {
+      list(sessionId, { signal } = {}) {
+        return request({ path: "/session-files", query: { sessionId }, signal });
+      },
+      upload({ sessionId, file }, { signal } = {}) {
+        return request({
+          method: "POST",
+          path: "/session-files",
+          rawBody: file,
+          headers: {
+            "x-cpwb-session-id": sessionId,
+            "x-cpwb-filename": encodeURIComponent(file.name),
+          },
+          signal,
+        });
+      },
+      contentUrl(id, { download = false } = {}) {
+        if (!Number.isSafeInteger(id) || id < 1) throw new TypeError("session file id must be a positive integer");
+        return basePath + "/session-files/" + id + "/content" + (download ? "?download=1" : "");
+      },
+      remove(id, { signal } = {}) {
+        return request({ method: "DELETE", path: "/session-files/" + id, signal });
       },
     },
 

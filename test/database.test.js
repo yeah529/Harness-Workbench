@@ -60,6 +60,54 @@ test("one document links to many projects and knowledge bases", async (t) => {
   assert.deepEqual(repos.documents.listByKnowledgeBase(k1.id).map((d) => d.id), [doc.id]);
 });
 
+test("session files are durable non-vector rows scoped by session and unique by name", async (t) => {
+  const dataDir = await createTempDir();
+  const db = openDatabase({ dataDir });
+  const repos = createRepositories(db);
+  t.after(async () => {
+    closeDatabase(db);
+    await removeTempDir(dataDir);
+  });
+
+  const sessionId = "session-cpwb-file-vault";
+  repos.workbenchSessions.create({
+    sessionId,
+    scope: { kind: "independent", id: null },
+  });
+  const file = repos.sessionFiles.create({
+    sessionId,
+    sha256: "f".repeat(64),
+    originalName: "brief.md",
+    mimeType: "text/markdown",
+    size: 7,
+    parseStatus: "ready",
+    contextText: "# Brief",
+    contextCodePoints: 7,
+    now: "2026-08-29T01:00:00.000Z",
+  });
+
+  assert.equal(file.sessionId, sessionId);
+  assert.equal(file.parseStatus, "ready");
+  assert.equal(file.contextText, "# Brief");
+  assert.equal(repos.sessionFiles.get(file.id).originalName, "brief.md");
+  assert.equal(repos.sessionFiles.getBySessionAndName(sessionId, "brief.md").id, file.id);
+  assert.deepEqual(repos.sessionFiles.listBySession(sessionId).map((item) => item.id), [file.id]);
+  assert.equal(repos.sessionFiles.countBySha256("f".repeat(64)), 1);
+  assert.throws(() => repos.sessionFiles.create({
+    sessionId,
+    sha256: "e".repeat(64),
+    originalName: "brief.md",
+    size: 8,
+    parseStatus: "ready",
+    contextText: "changed",
+    contextCodePoints: 7,
+  }), /unique/i);
+
+  const removed = repos.sessionFiles.remove(file.id);
+  assert.equal(removed.id, file.id);
+  assert.equal(repos.sessionFiles.get(file.id), null);
+});
+
 test("projects detach owned sessions before deleting only Workbench-owned project data", async (t) => {
   const dataDir = await createTempDir();
   const db = openDatabase({ dataDir });

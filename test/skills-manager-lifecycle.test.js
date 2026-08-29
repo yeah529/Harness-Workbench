@@ -200,6 +200,49 @@ test("mounted manager retains a failed replacement decision for retry", async ()
   await act(async () => { root.unmount(); });
 });
 
+test("mounted manager confirms a collection with replacement only when its preview reports conflicts", async () => {
+  const document = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { act } = React;
+  const previewRequest = deferred();
+  const confirmedRequest = deferred();
+  const calls = [];
+  const store = storeFor({ global: { status: "ready", data: { rootPath: "/dsh/skills", items: [], diagnostics: [] } } }, (input) => {
+    calls.push(input);
+    return input.confirmCollection ? confirmedRequest.promise : previewRequest.promise;
+  });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () => { root.render(React.createElement(SkillScopeManager, { store, scope: "global" })); });
+  const zip = { name: "superpowers.zip", size: 4 };
+  const input = findNodes(container, (node) => node.tagName === "INPUT" && node.accept)?.[0];
+  input.files = [zip];
+  await act(async () => { void invokeProp(input, "onChange", { currentTarget: input }); });
+  await act(async () => { previewRequest.reject(Object.assign(new Error("preview"), {
+    code: "SKILL_COLLECTION_CONFIRMATION_REQUIRED",
+    details: {
+      kind: "collection",
+      sourceName: "superpowers.zip",
+      count: 2,
+      conflictCount: 1,
+      skills: [
+        { name: "brainstorming", description: "new", fileCount: 1, conflict: true, existing: { state: "enabled" } },
+        { name: "systematic-debugging", description: "fresh", fileCount: 1, conflict: false },
+      ],
+    },
+  })); });
+  assert.match(container.textContent, /检测到 2 个 Skills/);
+  const confirm = findNodes(container, (node) => node.tagName === "BUTTON" && node.textContent === "导入 2 个 Skills")[0];
+  assert.ok(confirm);
+  await act(async () => { void invokeProp(confirm, "onClick", {}); });
+  assert.equal(calls[1].archive, zip);
+  assert.equal(calls[1].confirmCollection, true);
+  assert.equal(calls[1].replace, true);
+  await act(async () => { confirmedRequest.resolve({ kind: "collection", count: 2, items: [] }); });
+  assert.doesNotMatch(container.textContent, /检测到 2 个 Skills/);
+  await act(async () => { root.unmount(); });
+});
+
 test("mounted manager resets directory input before stale packing can finish", async () => {
   const document = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -363,7 +406,7 @@ test("mounted project rail tabs activate and move focus with roving keyboard nav
   const sessionsSnapshot = { subagentsByParent: {} };
   const sessions = { list: { getSnapshot: () => sessionsSnapshot, subscribe: () => () => {} } };
   await act(async () => { root.render(React.createElement(WorkbenchSessionShell, { sessionId: "session-cpwb-tabs", open: true, store, sessions, layoutMode: "desktop" })); });
-  const tabs = () => findNodes(container, (node) => node.tagName === "BUTTON" && node.getAttribute?.("role") === "tab");
+  const tabs = () => findNodes(container, (node) => node.tagName === "BUTTON" && node.getAttribute?.("role") === "tab" && node.getAttribute?.("id")?.startsWith("cpwb-tool-tab-"));
   const first = tabs()[0];
   const second = tabs()[1];
   assert.equal(first.getAttribute("tabindex"), "0");
@@ -373,13 +416,13 @@ test("mounted project rail tabs activate and move focus with roving keyboard nav
   assert.equal(second.getAttribute("aria-selected"), "true");
   assert.equal(first.getAttribute("tabindex"), "-1");
   await act(async () => { invokeProp(second, "onKeyDown", { key: "End", preventDefault() {} }); });
-  const last = tabs()[4];
+  const last = tabs().at(-1);
   assert.equal(document.activeElement, last);
   assert.equal(last.getAttribute("aria-selected"), "true");
   await act(async () => { invokeProp(last, "onKeyDown", { key: "ArrowRight", preventDefault() {} }); });
   assert.equal(document.activeElement, tabs()[0]);
   await act(async () => { invokeProp(tabs()[0], "onKeyDown", { key: "ArrowLeft", preventDefault() {} }); });
-  assert.equal(document.activeElement, tabs()[4]);
+  assert.equal(document.activeElement, tabs().at(-1));
   const panel = findNodes(container, (node) => node.getAttribute?.("role") === "tabpanel")[0];
   assert.equal(panel.getAttribute("aria-labelledby"), last.getAttribute("id"));
   await act(async () => { root.unmount(); });
@@ -403,7 +446,7 @@ test("project rail keeps one current tab and body during an immediate scope tran
   const container = document.createElement("div");
   const root = createRoot(container);
   await act(async () => { root.render(React.createElement(WorkbenchSessionShell, props)); });
-  const tabs = () => findNodes(container, (node) => node.tagName === "BUTTON" && node.getAttribute?.("role") === "tab");
+  const tabs = () => findNodes(container, (node) => node.tagName === "BUTTON" && node.getAttribute?.("role") === "tab" && node.getAttribute?.("id")?.startsWith("cpwb-tool-tab-"));
   await act(async () => { invokeProp(tabs()[4], "onClick", {}); });
   assert.equal(tabs()[4].getAttribute("aria-selected"), "true");
 

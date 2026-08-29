@@ -144,6 +144,7 @@ export function createWorkbenchStore(api) {
     workbenchSessions: {},
     citationsBySession: {},
     contextBySession: {},
+    sessionFilesBySession: {},
     globalSchedules: [],
     linkedProjects: [],
     maintenanceJob: null,
@@ -478,6 +479,7 @@ export function createWorkbenchStore(api) {
           ...(projectId === undefined ? {} : { projectId }),
           sourceName: input.sourceName,
           replace: input.replace === true,
+          confirmCollection: input.confirmCollection === true,
         }, { signal }),
       );
     },
@@ -808,8 +810,10 @@ export function createWorkbenchStore(api) {
     deleteSession: async function deleteSession(sessionId) {
       const result = await runAction("deleteSession", () => api.chat.sessions.remove(sessionId));
       const next = { ...state.workbenchSessions };
+      const nextFiles = { ...state.sessionFilesBySession };
       delete next[sessionId];
-      setState({ workbenchSessions: next });
+      delete nextFiles[sessionId];
+      setState({ workbenchSessions: next, sessionFilesBySession: nextFiles });
       await loadRecent.run(RECENT_SESSION_LIMIT);
       return result;
     },
@@ -818,6 +822,41 @@ export function createWorkbenchStore(api) {
       const context = await runAction("loadSessionContext", () => api.chat.sessions.context.get(sessionId));
       setState({ contextBySession: { ...state.contextBySession, [sessionId]: context } });
       return context;
+    },
+
+    loadSessionFiles: async function loadSessionFiles(sessionId) {
+      if (typeof api.sessionFiles?.list !== "function") return [];
+      const rows = await api.sessionFiles.list(sessionId);
+      const normalized = Array.isArray(rows) ? rows : [];
+      setState({ sessionFilesBySession: { ...state.sessionFilesBySession, [sessionId]: normalized } });
+      return normalized;
+    },
+
+    uploadSessionFiles: async function uploadSessionFiles({ sessionId, files }) {
+      if (typeof api.sessionFiles?.upload !== "function") throw new Error("session file API is unavailable");
+      const list = Array.isArray(files) ? files : [files];
+      const uploaded = [];
+      const failures = [];
+      for (const file of list.filter(Boolean)) {
+        try {
+          uploaded.push(await api.sessionFiles.upload({ sessionId, file }));
+        } catch (error) {
+          failures.push({ file, error: toError(error) });
+        }
+      }
+      await actions.loadSessionFiles(sessionId);
+      if (failures.length > 0) {
+        const error = new Error(failures[0].error.message);
+        error.code = failures[0].error.code;
+        error.failures = failures;
+        throw error;
+      }
+      return uploaded;
+    },
+
+    deleteSessionFile: async function deleteSessionFile({ sessionId, id }) {
+      await api.sessionFiles.remove(id);
+      return actions.loadSessionFiles(sessionId);
     },
 
     setSessionContext: async function setSessionContext({ sessionId, source, mode }) {

@@ -30,6 +30,7 @@ import {
   extractKnowledgeBaseReferenceIds,
   stripKnowledgeBaseReferences,
 } from "../shared/knowledgeReferences.js";
+import { stripSessionFileReferences } from "../shared/sessionFileReferences.js";
 
 // Re-export the error vocabulary so sessions.js keeps its public interface
 // (and existing test imports) unchanged while the canonical definitions live
@@ -69,6 +70,20 @@ function isWorkbenchRecall(message) {
   return message?.source?.kind === "plugin"
     && message.source.plugin === "dsh-cyberpunk-workbench"
     && message.source.form === "recall";
+}
+
+function isWorkbenchFileContext(message) {
+  return message?.source?.kind === "plugin"
+    && message.source.plugin === "dsh-cyberpunk-workbench"
+    && message.source.form === "file-context";
+}
+
+function fileContextSource() {
+  return {
+    kind: "plugin",
+    plugin: "dsh-cyberpunk-workbench",
+    form: "file-context",
+  };
 }
 
 function isKnowledgeScopedSession(scope) {
@@ -116,7 +131,7 @@ function persistedSessionTitle(events) {
  * model step. The adapter is deliberately fail-closed: a retrieval failure
  * rejects the step, so the native SessionFace never sends a model request.
  */
-export function createWorkbenchRagPreStep({ retriever, scope, onQuestion, contextResolver, sessionId }) {
+export function createWorkbenchRagPreStep({ retriever, scope, onQuestion, contextResolver, sessionId, fileContext }) {
   if (!retriever || typeof retriever.search !== "function") {
     throw new TypeError("createWorkbenchRagPreStep requires retriever.search");
   }
@@ -131,12 +146,24 @@ export function createWorkbenchRagPreStep({ retriever, scope, onQuestion, contex
     const rawQuestion = messageText(user);
     if (!rawQuestion) return decision;
     try { await onQuestion?.(rawQuestion); } catch { /* title metadata never blocks a model turn */ }
-    if (decision.messages.some(isWorkbenchRecall)) return decision;
-    const question = stripKnowledgeBaseReferences(rawQuestion);
+    const hasKnowledgeRecall = decision.messages.some(isWorkbenchRecall);
+    const hasFileContext = decision.messages.some(isWorkbenchFileContext);
+    let resolvedFiles = { files: [], text: "", codePoints: 0 };
+    if (fileContext && sessionId && !hasFileContext) {
+      try {
+        resolvedFiles = await fileContext.resolveReferences({ sessionId, text: rawQuestion });
+      } catch (error) {
+        throw error;
+      }
+    }
+    const sessionFiles = typeof fileContext?.list === "function" && sessionId ? fileContext.list(sessionId) : [];
+    const question = stripSessionFileReferences(stripKnowledgeBaseReferences(rawQuestion), sessionFiles);
     let scopes = [];
     let citations = [];
     try {
-      if (contextResolver && sessionId) {
+      if (hasKnowledgeRecall) {
+        scopes = [];
+      } else if (contextResolver && sessionId) {
         const sources = contextResolver.resolveForPrompt({
           sessionId,
           oneShotSources: extractKnowledgeBaseReferenceIds(rawQuestion).map((id) => ({ kind: "knowledge_base", id: String(id) })),
@@ -150,7 +177,7 @@ export function createWorkbenchRagPreStep({ retriever, scope, onQuestion, contex
           const found = await retriever.searchSession({ sourceSessionId: source.id, query: question || rawQuestion, signal });
           if (Array.isArray(found)) citations.push(...found);
         }
-      } else {
+      } else if (!hasKnowledgeRecall) {
         if (isKnowledgeScopedSession(scope)) scopes.push({ scope: retrievalScopeKind(scope.kind), scopeId: scopeIdOf(scope) });
         for (const scopeId of extractKnowledgeBaseReferenceIds(rawQuestion)) {
           if (!scopes.some((item) => item.scope === "knowledgeBase" && item.scopeId === scopeId)) {
@@ -172,14 +199,26 @@ export function createWorkbenchRagPreStep({ retriever, scope, onQuestion, contex
       seen.add(key);
       return true;
     });
-    if (citations.length === 0) return decision;
-    const assembled = assembleKnowledgePrompt(citations, { question });
-    if (!assembled.text) return decision;
-    const recall = createUserMessage({
-      content: [{ type: "text", text: assembled.text }],
-      source: knowledgeRecallSource(),
-    });
-    return { kind: "enter", messages: [recall, ...decision.messages] };
+    const prefix = [];
+    if (resolvedFiles.text) {
+      prefix.push(createUserMessage({
+        content: [{ type: "text", text: resolvedFiles.text }],
+        source: fileContextSource(),
+      }));
+    }
+    if (!hasKnowledgeRecall && citations.length > 0) {
+      const assembled = assembleKnowledgePrompt(citations, {
+        question,
+        maxCodePoints: Math.max(0, MAX_CONTEXT_CODE_POINTS - resolvedFiles.codePoints),
+      });
+      if (assembled.text) {
+        prefix.push(createUserMessage({
+          content: [{ type: "text", text: assembled.text }],
+          source: knowledgeRecallSource(),
+        }));
+      }
+    }
+    return prefix.length > 0 ? { kind: "enter", messages: [...prefix, ...decision.messages] } : decision;
   };
 }
 
@@ -549,6 +588,7 @@ export function createSessionService({
   renameNativeSession,
   deleteNativeSession,
   sessionIndex,
+  fileContext,
 }) {
   if (!ctx || !repos || !retriever) {
     throw new Error("createSessionService requires ctx, repos, and retriever");
@@ -610,6 +650,7 @@ export function createSessionService({
       scope,
       contextResolver: useResolvedContext ? contextResolver : undefined,
       sessionId,
+      fileContext,
       onQuestion: (question) => recordTitle(sessionId, question),
     }), { prepend: true });
   }
@@ -1105,6 +1146,9 @@ export function createSessionService({
       if (deleted === false) throw new Error("native session was not deleted");
       if (sessionIndex && typeof sessionIndex.remove === "function") {
         await sessionIndex.remove(sessionId);
+      }
+      if (fileContext && typeof fileContext.removeBySession === "function") {
+        await fileContext.removeBySession(sessionId);
       }
     } catch (error) {
       throw new WorkbenchSessionError(SESSION_ERROR_CODES.SESSION_DELETE_FAILED, "failed to delete native session", error);

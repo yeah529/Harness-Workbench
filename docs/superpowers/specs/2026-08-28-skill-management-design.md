@@ -71,7 +71,7 @@ DSH 已经具备 Skill 的运行时发现、优先级合并和按会话工作目
 
 ## 4. Skill 身份与包格式
 
-一个导入来源只允许包含一个 Skill。
+单 Skill 导入来源只允许包含一个 Skill。2026-08-29 起另行支持固定 `skills/<skill-name>/` 结构的多 Skill 集合包；集合识别、预览、确认和批量事务以 `2026-08-29-skill-collection-import-design.md` 为准。
 
 目录导入要求所选目录根部存在 `SKILL.md`。浏览器目录选择器提供的相对文件集合会在客户端压成 ZIP，保留根内相对路径，不上传用户本机的绝对来源路径。
 
@@ -93,9 +93,9 @@ one-wrapper-directory/
 拒绝以下输入：
 
 - 找不到 `SKILL.md`。
-- 包内出现多个 `SKILL.md`。
+- 包内出现多个 `SKILL.md`，但不符合已定义的 Skill 集合结构。
 - 需要递归搜索才能猜测 Skill 根目录。
-- 一个 ZIP 中包含多个 Skill。
+- 多个 Skill 分散在任意目录、需要递归猜测根目录，或集合中含有 `skills/` 之外的文件。
 - ZIP 条目包含绝对路径、`..` 路径穿越、NUL 字符或符号链接。
 - 文件数量、压缩体积或解压体积超过限制。
 
@@ -131,7 +131,7 @@ Skill 的规范身份只来自 `SKILL.md` YAML frontmatter 中的 `name`。`name
 - 不提供 Workbench 内的 `SKILL.md` 或资源文件编辑器。
 - 不提供创建 Skill 向导。
 - 不提供 GitHub URL、市场、远程下载或自动更新。
-- 不提供批量导入、批量启停或批量删除。
+- 不提供批量启停或批量删除；集合包导入只用于一次安装多个独立 Skill。
 - 不提供版本历史、回滚版本或来源追踪数据库。
 
 ## 6. 管理服务边界
@@ -158,6 +158,8 @@ Skill 的规范身份只来自 `SKILL.md` YAML frontmatter 中的 `name`。`name
 依赖选择保持最小：客户端打包和 Host 解压共同使用仓库已经用于测试资产的 `fflate`，并把它声明为正式运行时依赖；frontmatter 使用成熟的 `js-yaml` 完整解析，并将目前仅由 DSH 包间接带入的版本声明为本包直接依赖。不得用只识别两行标量的自制解析器替代 YAML 解析，也不新增通用归档框架。
 
 ## 7. 导入与替换流程
+
+本节描述单 Skill 流程。多 Skill 集合先返回无副作用预览，再由用户确认一个原子批量事务，详见 `2026-08-29-skill-collection-import-design.md`。
 
 ### 7.1 普通导入
 

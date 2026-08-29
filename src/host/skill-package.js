@@ -19,6 +19,7 @@ export const SKILL_ERROR_CODES = Object.freeze({
   PACKAGE_INVALID: "SKILL_PACKAGE_INVALID",
   NAME_INVALID: "SKILL_NAME_INVALID",
   CONFLICT: "SKILL_CONFLICT",
+  COLLECTION_CONFIRMATION_REQUIRED: "SKILL_COLLECTION_CONFIRMATION_REQUIRED",
   STATE_CONFLICT: "SKILL_STATE_CONFLICT",
   NOT_FOUND: "SKILL_NOT_FOUND",
   PERMISSION_DENIED: "SKILL_PERMISSION_DENIED",
@@ -167,7 +168,16 @@ function inspectZipCentralDirectory(archiveBytes) {
       throw unsafeArchive("Special ZIP file types are not supported", { index });
     }
     const name = decodeUtf8(bytes.subarray(offset + 46, offset + 46 + nameLength));
-    entries.push({ name, flags, method, crc, compressedSize, originalSize, localOffset });
+    entries.push({
+      name,
+      flags,
+      method,
+      crc,
+      compressedSize,
+      originalSize,
+      localOffset,
+      directory: name.endsWith("/") || unixType === UNIX_DIRECTORY_MODE,
+    });
     offset += recordLength;
   }
   if (offset !== centralOffset + centralSize) throw unsafeArchive("ZIP central directory size is invalid");
@@ -268,8 +278,11 @@ function materializationError(error) {
   return new SkillManagerError(SKILL_ERROR_CODES.PERMISSION_DENIED, "Skill package could not be materialized", { cause: error.code ?? "UNKNOWN" });
 }
 
-function normalizeEntryName(name) {
-  const normalized = name.replaceAll("\\", "/");
+function normalizeEntryName(name, directory = false) {
+  const normalizedName = name.replaceAll("\\", "/");
+  const normalized = directory && normalizedName.endsWith("/")
+    ? normalizedName.slice(0, -1)
+    : normalizedName;
   if (normalized.includes("\0") || normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized)) {
     throw unsafeArchive("ZIP entry path is unsafe", { name });
   }
@@ -307,7 +320,59 @@ export function parseSkillMarkdown(markdown) {
   return { name: frontmatter.name, description: frontmatter.description };
 }
 
-export async function extractSkillArchive({ archiveBytes, destination, limits }) {
+function packageLayout(normalizedEntries, { allowCollection }) {
+  const skillEntries = normalizedEntries.filter((entry) => entry.path === "SKILL.md" || entry.path.endsWith("/SKILL.md"));
+  if (skillEntries.length === 0) throw packageError("ZIP archive must contain SKILL.md");
+
+  if (skillEntries.length === 1) {
+    const skillParts = skillEntries[0].path.split("/");
+    let wrapper = "";
+    if (skillParts.length === 2) wrapper = skillParts[0];
+    else if (skillParts.length !== 1) throw packageError("ZIP archive contains a nested wrapper");
+    const entries = normalizedEntries.map((entry) => {
+      if (wrapper && entry.directory && entry.path === wrapper) return { ...entry, path: "" };
+      if (wrapper && !entry.path.startsWith(`${wrapper}/`)) throw packageError("ZIP archive contains multiple wrappers");
+      return { ...entry, path: wrapper ? entry.path.slice(wrapper.length + 1) : entry.path };
+    });
+    if (!entries.some((entry) => entry.path === "SKILL.md")) throw packageError("ZIP archive wrapper is invalid");
+    return { kind: "skill", wrapper, entries, bundles: [{ folder: null, prefix: "", skillPath: "SKILL.md" }] };
+  }
+
+  if (!allowCollection) throw packageError("ZIP archive must contain exactly one SKILL.md");
+  const parts = skillEntries.map((entry) => entry.path.split("/"));
+  const direct = parts.every((value) => value.length === 3 && value[0] === "skills" && value[2] === "SKILL.md");
+  const wrapper = direct
+    ? ""
+    : parts.every((value) => value.length === 4 && value[1] === "skills" && value[3] === "SKILL.md" && value[0] === parts[0][0])
+      ? parts[0][0]
+      : null;
+  if (wrapper === null) throw packageError("ZIP Skill collection must use skills/<skill-name>/SKILL.md");
+
+  const entries = normalizedEntries.map((entry) => {
+    if (wrapper && entry.directory && entry.path === wrapper) return { ...entry, path: "" };
+    if (wrapper && !entry.path.startsWith(`${wrapper}/`)) throw packageError("ZIP archive contains files outside the Skill collection");
+    return { ...entry, path: wrapper ? entry.path.slice(wrapper.length + 1) : entry.path };
+  });
+  const folders = new Set(parts.map((value) => value[direct ? 1 : 2]));
+  if (folders.size !== skillEntries.length || folders.size < 2) {
+    throw packageError("ZIP Skill collection contains duplicate or missing Skill roots");
+  }
+  for (const entry of entries) {
+    if (entry.path === "") continue;
+    const value = entry.path.split("/");
+    if (entry.directory && (entry.path === "skills" || (value[0] === "skills" && value.length >= 2 && folders.has(value[1])))) continue;
+    if (!entry.directory && value[0] === "skills" && value.length >= 3 && folders.has(value[1])) continue;
+    throw packageError("ZIP archive contains files outside the Skill collection");
+  }
+  const bundles = [...folders].sort().map((folder) => ({
+    folder,
+    prefix: `skills/${folder}/`,
+    skillPath: `skills/${folder}/SKILL.md`,
+  }));
+  return { kind: "collection", wrapper, entries, bundles };
+}
+
+async function extractSkillPackageInternal({ archiveBytes, destination, limits, allowCollection }) {
   const effectiveLimits = readLimits(limits);
   const bytes = archiveBytes instanceof Uint8Array ? archiveBytes : new Uint8Array(archiveBytes);
   if (bytes.byteLength > effectiveLimits.archiveBytes) {
@@ -318,27 +383,17 @@ export async function extractSkillArchive({ archiveBytes, destination, limits })
     throw tooLarge("ZIP archive contains too many entries", { entries: inspected.entries.length, limit: effectiveLimits.entries });
   }
 
-  const normalizedEntries = inspected.entries.map((entry) => ({ ...entry, path: normalizeEntryName(entry.name) }));
+  const normalizedEntries = inspected.entries.map((entry) => ({
+    ...entry,
+    path: normalizeEntryName(entry.name, entry.directory),
+  }));
   const uniquePaths = new Set(normalizedEntries.map((entry) => entry.path));
   if (uniquePaths.size !== normalizedEntries.length) throw packageError("ZIP archive contains duplicate paths");
-  const skillEntries = normalizedEntries.filter((entry) => entry.path === "SKILL.md" || entry.path.endsWith("/SKILL.md"));
-  if (skillEntries.length !== 1) throw packageError("ZIP archive must contain exactly one SKILL.md");
-
-  const skillParts = skillEntries[0].path.split("/");
-  let wrapper = "";
-  if (skillParts.length === 2) wrapper = skillParts[0];
-  else if (skillParts.length !== 1) throw packageError("ZIP archive contains a nested wrapper");
-  const relativeEntries = normalizedEntries.map((entry) => {
-    if (wrapper && !entry.path.startsWith(`${wrapper}/`)) throw packageError("ZIP archive contains multiple wrappers");
-    const path = wrapper ? entry.path.slice(wrapper.length + 1) : entry.path;
-    return { ...entry, path };
-  });
-  const relativeSkill = relativeEntries.find((entry) => entry.path === "SKILL.md");
-  if (!relativeSkill) throw packageError("ZIP archive wrapper is invalid");
+  const layout = packageLayout(normalizedEntries, { allowCollection });
 
   if (inspected.entries.length > effectiveLimits.entries) throw tooLarge("ZIP archive contains too many entries", { limit: effectiveLimits.entries });
   let declaredBytes = 0;
-  const actualEntries = inspected.entries.map((entry) => {
+  const actualEntries = normalizedEntries.map((entry) => {
     if (entry.originalSize > effectiveLimits.singleFileBytes) {
       throw tooLarge("ZIP entry exceeds the single-file byte limit", { name: entry.name, bytes: entry.originalSize, limit: effectiveLimits.singleFileBytes });
     }
@@ -346,10 +401,11 @@ export async function extractSkillArchive({ archiveBytes, destination, limits })
     if (declaredBytes > effectiveLimits.expandedBytes) {
       throw tooLarge("ZIP archive exceeds the expanded byte limit", { bytes: declaredBytes, limit: effectiveLimits.expandedBytes });
     }
-    return [entry.name, extractZipEntry(bytes, entry, Math.min(entry.originalSize, effectiveLimits.singleFileBytes, effectiveLimits.expandedBytes - (declaredBytes - entry.originalSize)), inspected.centralOffset)];
+    return [entry, extractZipEntry(bytes, entry, Math.min(entry.originalSize, effectiveLimits.singleFileBytes, effectiveLimits.expandedBytes - (declaredBytes - entry.originalSize)), inspected.centralOffset)];
   });
   let totalBytes = 0;
-  for (const [, data] of actualEntries) {
+  for (const [entry, data] of actualEntries) {
+    if (entry.directory && data.byteLength !== 0) throw unsafeArchive("ZIP directory entry contains data", { name: entry.name });
     if (data.byteLength > effectiveLimits.singleFileBytes) {
       throw tooLarge("ZIP entry exceeds the single-file byte limit", { bytes: data.byteLength, limit: effectiveLimits.singleFileBytes });
     }
@@ -361,26 +417,40 @@ export async function extractSkillArchive({ archiveBytes, destination, limits })
   if (totalBytes !== declaredBytes) throw unsafeArchive("ZIP expanded size does not match its metadata");
 
   const dataByPath = new Map();
-  const declaredSizeByPath = new Map();
-  for (const entry of relativeEntries) declaredSizeByPath.set(entry.path, entry.originalSize);
-  for (const [name, data] of actualEntries) {
-    const normalized = normalizeEntryName(name);
-    const relative = wrapper ? (normalized.startsWith(`${wrapper}/`) ? normalized.slice(wrapper.length + 1) : null) : normalized;
-    if (!relative) throw packageError("ZIP archive contains multiple wrappers");
-    if (data.byteLength !== declaredSizeByPath.get(relative)) {
-      throw unsafeArchive("ZIP expanded size does not match its metadata", { name });
+  for (let index = 0; index < actualEntries.length; index += 1) {
+    const [entry, data] = actualEntries[index];
+    if (entry.directory) continue;
+    const relativeEntry = layout.entries[index];
+    if (data.byteLength !== relativeEntry.originalSize) {
+      throw unsafeArchive("ZIP expanded size does not match its metadata", { name: entry.name });
     }
-    dataByPath.set(relative, data);
+    dataByPath.set(relativeEntry.path, data);
   }
-  if (!dataByPath.has("SKILL.md")) throw packageError("ZIP archive must contain SKILL.md");
-  let markdown;
-  try {
-    markdown = new TextDecoder("utf-8", { fatal: true }).decode(dataByPath.get("SKILL.md"));
-  } catch (error) {
-    throw packageError("SKILL.md must be valid UTF-8", { cause: String(error.message) });
-  }
-  const identity = parseSkillMarkdown(markdown);
-  const files = [...dataByPath.keys()].sort();
+
+  const skills = layout.bundles.map((bundle) => {
+    const markdownBytes = dataByPath.get(bundle.skillPath);
+    if (!markdownBytes) throw packageError("ZIP archive must contain SKILL.md");
+    let markdown;
+    try {
+      markdown = new TextDecoder("utf-8", { fatal: true }).decode(markdownBytes);
+    } catch (error) {
+      throw packageError("SKILL.md must be valid UTF-8", { cause: String(error.message) });
+    }
+    const identity = parseSkillMarkdown(markdown);
+    if (bundle.folder && identity.name !== bundle.folder) {
+      throw packageError("Skill folder name does not match frontmatter name", { name: bundle.folder });
+    }
+    const files = [...dataByPath.keys()]
+      .filter((path) => path.startsWith(bundle.prefix))
+      .map((path) => path.slice(bundle.prefix.length))
+      .sort();
+    return {
+      ...identity,
+      files,
+      fileCount: files.length,
+      totalBytes: files.reduce((sum, file) => sum + dataByPath.get(`${bundle.prefix}${file}`).byteLength, 0),
+    };
+  });
 
   const absoluteDestination = await assertDestinationPathSafe(destination);
   const parent = dirname(absoluteDestination);
@@ -389,10 +459,14 @@ export async function extractSkillArchive({ archiveBytes, destination, limits })
     await mkdir(parent, { recursive: true });
     await assertDestinationPathSafe(absoluteDestination);
     staging = await mkdtemp(join(parent, ".cpwb-skill-package-"));
-    for (const file of files) {
-      const target = join(staging, ...file.split("/"));
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, dataByPath.get(file), { flag: "wx" });
+    for (const [index, bundle] of layout.bundles.entries()) {
+      for (const file of skills[index].files) {
+        const target = layout.kind === "collection"
+          ? join(staging, skills[index].name, ...file.split("/"))
+          : join(staging, ...file.split("/"));
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, dataByPath.get(`${bundle.prefix}${file}`), { flag: "wx" });
+      }
     }
     await assertDestinationPathSafe(absoluteDestination);
     await rename(staging, absoluteDestination);
@@ -402,5 +476,14 @@ export async function extractSkillArchive({ archiveBytes, destination, limits })
     if (error instanceof SkillManagerError) throw error;
     throw materializationError(error);
   }
-  return { ...identity, files, fileCount: files.length, totalBytes };
+  return { kind: layout.kind, skills, count: skills.length, totalBytes };
+}
+
+export async function extractSkillPackage(options) {
+  return extractSkillPackageInternal({ ...options, allowCollection: true });
+}
+
+export async function extractSkillArchive(options) {
+  const result = await extractSkillPackageInternal({ ...options, allowCollection: false });
+  return result.skills[0];
 }

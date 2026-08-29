@@ -9,8 +9,10 @@ import { createNavigationStore } from "./navigation.js";
 import { WorkbenchShell } from "./WorkbenchShell.js";
 import { registerWorkbenchSettingsSection as registerSettingsSection } from "./settingsSlot.js";
 import { registerKnowledgeBaseReferenceSource } from "./knowledgeReferences.js";
+import { registerSessionFileReferenceSource } from "./sessionFileReferences.js";
 import { registerModelIndicator } from "./ModelIndicator.js";
 import { registerImageAttachmentButton } from "./ImageAttachmentButton.js";
+import { registerFileAttachmentButton } from "./FileAttachmentButton.js";
 import { registerKnowledgeSources } from "./sessionAdapter.js";
 import { KnowledgeSourcesTail } from "./KnowledgeSourcesTail.js";
 export { packSkillDirectory, SkillImportError, SKILL_IMPORT_ERROR_CODES, SKILL_IMPORT_LIMITS } from "./skill-import.js";
@@ -55,7 +57,9 @@ function apply(ctx) {
 
   registerWorkbenchSettingsSection(ctx, store, { onOpenSession: openKnownSession });
   registerKnowledgeBaseReferenceSource(ctx, store);
+  registerSessionFileReferenceSource(ctx, store);
   registerImageAttachmentButton(ctx);
+  registerFileAttachmentButton(ctx, store);
   registerModelIndicator(ctx);
   registerKnowledgeSources(ctx, KnowledgeSourcesTail);
 

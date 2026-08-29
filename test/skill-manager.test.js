@@ -14,6 +14,10 @@ const archive = (name, description = name) => zipSync({
   "SKILL.md": strToU8(markdown(name, description)),
   "references/value.md": strToU8(description),
 });
+const collectionArchive = (skills) => zipSync(Object.fromEntries(skills.flatMap(({ name, description = name }) => [
+  [`skills/${name}/SKILL.md`, strToU8(markdown(name, description))],
+  [`skills/${name}/references/value.md`, strToU8(description)],
+])));
 
 async function makeBundle(root, relative, name, description = name, files = {}) {
   const directory = join(root, relative);
@@ -287,6 +291,135 @@ test("same-scope import conflicts, confirmed replacement preserves disabled stat
   assert.equal(await readFile(join(dshHome, "skills", ".disabled", "replace-me", "references", "value.md"), "utf8"), "new");
 });
 
+test("collection import returns a no-write preview before one confirmed batch install", async (t) => {
+  const root = await createTempDir("cpwb-skill-collection-preview-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  const archiveBytes = collectionArchive([
+    { name: "brainstorming", description: "Explore intent first." },
+    { name: "systematic-debugging", description: "Debug from evidence." },
+  ]);
+
+  await assert.rejects(
+    () => manager.importArchive({ scope: "global", archiveBytes, sourceName: "superpowers.zip" }),
+    (error) => error.code === SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED
+      && error.details.kind === "collection"
+      && error.details.count === 2
+      && error.details.conflictCount === 0
+      && error.details.skills.every((skill) => skill.conflict === false),
+  );
+  await assert.rejects(() => lstat(join(dshHome, "skills")), { code: "ENOENT" });
+
+  const result = await manager.importArchive({
+    scope: "global",
+    archiveBytes,
+    sourceName: "superpowers.zip",
+    confirmCollection: true,
+  });
+  assert.deepEqual({ kind: result.kind, count: result.count, replacedCount: result.replacedCount }, {
+    kind: "collection",
+    count: 2,
+    replacedCount: 0,
+  });
+  assert.deepEqual(result.items.map(({ name }) => name), ["brainstorming", "systematic-debugging"]);
+  assert.deepEqual((await manager.list({ scope: "global" })).items.map(({ name }) => name), ["brainstorming", "systematic-debugging"]);
+});
+
+test("collection preview marks same-scope conflicts and confirmed replacement preserves disabled state", async (t) => {
+  const root = await createTempDir("cpwb-skill-collection-conflict-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root) });
+  await manager.importArchive({ scope: "global", archiveBytes: archive("brainstorming", "old"), sourceName: "old.zip" });
+  await manager.setEnabled({ scope: "global", name: "brainstorming", enabled: false });
+  const archiveBytes = collectionArchive([
+    { name: "brainstorming", description: "new" },
+    { name: "systematic-debugging", description: "fresh" },
+  ]);
+
+  await assert.rejects(
+    () => manager.importArchive({ scope: "global", archiveBytes, sourceName: "superpowers.zip" }),
+    (error) => error.code === SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED
+      && error.details.conflictCount === 1
+      && error.details.skills.find((skill) => skill.name === "brainstorming")?.existing?.state === "disabled",
+  );
+  await assert.rejects(
+    () => manager.importArchive({ scope: "global", archiveBytes, sourceName: "superpowers.zip", confirmCollection: true }),
+    (error) => error.code === SKILL_ERROR_CODES.COLLECTION_CONFIRMATION_REQUIRED,
+  );
+
+  const result = await manager.importArchive({
+    scope: "global",
+    archiveBytes,
+    sourceName: "superpowers.zip",
+    confirmCollection: true,
+    replace: true,
+  });
+  assert.equal(result.replacedCount, 1);
+  assert.equal(result.items.find((item) => item.name === "brainstorming").state, "disabled");
+  assert.equal(await readFile(join(dshHome, "skills", ".disabled", "brainstorming", "references", "value.md"), "utf8"), "new");
+});
+
+test("collection import rolls every Skill back when a later install rename fails", async (t) => {
+  const root = await createTempDir("cpwb-skill-collection-rollback-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  const fileOps = {
+    rename: async (source, destination) => {
+      if (destination === join(skillsRoot, "systematic-debugging") && basename(source) === "systematic-debugging") {
+        const error = new Error("injected collection rename failure");
+        error.code = "EIO";
+        throw error;
+      }
+      return fsRename(source, destination);
+    },
+  };
+  const manager = createSkillManager({ dshHome, repos: projectRepos(root), fileOps });
+  const archiveBytes = collectionArchive([
+    { name: "brainstorming" },
+    { name: "systematic-debugging" },
+  ]);
+
+  await assert.rejects(
+    () => manager.importArchive({ scope: "global", archiveBytes, sourceName: "superpowers.zip", confirmCollection: true }),
+    { code: "EIO" },
+  );
+  await assert.rejects(() => lstat(join(skillsRoot, "brainstorming")), { code: "ENOENT" });
+  await assert.rejects(() => lstat(join(skillsRoot, "systematic-debugging")), { code: "ENOENT" });
+  assert.deepEqual(await readdir(join(skillsRoot, ".transactions")), []);
+});
+
+test("collection import removes target staging when batch preparation fails", async (t) => {
+  const root = await createTempDir("cpwb-skill-collection-prepare-failure-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  const manager = createSkillManager({
+    dshHome,
+    repos: projectRepos(root),
+    fileOps: {
+      writeFile: async (path, ...args) => {
+        if (path.includes(".staging") && path.endsWith(join("systematic-debugging", "SKILL.md"))) {
+          const error = new Error("injected staging write failure");
+          error.code = "EIO";
+          throw error;
+        }
+        return writeFile(path, ...args);
+      },
+    },
+  });
+  const archiveBytes = collectionArchive([{ name: "brainstorming" }, { name: "systematic-debugging" }]);
+
+  await assert.rejects(
+    () => manager.importArchive({ scope: "global", archiveBytes, sourceName: "superpowers.zip", confirmCollection: true }),
+    { code: "EIO" },
+  );
+  assert.deepEqual(await readdir(join(skillsRoot, ".staging")), []);
+  await assert.rejects(() => lstat(join(skillsRoot, "brainstorming")), { code: "ENOENT" });
+});
+
 test("enable, disable, and delete affect only the exact canonical target", async (t) => {
   const root = await createTempDir("cpwb-skill-lifecycle-");
   t.after(() => removeTempDir(root));
@@ -375,6 +508,62 @@ test("list recovers a committed previous directory and removes transaction resid
   assert.equal(await readFile(join(skillsRoot, "recover-me", "SKILL.md"), "utf8"), markdown("recover-me", "old"));
   assert.deepEqual(await readdir(join(skillsRoot, ".transactions")), []);
   await assert.rejects(() => lstat(join(skillsRoot, ".staging", transactionId)), { code: "ENOENT" });
+});
+
+test("list rolls a prepared collection transaction back as one unit", async (t) => {
+  const root = await createTempDir("cpwb-skill-collection-recovery-prepared-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  const id = "collection-prepared";
+  await makeBundle(join(skillsRoot, ".staging", id, "previous"), "brainstorming", "brainstorming", "old");
+  await makeBundle(skillsRoot, "brainstorming", "brainstorming", "new");
+  await makeBundle(join(skillsRoot, ".staging", id, "incoming"), "systematic-debugging", "systematic-debugging", "fresh");
+  await mkdir(join(skillsRoot, ".transactions"), { recursive: true });
+  await writeFile(join(skillsRoot, ".transactions", `${id}.json`), JSON.stringify({
+    version: 2,
+    kind: "collection",
+    phase: "prepared",
+    id,
+    items: [
+      { name: "brainstorming", state: "enabled", existed: true, finalRelative: "brainstorming", incomingRelative: `.staging/${id}/incoming/brainstorming`, previousRelative: `.staging/${id}/previous/brainstorming` },
+      { name: "systematic-debugging", state: "enabled", existed: false, finalRelative: "systematic-debugging", incomingRelative: `.staging/${id}/incoming/systematic-debugging`, previousRelative: `.staging/${id}/previous/systematic-debugging` },
+    ],
+  }));
+
+  const catalog = await createSkillManager({ dshHome, repos: projectRepos(root) }).list({ scope: "global" });
+  assert.deepEqual(catalog.items.map(({ name }) => name), ["brainstorming"]);
+  assert.equal(await readFile(join(skillsRoot, "brainstorming", "SKILL.md"), "utf8"), markdown("brainstorming", "old"));
+  await assert.rejects(() => lstat(join(skillsRoot, "systematic-debugging")), { code: "ENOENT" });
+  assert.deepEqual(await readdir(join(skillsRoot, ".transactions")), []);
+});
+
+test("list keeps every final Skill and cleans a committed collection transaction", async (t) => {
+  const root = await createTempDir("cpwb-skill-collection-recovery-committed-");
+  t.after(() => removeTempDir(root));
+  const dshHome = join(root, "dsh");
+  const skillsRoot = join(dshHome, "skills");
+  const id = "collection-committed";
+  await makeBundle(join(skillsRoot, ".staging", id, "previous"), "brainstorming", "brainstorming", "old");
+  await makeBundle(skillsRoot, "brainstorming", "brainstorming", "new");
+  await makeBundle(skillsRoot, "systematic-debugging", "systematic-debugging", "fresh");
+  await mkdir(join(skillsRoot, ".transactions"), { recursive: true });
+  await writeFile(join(skillsRoot, ".transactions", `${id}.json`), JSON.stringify({
+    version: 2,
+    kind: "collection",
+    phase: "committed",
+    id,
+    items: [
+      { name: "brainstorming", state: "enabled", existed: true, finalRelative: "brainstorming", incomingRelative: `.staging/${id}/incoming/brainstorming`, previousRelative: `.staging/${id}/previous/brainstorming` },
+      { name: "systematic-debugging", state: "enabled", existed: false, finalRelative: "systematic-debugging", incomingRelative: `.staging/${id}/incoming/systematic-debugging`, previousRelative: `.staging/${id}/previous/systematic-debugging` },
+    ],
+  }));
+
+  const catalog = await createSkillManager({ dshHome, repos: projectRepos(root) }).list({ scope: "global" });
+  assert.deepEqual(catalog.items.map(({ name }) => name), ["brainstorming", "systematic-debugging"]);
+  assert.equal(await readFile(join(skillsRoot, "brainstorming", "SKILL.md"), "utf8"), markdown("brainstorming", "new"));
+  assert.deepEqual(await readdir(join(skillsRoot, ".transactions")), []);
+  await assert.rejects(() => lstat(join(skillsRoot, ".staging", id)), { code: "ENOENT" });
 });
 
 test("recovery rejects a non-directory incoming entry without changing transaction evidence", async (t) => {

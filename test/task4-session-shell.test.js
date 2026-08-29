@@ -150,7 +150,8 @@ test("project rail contains only the approved project-owned tools", () => {
   assert.deepEqual(PROJECT_TOOL_TABS.map(([id, label]) => [id, label]), [
     ["todos", "待办"],
     ["schedule", "定时任务"],
-    ["knowledge", "关联知识库"],
+    ["files", "会话文件"],
+    ["knowledge", "关联知识芯片"],
     ["summary", "每日总结"],
     ["skills", "Skills"],
   ]);
@@ -337,6 +338,20 @@ test("knowledge-base and independent conversations render scoped tools without p
       assert.match(html, /未启用知识库/);
     }
   }
+});
+
+test("tablet session shell renders the context-tools drawer trigger without crashing", () => {
+  const sessionId = "session-cpwb-tablet";
+  const store = shellStore({
+    workbenchSessions: { [sessionId]: { scope: { kind: "independent", id: null }, title: "Tablet" } },
+  });
+  const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, {
+    sessionId,
+    open: true,
+    layoutMode: "tablet",
+    store,
+  }));
+  assert.match(html, /aria-label="打开上下文工具"/);
 });
 
 test("session shell unmounts while the Workbench home state is open", () => {

@@ -274,6 +274,7 @@ test("api: skills expose all scoped methods with encoded names and preserved det
       assert.equal(init.headers["x-cpwb-project-id"], "7");
       assert.equal(init.headers["x-cpwb-filename"], encodeURIComponent("x 名.zip"));
       assert.equal(init.headers["x-cpwb-replace"], "false");
+      assert.equal(init.headers["x-cpwb-confirm-collection"], "false");
       return jsonResponse(409, { error: { code: "SKILL_CONFLICT", message: "同名 Skill 已存在", details: { existing: { name: "x" }, incoming: { name: "x" } } } });
     }
     if (index === 2) {
@@ -478,6 +479,65 @@ test("api: documents list encodes scope/scopeId query", async () => {
   });
   const api = createCpwbApi({ fetchImpl });
   await api.documents.list({ scope: "knowledgeBase", scopeId: 2 });
+});
+
+test("store keeps non-vector session files scoped to their owning session", async () => {
+  const sessionId = "session-cpwb-files";
+  const file = { name: "固定资料.md", size: 8 };
+  const calls = [];
+  const api = {
+    health: async () => ({ ok: true }),
+    sessionFiles: {
+      async list(inputSessionId) {
+        calls.push(["list", inputSessionId]);
+        return [{ id: 31, sessionId, originalName: "固定资料.md", parseStatus: "ready" }];
+      },
+      async upload(input) {
+        calls.push(["upload", input.sessionId, input.file]);
+        return { id: 31, sessionId, originalName: "固定资料.md", parseStatus: "ready" };
+      },
+      async remove(id) {
+        calls.push(["remove", id]);
+        return { removed: true };
+      },
+    },
+  };
+  const store = createWorkbenchStore(api);
+
+  await store.actions.loadSessionFiles(sessionId);
+  await store.actions.uploadSessionFiles({ files: [file], sessionId });
+  await store.actions.deleteSessionFile({ sessionId, id: 31 });
+
+  assert.deepEqual(calls, [
+    ["list", sessionId],
+    ["upload", sessionId, file],
+    ["list", sessionId],
+    ["remove", 31],
+    ["list", sessionId],
+  ]);
+  assert.equal(store.getSnapshot().sessionFilesBySession[sessionId][0].originalName, "固定资料.md");
+});
+
+test("api: session file upload uses the File Vault route and never document scope", async () => {
+  const file = { name: "中文 资料.md", size: 8 };
+  const fetchImpl = makeFetch(({ url, init }, index) => {
+    const parsed = parse(url);
+    if (index === 0) {
+      assert.equal(parsed.pathname, "/api/cpwb/session-files");
+      assert.equal(parsed.searchParams.get("sessionId"), "session-cpwb-1");
+      return jsonResponse(200, []);
+    }
+    assert.equal(parsed.pathname, "/api/cpwb/session-files");
+    assert.equal(init.method, "POST");
+    assert.equal(init.headers["x-cpwb-session-id"], "session-cpwb-1");
+    assert.equal(init.headers["x-cpwb-filename"], encodeURIComponent(file.name));
+    assert.equal(init.body, file);
+    return jsonResponse(201, { id: 1, sessionId: "session-cpwb-1", originalName: file.name, parseStatus: "ready" });
+  });
+  const api = createCpwbApi({ fetchImpl });
+  await api.sessionFiles.list("session-cpwb-1");
+  await api.sessionFiles.upload({ sessionId: "session-cpwb-1", file });
+  assert.equal(api.sessionFiles.contentUrl(1, { download: true }), "/api/cpwb/session-files/1/content?download=1");
 });
 
 test("api: document contentUrl builds safe inline and download URLs", () => {
@@ -898,6 +958,17 @@ test("store skill mutations reload exactly the affected key and preserve conflic
   assert.equal(store.getSnapshot().skillAction.status, "error");
   assert.deepEqual(store.getSnapshot().skillAction.error.details, conflict.details);
   assert.notEqual(store.getSnapshot().action?.type, "importSkill");
+
+  calls.length = 0;
+  await assert.rejects(() => store.actions.importSkill({
+    scope: "global",
+    archive: new Blob(),
+    sourceName: "collection.zip",
+    replace: true,
+    confirmCollection: true,
+  }), /同名/);
+  assert.equal(calls[0][1].replace, true);
+  assert.equal(calls[0][1].confirmCollection, true);
 
   calls.length = 0;
   await store.actions.setSkillEnabled({ scope: "project", projectId: 7, name: "x", enabled: false });

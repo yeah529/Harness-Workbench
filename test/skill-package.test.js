@@ -7,6 +7,7 @@ import { createTempDir, removeTempDir } from "./helpers.js";
 import {
   SKILL_ERROR_CODES,
   extractSkillArchive,
+  extractSkillPackage,
   parseSkillMarkdown,
 } from "../src/host/skill-package.js";
 
@@ -116,6 +117,59 @@ test("extractSkillArchive accepts one wrapper and returns the frontmatter identi
     totalBytes: skillMd().length + 9,
   });
   assert.equal(await readFile(join(root, "out", "references", "example.md"), "utf8"), "reference");
+});
+
+test("extractSkillArchive accepts explicit ZIP directory entries", async (t) => {
+  const root = await realpath(await createTempDir("cpwb-skill-directory-entry-"));
+  t.after(() => removeTempDir(root));
+  const bytes = zipSync({
+    "wrapper/": new Uint8Array(),
+    "wrapper/SKILL.md": skillMd(),
+  });
+
+  const result = await extractSkillArchive({ archiveBytes: bytes, destination: join(root, "out") });
+
+  assert.deepEqual(result.files, ["SKILL.md"]);
+  assert.equal(await readFile(join(root, "out", "SKILL.md"), "utf8"), new TextDecoder().decode(skillMd()));
+});
+
+test("extractSkillPackage accepts a wrapped skills collection and materializes each child independently", async (t) => {
+  const root = await realpath(await createTempDir("cpwb-skill-collection-"));
+  t.after(() => removeTempDir(root));
+  const bytes = zipSync({
+    "superpowers/skills/brainstorming/SKILL.md": skillMd("brainstorming"),
+    "superpowers/skills/brainstorming/references/notes.md": strToU8("notes"),
+    "superpowers/skills/systematic-debugging/SKILL.md": skillMd("systematic-debugging"),
+  });
+
+  const result = await extractSkillPackage({ archiveBytes: bytes, destination: join(root, "out") });
+
+  assert.equal(result.kind, "collection");
+  assert.equal(result.count, 2);
+  assert.deepEqual(result.skills.map(({ name, files, fileCount }) => ({ name, files, fileCount })), [
+    { name: "brainstorming", files: ["SKILL.md", "references/notes.md"], fileCount: 2 },
+    { name: "systematic-debugging", files: ["SKILL.md"], fileCount: 1 },
+  ]);
+  assert.equal(await readFile(join(root, "out", "brainstorming", "references", "notes.md"), "utf8"), "notes");
+  assert.match(await readFile(join(root, "out", "systematic-debugging", "SKILL.md"), "utf8"), /name: systematic-debugging/);
+});
+
+test("extractSkillPackage rejects ambiguous collections and folder-name mismatches before writing", async (t) => {
+  const root = await realpath(await createTempDir("cpwb-skill-collection-invalid-"));
+  t.after(() => removeTempDir(root));
+  for (const [label, entries] of [
+    ["arbitrary multiple roots", { "a/SKILL.md": skillMd("a"), "b/SKILL.md": skillMd("b") }],
+    ["outside collection file", { "README.md": strToU8("outside"), "skills/a/SKILL.md": skillMd("a"), "skills/b/SKILL.md": skillMd("b") }],
+    ["folder mismatch", { "skills/a/SKILL.md": skillMd("other-a"), "skills/b/SKILL.md": skillMd("b") }],
+  ]) {
+    const destination = join(root, label.replaceAll(" ", "-"));
+    await assert.rejects(
+      () => extractSkillPackage({ archiveBytes: zipSync(entries), destination }),
+      (error) => error.code === SKILL_ERROR_CODES.PACKAGE_INVALID,
+      label,
+    );
+    await assert.rejects(() => lstat(destination), { code: "ENOENT" }, `${label} destination`);
+  }
 });
 
 test("parseSkillMarkdown requires canonical name and description", () => {
