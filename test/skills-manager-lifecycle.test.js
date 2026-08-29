@@ -447,8 +447,9 @@ test("project rail keeps one current tab and body during an immediate scope tran
   const root = createRoot(container);
   await act(async () => { root.render(React.createElement(WorkbenchSessionShell, props)); });
   const tabs = () => findNodes(container, (node) => node.tagName === "BUTTON" && node.getAttribute?.("role") === "tab" && node.getAttribute?.("id")?.startsWith("cpwb-tool-tab-"));
-  await act(async () => { invokeProp(tabs()[4], "onClick", {}); });
-  assert.equal(tabs()[4].getAttribute("aria-selected"), "true");
+  const summaryTab = tabs().find((tab) => tab.getAttribute("aria-label") === "每日总结");
+  await act(async () => { invokeProp(summaryTab, "onClick", {}); });
+  assert.equal(summaryTab.getAttribute("aria-selected"), "true");
 
   state.workbenchSessions["session-cpwb-transition"] = { ...state.workbenchSessions["session-cpwb-transition"], scope: { kind: "independent", id: null } };
   flushSync(() => { root.render(React.createElement(WorkbenchSessionShell, props)); });

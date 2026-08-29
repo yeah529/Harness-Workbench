@@ -440,7 +440,7 @@ export function SkillScopeManager({ store, scope = "global", projectId = null, c
   };
   return h("section", { className: "cpwb-skills-scope-manager" + (compact ? " cpwb-skills-compact" : ""), "aria-label": scopeLabel(scope) },
     compact ? h("header", { className: "cpwb-skills-compact-head" },
-      h("div", { className: "cpwb-skills-compact-title" }, h(Sparkle, { size: 16, "aria-hidden": true }), h("div", null, h("span", null, "PROJECT TOOL"), h("h3", null, "项目 Skills"))),
+      h("div", { className: "cpwb-skills-compact-title" }, h(Sparkle, { size: 16, "aria-hidden": true }), h("div", null, h("span", null, "项目能力"), h("h3", null, "项目 Skills"))),
       h("span", { className: "cpwb-skills-compact-count" }, String(items.length).padStart(2, "0"))) : null,
     h("div", { className: "cpwb-skills-path", "aria-label": rootPath ? `${scope === "project" ? "项目" : "全局"} Skill 安装根路径：${rootPath}` : "正在读取 Skill 安装根路径" }, h(FolderOpen, { size: 16, "aria-hidden": true }), h("code", { title: rootPath }, compact ? ".dsh/skills/" : rootPath || "正在读取安装根路径"), rootPath ? h(CopyPath, { path: rootPath, targetKey: key, onError: (message) => { if (activeKeyRef.current === key) setLocalError(message); } }) : null),
     h("div", { className: "cpwb-skills-toolbar" },

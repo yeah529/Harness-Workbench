@@ -22,6 +22,7 @@ import {
   KNOWLEDGE_TOOL_TABS,
   INDEPENDENT_TOOL_TABS,
   GlobalSchedulesPanel,
+  SessionFilesPanel,
 } from "../src/client/WorkbenchSessionShell.js";
 
 const { DraftConversation, NewSessionDialog } = newSessionDialogModule;
@@ -521,10 +522,10 @@ test("project session list keeps a visible locked project scope", () => {
 test("right rail follows the project, knowledge-base, and independent tool matrix", () => {
   assert.deepEqual(PROJECT_TOOL_TABS.map(([id, label]) => [id, label]), [
     ["todos", "待办"],
-    ["schedule", "定时任务"],
     ["files", "会话文件"],
-    ["knowledge", "关联知识芯片"],
     ["summary", "每日总结"],
+    ["schedule", "定时任务"],
+    ["knowledge", "知识芯片"],
     ["skills", "Skills"],
   ]);
   assert.deepEqual(KNOWLEDGE_TOOL_TABS.map((item) => item[1]), ["会话文件", "芯片文档", "索引", "关联项目", "全局定时"]);
@@ -547,15 +548,54 @@ test("right rail follows the project, knowledge-base, and independent tool matri
     const store = { getSnapshot: () => state, subscribe: () => () => {}, actions: {} };
     const html = renderToStaticMarkup(React.createElement(WorkbenchSessionShell, { sessionId, open: true, store, layoutMode: "desktop" }));
     for (const [, label] of labels) assert.match(html, new RegExp(label));
+    const toolLabels = [...html.matchAll(/data-tooltip="([^"]+)"/g)].map((match) => match[1]);
+    assert.deepEqual(toolLabels, labels.map(([, label]) => label));
+    for (const [, label] of labels) assert.match(html, new RegExp(`aria-label="${label}"`));
+    assert.doesNotMatch(html, /title="(?:待办|会话文件|每日总结|定时任务|知识芯片|Skills)"/);
+    if (kind === "project") assert.match(html, /项目工具舱 · 07/);
     if (kind === "independent") {
-      assert.match(html, /直接注入当前轮上下文/);
-      assert.match(html, /不会向量化/);
       assert.match(html, /type="file"/);
       assert.match(html, /multiple=""/);
       assert.doesNotMatch(html, />上下文</);
       assert.doesNotMatch(html, /无默认继承来源/);
     }
   }
+});
+
+test("session file panel keeps scope guidance compact and removes the redundant empty card", () => {
+  const sessionId = "session-cpwb-file-guidance";
+  const state = { sessionFilesBySession: { [sessionId]: [] } };
+  const store = { actions: { loadSessionFiles: async () => {} } };
+  const render = (scopeKind) => renderToStaticMarkup(React.createElement(SessionFilesPanel, {
+    sessionId,
+    state,
+    store,
+    scopeKind,
+  }));
+
+  const project = render("project");
+  assert.match(project, /私有存储/);
+  assert.match(project, /会话文件/);
+  assert.match(project, /仅当前会话/);
+  assert.match(project, /上传后用 @文件 引用/);
+  assert.match(project, /项目文件直接用 @路径/);
+  assert.match(project, /上传会话文件/);
+  assert.match(project, /点击或拖拽/);
+  assert.match(project, /单文件最大 50 MB/);
+  assert.doesNotMatch(project, /直接注入当前轮上下文/);
+  assert.doesNotMatch(project, /不会向量化/);
+  assert.doesNotMatch(project, /32,000/);
+  assert.doesNotMatch(project, /暂无会话文件/);
+
+  const knowledge = render("knowledge_base");
+  assert.match(knowledge, /上传后用 @文件 引用/);
+  assert.match(knowledge, /不会写入知识芯片/);
+  assert.doesNotMatch(knowledge, /项目文件直接用 @路径/);
+
+  const independent = render("independent");
+  assert.match(independent, /上传后用 @文件 引用/);
+  assert.doesNotMatch(independent, /项目文件直接用 @路径/);
+  assert.doesNotMatch(independent, /不会写入知识芯片/);
 });
 
 test("project Skills panel binds to the current project without global controls", () => {

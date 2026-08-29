@@ -1,12 +1,11 @@
 import React from "react";
-import { ArrowClockwise, ArrowSquareOut, Books, CalendarCheck, Check, ClockCountdown, Copy, DownloadSimple, File, FolderOpen, House, MagnifyingGlass, Note, Plus, Robot, Sparkle, Trash, TreeStructure, UploadSimple, WarningCircle } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowSquareOut, Books, CalendarCheck, Check, ClockCountdown, Copy, DownloadSimple, File, FolderOpen, House, LockSimple, MagnifyingGlass, Note, Plus, Robot, Sparkle, Trash, TreeStructure, UploadSimple, WarningCircle } from "@phosphor-icons/react";
 import { CyberSelect } from "./CyberSelect.js";
 import { cpwbApi } from "./api.js";
 import { getWorkbenchSession } from "./workbenchSessions.js";
 import { useHomeOpen } from "./ProjectHome.js";
 import { Todos } from "./Todos.js";
 import { ACCEPT, KnowledgeBase, formatBytes } from "./KnowledgeBase.js";
-import { Empty } from "./icons.js";
 import { Automation, filterSchedules, ScheduleDialog } from "./Automation.js";
 import {
   RAIL_STYLE_PROPS,
@@ -68,10 +67,10 @@ function SessionIdCopy({ sessionId }) {
 
 export const PROJECT_TOOL_TABS = Object.freeze([
   ["todos", "待办", CalendarCheck],
-  ["schedule", "定时任务", ClockCountdown],
   ["files", "会话文件", File],
-  ["knowledge", "关联知识芯片", Books],
   ["summary", "每日总结", Note],
+  ["schedule", "定时任务", ClockCountdown],
+  ["knowledge", "知识芯片", Books],
   ["skills", "Skills", Sparkle],
 ]);
 
@@ -281,25 +280,30 @@ export function SessionFilesPanel({ sessionId, state, store, scopeKind }) {
   };
 
   const scopeHint = scopeKind === "project"
-    ? "项目 Workspace 文件请在输入框使用原生 @路径；这里保存的是当前会话私有文件。"
+    ? "上传后用 @文件 引用，项目文件直接用 @路径"
     : scopeKind === "knowledge_base"
-      ? "知识芯片文档会参与向量检索；这里的会话文件只在显式 @引用时注入。"
-      : "文件持久保存在当前会话，后续可通过 @文件 再次引用。";
+      ? "上传后用 @文件 引用，不会写入知识芯片"
+      : "上传后用 @文件 引用";
 
   return React.createElement("div", { className: "cpwb-session-files" },
     React.createElement("div", { className: "cpwb-tool-head" },
-      React.createElement("span", null, "SESSION FILE VAULT"),
-      React.createElement("button", {
-        type: "button",
-        className: "cpwb-icon-button",
-        onClick: () => store.actions.loadSessionFiles?.(sessionId),
-        title: "刷新会话文件",
-        "aria-label": "刷新会话文件",
-      }, React.createElement(ArrowClockwise, { size: 14, "aria-hidden": true }))),
-    React.createElement("div", { className: "cpwb-session-file-policy" },
-      React.createElement("strong", null, "直接注入当前轮上下文"),
-      React.createElement("span", null, "不会向量化 · 单轮合计最多 32,000 字符"),
-      React.createElement("small", null, scopeHint)),
+      React.createElement("div", { className: "cpwb-tool-heading" },
+        React.createElement("span", null, "私有存储"),
+        React.createElement("h3", null, "会话文件")),
+      React.createElement("div", { className: "cpwb-tool-head-actions" },
+        React.createElement("code", null, String(files.length).padStart(2, "0")),
+        React.createElement("button", {
+          type: "button",
+          className: "cpwb-icon-button",
+          onClick: () => store.actions.loadSessionFiles?.(sessionId),
+          title: "刷新会话文件",
+          "aria-label": "刷新会话文件",
+        }, React.createElement(ArrowClockwise, { size: 14, "aria-hidden": true })))),
+    React.createElement("div", { className: "cpwb-session-file-scope" },
+      React.createElement(LockSimple, { size: 15, weight: "regular", "aria-hidden": true }),
+      React.createElement("div", null,
+        React.createElement("strong", null, "仅当前会话"),
+        React.createElement("small", null, scopeHint))),
     React.createElement("label", {
       className: "cpwb-drop" + (dragActive ? " cpwb-drop-active" : ""),
       onDrop,
@@ -315,12 +319,11 @@ export function SessionFilesPanel({ sessionId, state, store, scopeKind }) {
       onChange: function (event) { upload(event.target.files); event.target.value = ""; },
     }),
     React.createElement(UploadSimple, { size: 20, "aria-hidden": true }),
-    React.createElement("strong", null, uploading ? "正在保存与解析…" : "选择文件或拖拽到这里"),
-    React.createElement("small", null, "支持知识芯片相同格式 · 单文件最大 50 MB")),
+    React.createElement("strong", null, uploading ? "正在保存与解析…" : "上传会话文件"),
+    React.createElement("small", null, "点击或拖拽 · 单文件最大 50 MB")),
     error ? React.createElement("div", { className: "cpwb-error-msg", role: "alert" }, error) : null,
-    files.length === 0
-      ? React.createElement(Empty, { glyph: React.createElement(File, { size: 18, "aria-hidden": true }) }, "暂无会话文件")
-      : React.createElement("div", { className: "cpwb-list cpwb-session-document-list" }, files.map(function (file) {
+    files.length > 0
+      ? React.createElement("div", { className: "cpwb-list cpwb-session-document-list" }, files.map(function (file) {
           return React.createElement(
             "article",
             { key: file.id, className: "cpwb-item cpwb-session-document" },
@@ -333,7 +336,8 @@ export function SessionFilesPanel({ sessionId, state, store, scopeKind }) {
               React.createElement("a", { className: "cpwb-icon-button", href: cpwbApi.sessionFiles.contentUrl(file.id, { download: true }), download: file.originalName, title: "下载原始文件", "aria-label": "下载原始文件 " + file.originalName }, React.createElement(DownloadSimple, { size: 14, "aria-hidden": true })),
               React.createElement("button", { type: "button", className: "cpwb-icon-button cpwb-danger-icon", onClick: () => store.actions.deleteSessionFile({ sessionId, id: file.id }).catch((cause) => setError(cause?.message || "删除失败")), title: "删除会话文件", "aria-label": "删除会话文件 " + file.originalName }, React.createElement(Trash, { size: 14, "aria-hidden": true }))),
           );
-        })),
+        }))
+      : null,
   );
 }
 
@@ -474,7 +478,7 @@ export function WorkbenchSessionShell(props) {
   const contextRail = function (drawer = false) {
     const railKind = projectId != null ? "PROJECT SYSTEM" : knowledgeBaseId != null ? "KNOWLEDGE SYSTEM" : "SESSION SYSTEM";
     const railName = projectId != null ? project?.name || "项目工作台" : knowledgeBaseId != null ? knowledgeBase?.name || "知识库" : entry?.title || "独立会话";
-    const railMeta = projectId != null ? "项目上下文 · " + String(projectId).padStart(2, "0") : knowledgeBaseId != null ? "知识库上下文 · " + String(knowledgeBaseId).padStart(2, "0") : "无容器归属 · GLOBAL";
+    const railMeta = projectId != null ? "项目工具舱 · " + String(projectId).padStart(2, "0") : knowledgeBaseId != null ? "知识库上下文 · " + String(knowledgeBaseId).padStart(2, "0") : "无容器归属 · GLOBAL";
     return React.createElement("aside", { className: "cpwb-project-rail" + (drawer ? " cpwb-project-rail-drawer" : ""), "aria-label": "上下文工具" },
       React.createElement("header", { className: "cpwb-project-rail-header" },
         React.createElement("span", null, railKind),
@@ -493,7 +497,8 @@ export function WorkbenchSessionShell(props) {
         "aria-selected": effectiveActiveTool === id,
         "aria-controls": tabPanelId,
         "aria-current": effectiveActiveTool === id ? "page" : undefined,
-        title: label,
+        "aria-label": label,
+        "data-tooltip": label,
       }, React.createElement(IconComponent, { size: 18, weight: "regular", "aria-hidden": true }), React.createElement("span", null, label)))),
       React.createElement("div", { id: tabPanelId, className: "cpwb-project-tool-body", role: "tabpanel", "aria-label": effectiveActiveTool, "aria-labelledby": tabIdFor(effectiveActiveTool) }, body));
   };

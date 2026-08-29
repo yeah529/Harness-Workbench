@@ -101,7 +101,9 @@ test("File Vault resolves only explicit current-session markers and enforces the
   });
   await assert.rejects(
     vault.resolveReferences({ sessionId, text: "@文件/huge.txt" }),
-    (error) => error instanceof SessionFileError && error.code === "SESSION_FILE_CONTEXT_TOO_LARGE",
+    (error) => error instanceof SessionFileError
+      && error.code === "SESSION_FILE_CONTEXT_TOO_LARGE"
+      && error.message === "引用内容超过 32,000 字符，请减少文件或拆分发送。",
   );
 });
 

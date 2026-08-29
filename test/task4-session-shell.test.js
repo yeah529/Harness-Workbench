@@ -149,10 +149,10 @@ test("mobile shell hides the docked sidebar and exposes one accessible navigatio
 test("project rail contains only the approved project-owned tools", () => {
   assert.deepEqual(PROJECT_TOOL_TABS.map(([id, label]) => [id, label]), [
     ["todos", "待办"],
-    ["schedule", "定时任务"],
     ["files", "会话文件"],
-    ["knowledge", "关联知识芯片"],
     ["summary", "每日总结"],
+    ["schedule", "定时任务"],
+    ["knowledge", "知识芯片"],
     ["skills", "Skills"],
   ]);
   assert.equal(PROJECT_TOOL_TABS.some(([, label]) => label === "任务" || label === "计划"), false);

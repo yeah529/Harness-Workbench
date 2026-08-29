@@ -221,6 +221,8 @@ test("summary generation uses a quiet pulse rail and keeps failure feedback expl
     view: "summary",
   }));
   assert.match(running, /cpwb-generation-wave/);
+  assert.match(running, /项目日志/);
+  assert.match(running, /<details class="cpwb-summary-entry/);
   assert.match(running, /aria-label="正在生成每日总结"/);
   assert.doesNotMatch(running, /执行中|生成中|已完成/);
   assert.match(running, /aria-label="下载 2026-08-22 每日总结"/);

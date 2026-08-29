@@ -161,7 +161,7 @@ export function createSessionFileVault({ dataDir, repos }) {
     if (codePoints > MAX_SESSION_FILE_CONTEXT_CODE_POINTS) {
       throw new SessionFileError(
         SESSION_FILE_ERROR_CODES.CONTEXT_TOO_LARGE,
-        `session file context exceeds ${MAX_SESSION_FILE_CONTEXT_CODE_POINTS} code points`,
+        "引用内容超过 32,000 字符，请减少文件或拆分发送。",
       );
     }
     return { files, text: buildFileContext(files), codePoints };
